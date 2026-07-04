@@ -400,6 +400,47 @@ class LLMChain:
         ]
         return "\n".join(lines)
 
+    def analyze(self, data):
+        prompt = self._prompt(data)
+        slot = self._slot()
+
+        rotation = {
+            0: [("Groq",    lambda p: self._groq(p)),
+                ("NVIDIA",  lambda p: self._nvidia_nim(p, fast=True)),
+                ("Mistral", lambda p: self._mistral(p)),
+                ("Gemini",  lambda p: self._gemini(p))],
+            1: [("Mistral", lambda p: self._mistral(p)),
+                ("Groq",    lambda p: self._groq(p)),
+                ("NVIDIA",  lambda p: self._nvidia_nim(p, fast=True)),
+                ("Gemini",  lambda p: self._gemini(p))],
+            2: [("NVIDIA",  lambda p: self._nvidia_nim(p, fast=True)),
+                ("Groq",    lambda p: self._groq(p)),
+                ("Mistral", lambda p: self._mistral(p)),
+                ("Gemini",  lambda p: self._gemini(p))],
+            3: [("NVIDIA",  lambda p: self._nvidia_nim(p, fast=True)),
+                ("Mistral", lambda p: self._mistral(p)),
+                ("Groq",    lambda p: self._groq(p)),
+                ("Gemini",  lambda p: self._gemini(p))],
+        }
+
+        for name, fn in rotation.get(slot, rotation[0]):
+            if not _cb.is_up(name):
+                log.info("  ⏭️  [%s] circuit open — skip", name)
+                continue
+            try:
+                result = fn(prompt)
+                if result and len(result.strip()) > 30:
+                    _cb.ok(name)
+                    log.info("  Agent [%s] OK", name)
+                    return result.strip(), name
+                _cb.fail(name)
+            except Exception as e:
+                log.warning("  Agent [%s] lỗi: %s", name, e)
+                _cb.fail(name)
+
+        log.warning("⚠️ Tất cả LLM lỗi hoặc circuit open, fallback sang Rule Base Engine")
+        return self._rule(data), "Rule-based"
+
     def run(self, data):
         log.info("🤖 Multi-Agent Pipeline bắt đầu...")
 
