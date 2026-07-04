@@ -1,0 +1,6 @@
+{
+  "name": "Trading Bot Dashboard with Orderbook & Liquidity",
+  "description": "Real-time copy-trading dashboard featuring L2 Orderbook analysis, Liquidity Sweep detection, 12 AI Agent pipelines, and BingX futures controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
