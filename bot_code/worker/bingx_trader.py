@@ -27,6 +27,18 @@ class BingXExchange:
         if params is None:
             params = {}
         
+        # Tránh gửi request và log spam nếu API Key/Secret trống, bị thiếu hoặc là mock key
+        if not self.api_key or not self.api_secret:
+            return {"code": -1, "msg": "API key or secret is empty", "data": {}}
+        
+        api_key_lower = str(self.api_key).lower()
+        api_secret_lower = str(self.api_secret).lower()
+        if (api_key_lower.startswith("mock") or 
+            api_secret_lower.startswith("mock") or 
+            "your_" in api_key_lower or 
+            "your_" in api_secret_lower):
+            return {"code": -1, "msg": "Mock API key/secret detected", "data": {}}
+
         params["apiKey"]    = self.api_key
         params["timestamp"] = int(time.time() * 1000)
         params["sign"]      = self._sign(params)
@@ -41,7 +53,9 @@ class BingXExchange:
             if method.upper() == "GET":
                 r = requests.get(url, params=params, headers=headers, timeout=10)
             else:
-                r = requests.post(url, json=params, headers=headers, timeout=10)
+                # Đối với API BingX Perpetual Swap, các tham số POST (như đặt lệnh, leverage...)
+                # cũng cần được truyền dưới dạng query parameters (params=params) để khớp chữ ký
+                r = requests.post(url, params=params, headers=headers, timeout=10)
             
             r.raise_for_status()
             res = r.json()

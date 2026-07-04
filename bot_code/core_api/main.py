@@ -651,12 +651,32 @@ async def _trade_worker_async():
     while True:
         r = None
         try:
-            r = await aioredis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=10)
+            # Dung cac thong so socket_timeout va socket_keepalive de tranh timeout ngat ket noi voi Upstash/Redis
+            r = await aioredis.from_url(
+                REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=10,
+                socket_timeout=15,
+                socket_keepalive=True,
+                retry_on_timeout=True
+            )
             await r.ping()
             log.info("Worker Redis OK")
             retry = 0
             while True:
-                msg = await r.blpop("TRADE_SIGNALS", timeout=30)
+                try:
+                    # Giam timeout blpop xuong 2 giay de giu cho socket luon hoat dong va tranh socket read timeout (5s)
+                    msg = await r.blpop("TRADE_SIGNALS", timeout=2)
+                except (redis.exceptions.TimeoutError, asyncio.TimeoutError):
+                    # Khi bi timeout doc, kiem tra ket noi bang cach ping, neu ping OK thi tiep tuc, neu loi thi break de reconnect
+                    try:
+                        await r.ping()
+                        continue
+                    except Exception:
+                        break
+                except (redis.exceptions.ConnectionError, redis.exceptions.RedisError):
+                    break
+
                 if not msg:
                     continue
                 _, data_str = msg
