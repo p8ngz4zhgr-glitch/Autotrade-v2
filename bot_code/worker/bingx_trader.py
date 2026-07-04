@@ -39,7 +39,6 @@ class BingXExchange:
             "your_" in api_secret_lower):
             return {"code": -1, "msg": "Mock API key/secret detected", "data": {}}
 
-        params["apiKey"]    = self.api_key
         params["timestamp"] = int(time.time() * 1000)
         
         # Sắp xếp alphabet các tham số và tạo query string
@@ -47,14 +46,10 @@ class BingXExchange:
         query_string = urllib.parse.urlencode(sorted_items)
         
         # Tính toán chữ ký dựa trên query string đã sắp xếp
-        signature = hmac.new(
-            self.api_secret.encode("utf-8"),
-            query_string.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        signature = self._sign(params)
 
         # Tạo URL đầy đủ chứa query string và chữ ký đã khớp hoàn hảo thứ tự
-        full_url = f"{self.BASE_URL}{path}?{query_string}&sign={signature}"
+        full_url = f"{self.BASE_URL}{path}?{query_string}&signature={signature}"
 
         headers = {
             "X-BX-APIKEY": self.api_key,
