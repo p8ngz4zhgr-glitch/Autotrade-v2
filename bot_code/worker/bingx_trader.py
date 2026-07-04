@@ -12,8 +12,8 @@ class BingXExchange:
     BASE_URL = "https://open-api.bingx.com"
 
     def __init__(self, api_key: str, api_secret: str):
-        self.api_key    = api_key
-        self.api_secret = api_secret
+        self.api_key    = str(api_key).strip() if api_key else ""
+        self.api_secret = str(api_secret).strip() if api_secret else ""
 
     def _sign(self, params: dict) -> str:
         query_string = urllib.parse.urlencode(sorted(params.items()))
@@ -31,8 +31,8 @@ class BingXExchange:
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
         
-        api_key_lower = str(self.api_key).lower()
-        api_secret_lower = str(self.api_secret).lower()
+        api_key_lower = self.api_key.lower()
+        api_secret_lower = self.api_secret.lower()
         if (api_key_lower.startswith("mock") or 
             api_secret_lower.startswith("mock") or 
             "your_" in api_key_lower or 
@@ -41,21 +41,31 @@ class BingXExchange:
 
         params["apiKey"]    = self.api_key
         params["timestamp"] = int(time.time() * 1000)
-        params["sign"]      = self._sign(params)
+        
+        # Sắp xếp alphabet các tham số và tạo query string
+        sorted_items = sorted(params.items())
+        query_string = urllib.parse.urlencode(sorted_items)
+        
+        # Tính toán chữ ký dựa trên query string đã sắp xếp
+        signature = hmac.new(
+            self.api_secret.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        # Tạo URL đầy đủ chứa query string và chữ ký đã khớp hoàn hảo thứ tự
+        full_url = f"{self.BASE_URL}{path}?{query_string}&sign={signature}"
 
         headers = {
             "X-BX-APIKEY": self.api_key,
             "Content-Type": "application/json"
         }
 
-        url = f"{self.BASE_URL}{path}"
         try:
             if method.upper() == "GET":
-                r = requests.get(url, params=params, headers=headers, timeout=10)
+                r = requests.get(full_url, headers=headers, timeout=10)
             else:
-                # Đối với API BingX Perpetual Swap, các tham số POST (như đặt lệnh, leverage...)
-                # cũng cần được truyền dưới dạng query parameters (params=params) để khớp chữ ký
-                r = requests.post(url, params=params, headers=headers, timeout=10)
+                r = requests.post(full_url, headers=headers, timeout=10)
             
             r.raise_for_status()
             res = r.json()
