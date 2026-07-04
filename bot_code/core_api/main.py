@@ -1002,7 +1002,7 @@ def register_user(data: UserRegister, db: Session = Depends(get_db)):
         bx      = BingXExchange(data.api_key, data.api_secret)
         capital = bx.get_balance()
         if capital <= 0:
-            price = bx.get_latest_price("BTCUSDT")
+            price = bx.get_latest_price("BTC-USDT")
             if price <= 0:
                 raise HTTPException(400, "API Key không hợp lệ hoặc không kết nối được BingX")
             capital = float(os.getenv("DEFAULT_CAPITAL", "100"))

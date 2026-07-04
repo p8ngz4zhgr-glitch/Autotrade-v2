@@ -27,6 +27,15 @@ class BingXExchange:
         if params is None:
             params = {}
         
+        # Tự động định dạng Symbol thành chuẩn BingX (có dấu gạch ngang, ví dụ: BTC-USDT)
+        if "symbol" in params and params["symbol"]:
+            sym = str(params["symbol"]).strip().upper()
+            if "-" not in sym:
+                if sym.endswith("USDT"):
+                    params["symbol"] = sym[:-4] + "-USDT"
+                elif sym.endswith("USDC"):
+                    params["symbol"] = sym[:-4] + "-USDC"
+
         # Tránh gửi request và log spam nếu API Key/Secret trống, bị thiếu hoặc là mock key
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
@@ -64,6 +73,9 @@ class BingXExchange:
             
             r.raise_for_status()
             res = r.json()
+            if not isinstance(res, dict):
+                log.warning("BingX API returned non-dict response: %s", res)
+                return {"code": -1, "msg": str(res), "data": {}}
             if res.get("code") != 0:
                 log.warning("BingX API returned non-zero code: %s", res)
             return res
@@ -107,8 +119,10 @@ class BingXExchange:
                 qty = float(p.get("positionAmt", 0))
                 if qty == 0:
                     continue
+                sym = p.get("symbol", "")
+                normalized_sym = sym.replace("-", "") if sym else ""
                 positions.append({
-                    "symbol": p.get("symbol"),
+                    "symbol": normalized_sym,
                     "direction": "LONG" if qty > 0 else "SHORT",
                     "entry": float(p.get("entryPrice", 0)),
                     "qty": abs(qty),
@@ -123,13 +137,14 @@ class BingXExchange:
         if res.get("code") == 0:
             for o in res.get("data", []):
                 sym = o.get("symbol")
-                if sym not in triggers:
-                    triggers[sym] = {}
+                normalized_sym = sym.replace("-", "") if sym else ""
+                if normalized_sym not in triggers:
+                    triggers[normalized_sym] = {}
                 otype = o.get("type", "")
                 if "STOP_MARKET" in otype or "STOP" in otype:
-                    triggers[sym]["sl"] = float(o.get("stopPrice", 0))
+                    triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
                 elif "TAKE_PROFIT" in otype or "LIMIT" in otype:
-                    triggers[sym]["tp2"] = float(o.get("price", 0))
+                    triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
         return triggers
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
