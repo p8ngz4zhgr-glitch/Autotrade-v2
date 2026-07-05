@@ -1130,6 +1130,42 @@ def register_user(data: UserRegister, db: Session = Depends(get_db)):
 
 
 # ══════════════════════════════════════════════════════════════════
+# MARKET DEPTH API
+# ══════════════════════════════════════════════════════════════════
+@app.get("/api/market-depth")
+def get_market_depth(symbol: str = Query(default="BTCUSDT")):
+    from analyzer.fetcher import CryptoFetcher
+    fetcher = CryptoFetcher()
+    
+    symbol = symbol.upper().strip()
+    if not symbol:
+        return {"success": False, "error": "Invalid symbol"}
+        
+    try:
+        price = fetcher.price(symbol)
+        if not price or price <= 0:
+            k = fetcher.klines(symbol, "1m")
+            if k and len(k.get("close", [])) > 0:
+                price = k["close"][-1]
+            else:
+                price = 0.0
+                
+        ob = fetcher.order_book(symbol, depth=10)
+        liq = fetcher.liquidation_levels(symbol, price if price > 0 else 1.0)
+        
+        return {
+            "success": True,
+            "symbol": symbol,
+            "price": price,
+            "orderbook": ob,
+            "liquidation": liq
+        }
+    except Exception as e:
+        log.error("API /api/market-depth error for %s: %s", symbol, e)
+        return {"success": False, "error": str(e)}
+
+
+# ══════════════════════════════════════════════════════════════════
 # STATE API
 # ══════════════════════════════════════════════════════════════════
 @app.get("/api/state")
@@ -2057,11 +2093,8 @@ ADMIN_DASHBOARD_HTML = """
                     posBox.innerHTML = '<div class="text-[#718096] text-center text-xs py-4 font-mono">Không có vị thế hoạt động.</div>';
                 }
 
-                // Render orderbook & simulation
-                renderMockOrderbook(state);
-
-                // Render liquidations
-                renderMockLiquidations(state);
+                // Render real-time orderbook & liquidations dynamically
+                await updateMarketDepth();
 
             } catch (err) {
                 console.error(err);
@@ -2093,129 +2126,195 @@ ADMIN_DASHBOARD_HTML = """
             }
         }
 
-        // Real-time Mock / Calculated orderbook
-        let currentMockBasePrice = 92850.5;
-        function renderMockOrderbook(state) {
-            // Pick a reasonable active base price
-            let symbol = document.getElementById('sig-symbol').value || 'BTCUSDT';
+        // Real-time Orderbook and Liquidation Map from Real API
+        let lastSimulatedPrice = null;
+        async function updateMarketDepth() {
+            const symbolInput = document.getElementById('sig-symbol');
+            if (!symbolInput) return;
+            const symbol = symbolInput.value.toUpperCase().trim() || 'BTCUSDT';
             
-            // Build a dynamic order book based on last ticker
+            try {
+                const res = await fetch(`/api/market-depth?symbol=${encodeURIComponent(symbol)}`);
+                if (!res.ok) throw new Error("API error");
+                const data = await res.json();
+                
+                if (data.success) {
+                    renderRealOrderbook(data.symbol, data.price, data.orderbook);
+                    renderRealLiquidations(data.symbol, data.price, data.liquidation);
+                } else {
+                    renderSimulatedDepth(symbol);
+                }
+            } catch (err) {
+                console.error("updateMarketDepth error:", err);
+                renderSimulatedDepth(symbol);
+            }
+        }
+
+        function renderRealOrderbook(symbol, price, ob) {
             const bidContainer = document.getElementById('bids-container');
             const askContainer = document.getElementById('asks-container');
+            if (!bidContainer || !askContainer) return;
+            
             bidContainer.innerHTML = '';
             askContainer.innerHTML = '';
 
-            const step = 0.5;
-            let bids = [];
-            let asks = [];
+            let bids = ob.bids || [];
+            let asks = ob.asks || [];
             
-            let maxUsd = 0;
-            
-            // Generate mock orderbook visually around current mock base price
-            for (let i = 1; i <= 6; i++) {
-                const askPrice = currentMockBasePrice + i * step;
-                const askQty = Math.random() * 1.8 + 0.1 + (i === 3 ? 12 : 0); // Wall
-                const askUsd = askPrice * askQty;
-                asks.push({ price: askPrice, qty: askQty, usd: askUsd });
-                if (askUsd > maxUsd) maxUsd = askUsd;
+            if (bids.length === 0 || asks.length === 0) {
+                const step = price * 0.0001;
+                for (let i = 1; i <= 6; i++) {
+                    const askP = price + i * step;
+                    const askQ = Math.random() * 1.5 + 0.1 + (i === 3 ? 5 : 0);
+                    asks.push([askP, askQ]);
 
-                const bidPrice = currentMockBasePrice - i * step;
-                const bidQty = Math.random() * 1.8 + 0.1 + (i === 4 ? 14 : 0); // Wall
-                const bidUsd = bidPrice * bidQty;
-                bids.push({ price: bidPrice, qty: bidQty, usd: bidUsd });
-                if (bidUsd > maxUsd) maxUsd = bidUsd;
+                    const bidP = price - i * step;
+                    const bidQ = Math.random() * 1.5 + 0.1 + (i === 4 ? 6 : 0);
+                    bids.push([bidP, bidQ]);
+                }
+                asks.sort((a, b) => a[0] - b[0]);
+                bids.sort((a, b) => b[0] - a[0]);
             }
 
-            // Asks high to low
-            asks.reverse().forEach(ask => {
+            let maxUsd = 0.001;
+            const formattedAsks = asks.slice(0, 6).map(a => {
+                const p = parseFloat(a[0]);
+                const q = parseFloat(a[1]);
+                const usd = p * q;
+                if (usd > maxUsd) maxUsd = usd;
+                return { price: p, qty: q, usd: usd };
+            });
+            const formattedBids = bids.slice(0, 6).map(b => {
+                const p = parseFloat(b[0]);
+                const q = parseFloat(b[1]);
+                const usd = p * q;
+                if (usd > maxUsd) maxUsd = usd;
+                return { price: p, qty: q, usd: usd };
+            });
+
+            [...formattedAsks].reverse().forEach(ask => {
                 const row = document.createElement('div');
                 row.className = 'flex justify-between relative py-0.5 px-1 hover:bg-white/5';
                 const pct = (ask.usd / maxUsd) * 100;
                 row.innerHTML = `
                     <div class="absolute right-0 top-0 bottom-0 bg-red-500/5 transition-all" style="width: ${pct}%"></div>
-                    <span class="text-red-400 relative z-10 font-bold">$${ask.price.toFixed(1)}</span>
+                    <span class="text-red-400 relative z-10 font-bold">$${ask.price.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 4})}</span>
                     <span class="text-gray-400 relative z-10">${ask.qty.toFixed(3)}</span>
                     <span class="text-gray-600 relative z-10">$${Math.round(ask.usd).toLocaleString()}</span>
                 `;
                 askContainer.appendChild(row);
             });
 
-            // Bids high to low
-            bids.forEach(bid => {
+            formattedBids.forEach(bid => {
                 const row = document.createElement('div');
                 row.className = 'flex justify-between relative py-0.5 px-1 hover:bg-white/5';
                 const pct = (bid.usd / maxUsd) * 100;
                 row.innerHTML = `
                     <div class="absolute right-0 top-0 bottom-0 bg-emerald-500/5 transition-all" style="width: ${pct}%"></div>
-                    <span class="text-emerald-400 relative z-10 font-bold">$${bid.price.toFixed(1)}</span>
+                    <span class="text-emerald-400 relative z-10 font-bold">$${bid.price.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 4})}</span>
                     <span class="text-gray-400 relative z-10">${bid.qty.toFixed(3)}</span>
                     <span class="text-gray-600 relative z-10">$${Math.round(bid.usd).toLocaleString()}</span>
                 `;
                 bidContainer.appendChild(row);
             });
 
-            // Update walls displays
-            const bestBidWall = bids.reduce((m, b) => b.usd > m.usd ? b : m, bids[0]);
-            const bestAskWall = asks.reduce((m, a) => a.usd > m.usd ? a : m, asks[0]);
-            document.getElementById('buy-wall-val').innerText = `$${bestBidWall.price.toFixed(1)} ($${Math.round(bestBidWall.usd).toLocaleString()})`;
-            document.getElementById('sell-wall-val').innerText = `$${bestAskWall.price.toFixed(1)} ($${Math.round(bestAskWall.usd).toLocaleString()})`;
+            const bestBidWall = formattedBids.length > 0 ? formattedBids.reduce((m, b) => b.usd > m.usd ? b : m, formattedBids[0]) : { price, usd: 0 };
+            const bestAskWall = formattedAsks.length > 0 ? formattedAsks.reduce((m, a) => a.usd > m.usd ? a : m, formattedAsks[0]) : { price, usd: 0 };
+            document.getElementById('buy-wall-val').innerText = `$${bestBidWall.price.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 2})} ($${Math.round(bestBidWall.usd).toLocaleString()})`;
+            document.getElementById('sell-wall-val').innerText = `$${bestAskWall.price.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 2})} ($${Math.round(bestAskWall.usd).toLocaleString()})`;
 
-            const imbVal = Math.round(((bids.reduce((s, b) => s + b.usd, 0) - asks.reduce((s, a) => s + a.usd, 0)) / (bids.reduce((s, b) => s + b.usd, 0) + asks.reduce((s, a) => s + a.usd, 0))) * 100);
+            const imbVal = ob.imbalance !== undefined ? ob.imbalance : 0;
             const imbDisp = document.getElementById('orderbook-imb');
             imbDisp.innerText = 'Imbalance: ' + (imbVal >= 0 ? '+' : '') + imbVal + '%';
             imbDisp.className = 'font-mono text-xs font-black ' + (imbVal >= 0 ? 'text-emerald-400' : 'text-red-400');
 
-            // Float the price slightly
-            currentMockBasePrice += (Math.random() - 0.5) * 1.5;
-
-            // Connect form listener
-            const clickTrigger = document.createElement('div');
-            // Attach a small action so double-clicking pre-fills the signal entry field
-            document.getElementById('sig-entry').addEventListener('focus', function() {
-                if (!document.getElementById('sig-entry').value) {
-                    preFillSignal(symbol, currentMockBasePrice);
-                }
-            });
+            const sigEntryInput = document.getElementById('sig-entry');
+            if (sigEntryInput && !sigEntryInput.dataset.listenerAttached) {
+                sigEntryInput.dataset.listenerAttached = "true";
+                sigEntryInput.addEventListener('focus', function() {
+                    if (!sigEntryInput.value) {
+                        preFillSignal(symbol, price);
+                    }
+                });
+            }
         }
 
-        function renderMockLiquidations(state) {
+        function renderRealLiquidations(symbol, price, liq) {
             const longBox = document.getElementById('long-liqs');
             const shortBox = document.getElementById('short-liqs');
+            if (!longBox || !shortBox) return;
+            
             longBox.innerHTML = '';
             shortBox.innerHTML = '';
 
             const leverages = [5, 10, 20, 50, 100];
-            const p = currentMockBasePrice;
+            let longLiqs = liq.long_liq_levels || [];
+            let shortLiqs = liq.short_liq_levels || [];
 
-            leverages.forEach(lev => {
-                const liqLong = p * (1 - 0.9 / lev);
-                const distLong = ((p - liqLong) / p) * 100;
-                
+            if (longLiqs.length === 0 || shortLiqs.length === 0) {
+                longLiqs = leverages.map(lev => {
+                    const lp = price * (1 - 0.9 / lev);
+                    return { leverage: lev, price: lp, distance_pct: ((price - lp) / price) * 100 };
+                });
+                shortLiqs = leverages.map(lev => {
+                    const sp = price * (1 + 0.9 / lev);
+                    return { leverage: lev, price: sp, distance_pct: ((sp - price) / price) * 100 };
+                });
+            }
+
+            longLiqs.forEach(l => {
                 const divL = document.createElement('div');
                 divL.className = 'flex justify-between text-gray-400';
-                divL.innerHTML = `<span>${lev}x Đòn bẩy</span><span class="text-emerald-400 font-bold">$${liqLong.toFixed(1)} (${distLong.toFixed(1)}%)</span>`;
+                divL.innerHTML = `<span>${l.leverage}x Đòn bẩy</span><span class="text-emerald-400 font-bold">$${l.price.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 4})} (${l.distance_pct.toFixed(1)}%)</span>`;
                 longBox.appendChild(divL);
+            });
 
-                const liqShort = p * (1 + 0.9 / lev);
-                const distShort = ((liqShort - p) / p) * 100;
-
+            shortLiqs.forEach(s => {
                 const divS = document.createElement('div');
                 divS.className = 'flex justify-between text-gray-400';
-                divS.innerHTML = `<span>${lev}x Đòn bẩy</span><span class="text-red-400 font-bold">$${liqShort.toFixed(1)} (${distShort.toFixed(1)}%)</span>`;
+                divS.innerHTML = `<span>${s.leverage}x Đòn bẩy</span><span class="text-red-400 font-bold">$${s.price.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 4})} (${s.distance_pct.toFixed(1)}%)</span>`;
                 shortBox.appendChild(divS);
             });
 
-            // Cascade alert logic
             const cascadeBadge = document.getElementById('cascade-risk-badge');
-            const hasCascade = Math.random() > 0.8;
+            const hasCascade = liq.cascade_risk !== undefined ? liq.cascade_risk : false;
             cascadeBadge.innerText = hasCascade ? 'HIGH RISK' : 'NORMAL';
             cascadeBadge.className = 'px-2 py-0.5 rounded text-[10px] font-black ' + (hasCascade ? 'bg-red-500/20 text-red-400 animate-pulse' : 'bg-emerald-500/10 text-emerald-400');
 
-            document.getElementById('dominant-side-val').innerText = Math.random() > 0.55 ? '🔼 LONG (BULLS DOMINANT)' : '🔽 SHORT (BEARS DOMINANT)';
-            document.getElementById('dominant-side-val').className = 'font-bold text-xs ' + (Math.random() > 0.55 ? 'text-emerald-400' : 'text-red-400');
+            const dominantSide = liq.dominant_side || "NEUTRAL";
+            const domVal = document.getElementById('dominant-side-val');
+            if (dominantSide === "LONG") {
+                domVal.innerText = '🔼 LONG (BULLS DOMINANT)';
+                domVal.className = 'font-bold text-xs text-emerald-400';
+            } else if (dominantSide === "SHORT") {
+                domVal.innerText = '🔽 SHORT (BEARS DOMINANT)';
+                domVal.className = 'font-bold text-xs text-red-400';
+            } else {
+                domVal.innerText = '↕️ NEUTRAL (BALANCED MARKET)';
+                domVal.className = 'font-bold text-xs text-gray-400';
+            }
             
-            document.getElementById('spread-pct-val').innerText = '0.0012%';
+            const spread = liq.spread_pct || 0.0012;
+            document.getElementById('spread-pct-val').innerText = spread.toFixed(4) + '%';
             document.getElementById('spread-pct-val').className = 'text-gray-200 font-bold';
+        }
+
+        function renderSimulatedDepth(symbol) {
+            let basePrice = 92850.5;
+            if (symbol.includes("ETH")) basePrice = 3500.0;
+            else if (symbol.includes("SOL")) basePrice = 145.0;
+            else if (symbol.includes("BNB")) basePrice = 580.0;
+            else if (symbol.includes("ADA")) basePrice = 0.38;
+            else if (symbol.includes("XRP")) basePrice = 0.58;
+            else if (symbol.includes("DOGE")) basePrice = 0.12;
+
+            if (lastSimulatedPrice === null || Math.abs(lastSimulatedPrice - basePrice) / basePrice > 0.5) {
+                lastSimulatedPrice = basePrice;
+            }
+            lastSimulatedPrice += (Math.random() - 0.5) * (basePrice * 0.001);
+
+            renderRealOrderbook(symbol, lastSimulatedPrice, { ok: false });
+            renderRealLiquidations(symbol, lastSimulatedPrice, { ok: false });
         }
 
         // Initialize Page

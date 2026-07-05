@@ -86,17 +86,23 @@ class BingXExchange:
     def get_balance(self) -> float:
         """Lấy số dư khả dụng (USDT) của tài khoản Futures VST/Standard/Perpetual"""
         res = self._request("GET", "/openApi/swap/v2/user/balance")
-        if res.get("code") == 0:
-            for item in res.get("data", {}).get("balance", []):
-                if item.get("asset") == "USDT":
-                    return float(item.get("balance", 0))
+        if isinstance(res, dict) and res.get("code") == 0:
+            data = res.get("data")
+            if isinstance(data, dict):
+                balances = data.get("balance", [])
+                if isinstance(balances, list):
+                    for item in balances:
+                        if isinstance(item, dict) and item.get("asset") == "USDT":
+                            return float(item.get("balance", 0))
         return 0.0
 
     def get_latest_price(self, symbol: str) -> float:
         """Lấy giá mới nhất của Symbol"""
         res = self._request("GET", "/openApi/swap/v1/ticker/price", {"symbol": symbol})
-        if res.get("code") == 0:
-            return float(res.get("data", {}).get("price", 0))
+        if isinstance(res, dict) and res.get("code") == 0:
+            data = res.get("data")
+            if isinstance(data, dict):
+                return float(data.get("price", 0))
         return 0.0
 
     def set_leverage(self, symbol: str, leverage: int, side: str = "LONG") -> dict:
@@ -114,37 +120,43 @@ class BingXExchange:
             params["symbol"] = symbol
         res = self._request("GET", "/openApi/swap/v2/user/positions", params)
         positions = []
-        if res.get("code") == 0:
-            for p in res.get("data", []):
-                qty = float(p.get("positionAmt", 0))
-                if qty == 0:
-                    continue
-                sym = p.get("symbol", "")
-                normalized_sym = sym.replace("-", "") if sym else ""
-                positions.append({
-                    "symbol": normalized_sym,
-                    "direction": "LONG" if qty > 0 else "SHORT",
-                    "entry": float(p.get("entryPrice", 0)),
-                    "qty": abs(qty),
-                    "pnl": float(p.get("unrealizedProfit", 0)),
-                })
+        if isinstance(res, dict) and res.get("code") == 0:
+            data = res.get("data")
+            if isinstance(data, list):
+                for p in data:
+                    if isinstance(p, dict):
+                        qty = float(p.get("positionAmt", 0))
+                        if qty == 0:
+                            continue
+                        sym = p.get("symbol", "")
+                        normalized_sym = sym.replace("-", "") if sym else ""
+                        positions.append({
+                            "symbol": normalized_sym,
+                            "direction": "LONG" if qty > 0 else "SHORT",
+                            "entry": float(p.get("entryPrice", 0)),
+                            "qty": abs(qty),
+                            "pnl": float(p.get("unrealizedProfit", 0)),
+                        })
         return positions
 
     def get_trigger_orders(self) -> dict:
         """Lấy danh sách các lệnh kích hoạt (SL/TP)"""
         res = self._request("GET", "/openApi/swap/v2/trade/openOrders")
         triggers = {}
-        if res.get("code") == 0:
-            for o in res.get("data", []):
-                sym = o.get("symbol")
-                normalized_sym = sym.replace("-", "") if sym else ""
-                if normalized_sym not in triggers:
-                    triggers[normalized_sym] = {}
-                otype = o.get("type", "")
-                if "STOP_MARKET" in otype or "STOP" in otype:
-                    triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
-                elif "TAKE_PROFIT" in otype or "LIMIT" in otype:
-                    triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
+        if isinstance(res, dict) and res.get("code") == 0:
+            data = res.get("data")
+            if isinstance(data, list):
+                for o in data:
+                    if isinstance(o, dict):
+                        sym = o.get("symbol")
+                        normalized_sym = sym.replace("-", "") if sym else ""
+                        if normalized_sym not in triggers:
+                            triggers[normalized_sym] = {}
+                        otype = o.get("type", "")
+                        if "STOP_MARKET" in otype or "STOP" in otype:
+                            triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
+                        elif "TAKE_PROFIT" in otype or "LIMIT" in otype:
+                            triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
         return triggers
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
