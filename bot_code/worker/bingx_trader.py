@@ -166,11 +166,13 @@ class BingXExchange:
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
         """Đặt lệnh Market + cài SL/TP đi kèm"""
+        position_side = "LONG" if side == "BUY" else "SHORT"
         params = {
             "symbol": symbol,
             "side": side,
             "type": "MARKET",
             "quantity": qty,
+            "positionSide": position_side,
         }
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         if res.get("code") == 0:
@@ -183,6 +185,7 @@ class BingXExchange:
 
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
         opposite_side = "SELL" if side == "BUY" else "BUY"
+        position_side = "LONG" if side == "BUY" else "SHORT"
         if sl_price > 0:
             self._request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": symbol,
@@ -190,6 +193,7 @@ class BingXExchange:
                 "type": "STOP_MARKET",
                 "stopPrice": sl_price,
                 "quantity": qty,
+                "positionSide": position_side,
                 "reduceOnly": True
             })
         if tp_price > 0:
@@ -199,6 +203,7 @@ class BingXExchange:
                 "type": "TAKE_PROFIT_MARKET",
                 "stopPrice": tp_price,
                 "quantity": qty,
+                "positionSide": position_side,
                 "reduceOnly": True
             })
 
@@ -216,6 +221,7 @@ class BingXExchange:
             "side": opposite_side,
             "type": "MARKET",
             "quantity": qty,
+            "positionSide": direction,
             "reduceOnly": True
         }
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
