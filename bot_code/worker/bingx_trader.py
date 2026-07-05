@@ -67,8 +67,12 @@ class BingXExchange:
 
         headers = {
             "X-BX-APIKEY": self.api_key,
-            "Content-Type": "application/json"
         }
+        
+        # [FIX]: BingX Swap V2 POST parameters được mã hóa trực tiếp trên URL.
+        # Khai báo x-www-form-urlencoded để tránh server ép parse dữ liệu JSON từ 1 body rỗng.
+        if method.upper() == "POST":
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
 
         try:
             if method.upper() == "GET":
@@ -186,6 +190,8 @@ class BingXExchange:
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
+        
+        # [FIX]: Xóa "reduceOnly": True khi dùng "positionSide"
         if sl_price > 0:
             self._request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": symbol,
@@ -193,8 +199,7 @@ class BingXExchange:
                 "type": "STOP_MARKET",
                 "stopPrice": sl_price,
                 "quantity": qty,
-                "positionSide": position_side,
-                "reduceOnly": True
+                "positionSide": position_side
             })
         if tp_price > 0:
             self._request("POST", "/openApi/swap/v2/trade/order", {
@@ -203,8 +208,7 @@ class BingXExchange:
                 "type": "TAKE_PROFIT_MARKET",
                 "stopPrice": tp_price,
                 "quantity": qty,
-                "positionSide": position_side,
-                "reduceOnly": True
+                "positionSide": position_side
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
@@ -216,13 +220,14 @@ class BingXExchange:
     def close_position(self, symbol: str, qty: float, direction: str) -> dict:
         """Đóng vị thế bằng lệnh ngược hướng"""
         opposite_side = "SELL" if direction == "LONG" else "BUY"
+        
+        # [FIX]: Xóa "reduceOnly": True khi dùng "positionSide"
         params = {
             "symbol": symbol,
             "side": opposite_side,
             "type": "MARKET",
             "quantity": qty,
-            "positionSide": direction,
-            "reduceOnly": True
+            "positionSide": direction
         }
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         if res.get("code") == 0:
