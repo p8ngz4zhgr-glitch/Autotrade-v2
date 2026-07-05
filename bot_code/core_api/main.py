@@ -492,8 +492,12 @@ def _tp1_monitor():
                     half_qty = round(qty * 0.5, 4)
                     remaining = round(qty - half_qty, 4)
                     
-                    pnl_pct = ((tp1 - entry) / entry * 100 if direction == "LONG"
-                               else (entry - tp1) / entry * 100)
+                    # FIX: Bảo vệ chia cho 0
+                    pnl_pct = 0.0
+                    if entry > 0:
+                        pnl_pct = ((tp1 - entry) / entry * 100 if direction == "LONG"
+                                   else (entry - tp1) / entry * 100)
+                                   
                     pnl_usd = user.capital * (user.max_risk_pct / 100) * pnl_pct / 100
 
                     _tg_send(
@@ -523,8 +527,6 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
     direction = pos["direction"]
     qty = float(pos.get("qty", 0))
     entry = float(pos.get("entry", 0))
-    if entry <= 0:
-        return
     
     now = time.time()
     if now - _LAST_REVERSAL_EVAL.get(sym, 0) < 180:
@@ -543,7 +545,11 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         if is_reversal and conf >= 70:
             bx = get_bx(user)
             in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
-            pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
+            
+            # FIX: Bảo vệ chia cho 0
+            pnl_pct = 0.0
+            if entry > 0:
+                pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
             
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
             emoji = "💰" if in_profit else "⚠️"
@@ -578,7 +584,11 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 if new_tp2 <= 0:
                     new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
                 
-                sl_pct = abs(new_entry - new_sl) / new_entry
+                # FIX: Bảo vệ chia cho 0
+                sl_pct = 0.0
+                if new_entry > 0:
+                    sl_pct = abs(new_entry - new_sl) / new_entry
+                    
                 if sl_pct >= 0.001:
                     risk_amt = user.capital * (user.max_risk_pct / 100)
                     new_qty = round(risk_amt / (new_entry * sl_pct), 4)
@@ -597,7 +607,6 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             )
     except Exception as e:
         log.warning("Evaluate reversal for %s %s error: %s", user.telegram_id, sym, e)
-
 
 # ══════════════════════════════════════════════════════════════════
 # SYNC POSITIONS & BALANCE
@@ -928,8 +937,15 @@ def _execute_for_user(user: User, signal: dict):
         tp2   = float(signal["plan"].get("tp2", 0))
         if tp2 <= 0:
             tp2 = round(tp1 + abs(tp1 - entry), 4)
-
-        sl_pct = abs(entry - sl) / entry
+            
+        # FIX: Bảo vệ chia cho 0
+        sl_pct = 0.0
+        if entry > 0:
+            sl_pct = abs(entry - sl) / entry
+        else:
+            log.warning("Lỗi tín hiệu entry=0: Bỏ qua")
+            return
+            
         if sl_pct < 0.001:
             log.warning("SL qua gan entry (%.4f%%) - bo qua", sl_pct * 100)
             return
@@ -966,7 +982,6 @@ def _execute_for_user(user: User, signal: dict):
 
     except Exception as e:
         log.error("_execute_for_user %s: %s", user.telegram_id, e)
-
 
 def run_trade_worker():
     asyncio.run(_trade_worker_async())
