@@ -654,8 +654,18 @@ def sync_bingx_positions():
                         tp2  = trig.get("tp2", p.get("entry", 0) * (1.05 if p.get("direction") == "LONG" else 0.95))
                         tp1  = p.get("entry", 0) * (1.025 if p.get("direction", "LONG") == "LONG" else 0.975)
                         pnl  = p.get("pnl", 0)
-                        margin = user.capital * (user.max_risk_pct / 100)
-                        pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
+                        
+                        # Fix: Sử dụng pnl_pct trực tiếp từ API thay vì tính toán sai
+                        pct = p.get("pnl_pct", 0)
+                        if pct == 0 and cur > 0 and p.get("entry", 0) > 0:
+                            entry_p = p.get("entry", 0)
+                            if p.get("direction", "LONG") == "LONG":
+                                raw_pct = (cur - entry_p) / entry_p
+                            else:
+                                raw_pct = (entry_p - cur) / entry_p
+                            pct = round(raw_pct * user.leverage * 100, 2)
+                        else:
+                            pct = round(pct, 2)
 
                         pos_key = f"{tid}_{sym}_{p.get('direction', 'LONG')}"
                         current_map[pos_key] = {
@@ -1163,7 +1173,8 @@ def register_user(data: UserRegister, db: Session = Depends(get_db)):
             price = bx.get_latest_price("BTC-USDT")
             if price <= 0:
                 raise HTTPException(400, "API Key không hợp lệ hoặc không kết nối được BingX")
-            capital = float(os.getenv("DEFAULT_CAPITAL", "100"))
+            # Bỏ cơ chế gán 100$, báo lỗi nếu tài khoản thực sự trống tiền
+            raise HTTPException(400, "API Key hợp lệ nhưng số dư USDT bằng 0. Vui lòng nạp tiền vào tài khoản Futures!")
     except HTTPException:
         raise
     except Exception as e:
