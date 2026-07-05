@@ -550,6 +550,11 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             
             res = bx.close_position(sym, qty, direction)
             if res.get("ok"):
+                if redis_client:
+                    try:
+                        redis_client.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
+                    except Exception:
+                        pass
                 _tg_send(
                     REGISTER_TOKEN, user.telegram_id,
                     f"{emoji} <b>{action_type} (REVERSAL): {sym}</b>\n\n"
@@ -654,6 +659,7 @@ def sync_bingx_positions():
                         current_map[pos_key] = {
                             "direction": p.get("direction", "LONG"), "pct": pct,
                             "qty": p.get("qty", 0), "user_id": tid,
+                            "entry": p.get("entry", 0), "sl": sl, "tp2": tp2,
                         }
                         current_all.append({
                             "user_id": tid, "tier": user.tier, "capital": user.capital,
@@ -670,7 +676,52 @@ def sync_bingx_positions():
                 if k not in current_map:
                     parts = k.split("_", 2)
                     if len(parts) == 3:
-                        _save_journal(parts[0], parts[1], parts[2], v.get("pct", 0), v.get("qty", 0))
+                        user_id, symbol, direction = parts[0], parts[1], parts[2]
+                        pnl_pct = v.get("pct", 0)
+                        qty = v.get("qty", 0)
+                        entry = v.get("entry", 0)
+                        sl = v.get("sl", 0)
+                        tp2 = v.get("tp2", 0)
+
+                        _save_journal(user_id, symbol, direction, pnl_pct, qty)
+
+                        # Check if this close was already notified by reversal
+                        was_reversal = False
+                        if redis_client:
+                            try:
+                                rev_key = f"REVERSAL_CLOSED:{user_id}:{symbol}:{direction}"
+                                if redis_client.get(rev_key):
+                                    was_reversal = True
+                                    redis_client.delete(rev_key)
+                            except Exception:
+                                pass
+
+                        if not was_reversal:
+                            # Send Telegram notification for Closed Position!
+                            # Determine if it hit SL, TP2, or was closed manually
+                            outcome_emoji = "🏆" if pnl_pct > 0 else "🛑"
+                            outcome_text = "CHỐT LỜI THÀNH CÔNG (TP2)" if pnl_pct > 0 else "DỪNG LỖ (SL)"
+                            if abs(pnl_pct) < 0.1:
+                                outcome_emoji = "🛡️"
+                                outcome_text = "HOÀ VỐN / ĐÓNG THỦ CÔNG"
+
+                            pnl_usd = 0
+                            try:
+                                user_db = db.query(User).filter(User.telegram_id == user_id).first()
+                                if user_db:
+                                    pnl_usd = user_db.capital * (user_db.max_risk_pct / 100) * pnl_pct / 100
+                            except Exception as e:
+                                log.error("Error getting user_db for closing notification: %s", e)
+
+                            _tg_send(
+                                REGISTER_TOKEN, user_id,
+                                f"{outcome_emoji} <b>VỊ THẾ ĐÃ ĐÓNG: {symbol}</b>\n\n"
+                                f"📈 Hướng: <b>{direction}</b>\n"
+                                f"💰 Khối lượng: {qty:.4f} {symbol}\n"
+                                f"📊 PnL: <b>{pnl_pct:+.2f}% ({'+' if pnl_usd >= 0 else ''}${pnl_usd:.2f})</b>\n"
+                                f"🛑 SL cũ: <code>${sl:.4f}</code> | 🏆 Target: <code>${tp2:.4f}</code>\n"
+                                f"🎯 Kết quả: <b>{outcome_text}</b>"
+                            )
 
             sync_bingx_positions._prev = current_map
 
