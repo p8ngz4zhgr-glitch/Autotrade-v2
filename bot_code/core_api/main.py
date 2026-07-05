@@ -82,7 +82,7 @@ def apply_tier(user: User, tier: str):
 # ══════════════════════════════════════════════════════════════════
 REDIS_URL       = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "admin123")
-RENDER_URL      = os.getenv("RENDER_EXTERNAL_URL", "")
+RENDER_URL      = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
 ADMIN_CHAT_ID   = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 REPORT_TOKEN    = os.getenv("TELEGRAM_REPORT_TOKEN", "")
 REGISTER_TOKEN  = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
@@ -625,28 +625,39 @@ def sync_bingx_positions():
                     positions = bx.get_open_positions()
                     triggers  = bx.get_trigger_orders()
 
+                    if not isinstance(positions, list):
+                        positions = []
+                    if not isinstance(triggers, dict):
+                        triggers = {}
+
                     for p in positions:
-                        sym  = p["symbol"]
-                        cur  = bx.get_latest_price(sym) or p["entry"]
+                        if not isinstance(p, dict):
+                            continue
+                        sym  = p.get("symbol", "")
+                        if not sym:
+                            continue
+                        cur  = bx.get_latest_price(sym) or p.get("entry", 0)
                         
                         # Evaluate for reversal / early close / lock profit
                         evaluate_reversal_for_position(user, p, cur, db)
                         trig = triggers.get(sym, {})
-                        sl   = trig.get("sl",  p["entry"] * (0.98 if p["direction"] == "LONG" else 1.02))
-                        tp2  = trig.get("tp2", p["entry"] * (1.05 if p["direction"] == "LONG" else 0.95))
-                        tp1  = p["entry"] * (1.025 if p["direction"] == "LONG" else 0.975)
-                        pnl  = p["pnl"]
+                        if not isinstance(trig, dict):
+                            trig = {}
+                        sl   = trig.get("sl",  p.get("entry", 0) * (0.98 if p.get("direction") == "LONG" else 1.02))
+                        tp2  = trig.get("tp2", p.get("entry", 0) * (1.05 if p.get("direction") == "LONG" else 0.95))
+                        tp1  = p.get("entry", 0) * (1.025 if p.get("direction", "LONG") == "LONG" else 0.975)
+                        pnl  = p.get("pnl", 0)
                         margin = user.capital * (user.max_risk_pct / 100)
                         pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
 
-                        pos_key = f"{tid}_{sym}_{p['direction']}"
+                        pos_key = f"{tid}_{sym}_{p.get('direction', 'LONG')}"
                         current_map[pos_key] = {
-                            "direction": p["direction"], "pct": pct,
+                            "direction": p.get("direction", "LONG"), "pct": pct,
                             "qty": p.get("qty", 0), "user_id": tid,
                         }
                         current_all.append({
                             "user_id": tid, "tier": user.tier, "capital": user.capital,
-                            "symbol": sym, "direction": p["direction"], "entry": p["entry"],
+                            "symbol": sym, "direction": p.get("direction", "LONG"), "entry": p.get("entry", 0),
                             "current_price": cur, "pnl": pnl, "pnl_pct": pct,
                             "qty": p.get("qty", 0), "sl": sl, "tp1": tp1, "tp2": tp2,
                         })
@@ -905,6 +916,20 @@ def run_signal_bot():
         log.error("SignalBot crash: %s", e)
 
 
+def _register_telegram_webhook():
+    if REGISTER_TOKEN and RENDER_URL:
+        try:
+            url = f"{TG_BASE}/bot{REGISTER_TOKEN}/setWebhook"
+            webhook_url = f"{RENDER_URL}/telegram/webhook"
+            r = _req.get(url, params={"url": webhook_url}, timeout=10)
+            if r.status_code == 200:
+                log.info("✅ Auto register Telegram Webhook success: %s", webhook_url)
+            else:
+                log.warning("⚠️ Failed to register Telegram Webhook: %s", r.text)
+        except Exception as e:
+            log.warning("⚠️ Error registering Telegram Webhook: %s", e)
+
+
 @app.on_event("startup")
 async def startup_event():
     threading.Thread(target=run_signal_bot,         daemon=True, name="signal-bot").start()
@@ -912,6 +937,7 @@ async def startup_event():
     threading.Thread(target=sync_bingx_positions,   daemon=True, name="pos-sync").start()
     threading.Thread(target=_tp1_monitor,           daemon=True, name="tp1-monitor").start()
     threading.Thread(target=_schedule_weekly_report, daemon=True, name="report-bot").start()
+    threading.Thread(target=_register_telegram_webhook, daemon=True, name="webhook-register").start()
     threading.Thread(target=lambda: [time.sleep(600) or gc.collect() for _ in iter(int, 1)],
                      daemon=True, name="gc").start()
     log.info("Tat ca threads khoi dong")
@@ -1724,8 +1750,24 @@ ADMIN_DASHBOARD_HTML = """
                     <form id="signal-form" class="space-y-3 font-mono text-xs">
                         <div>
                             <label class="text-[10px] text-[#718096] font-bold block uppercase mb-1">Cặp Giao Dịch</label>
-                            <input type="text" id="sig-symbol" required value="BTCUSDT"
-                                   class="w-full bg-[#040811] border border-[#1b263e] rounded p-2 text-xs">
+                            <div class="grid grid-cols-3 gap-2">
+                                <select id="sig-symbol-select" onchange="document.getElementById('sig-symbol').value = this.value; updateMarketDepth();"
+                                        class="col-span-2 bg-[#040811] border border-[#1b263e] rounded p-2 text-xs text-emerald-400 font-bold">
+                                    <option value="BTCUSDT" selected>BTCUSDT (Bitcoin)</option>
+                                    <option value="ETHUSDT">ETHUSDT (Ethereum)</option>
+                                    <option value="BNBUSDT">BNBUSDT (Binance Coin)</option>
+                                    <option value="SOLUSDT">SOLUSDT (Solana)</option>
+                                    <option value="HYPEUSDT">HYPEUSDT (Hyperliquid)</option>
+                                    <option value="XAUUSD">XAUUSD (Gold)</option>
+                                    <option value="TSLA">TSLA (Tesla)</option>
+                                    <option value="NVDA">NVDA (Nvidia)</option>
+                                    <option value="SPY">SPY (S&P 500)</option>
+                                    <option value="QQQ">QQQ (Nasdaq 100)</option>
+                                    <option value="">Khác (Tùy chọn)...</option>
+                                </select>
+                                <input type="text" id="sig-symbol" required value="BTCUSDT" oninput="updateMarketDepth();"
+                                       class="col-span-1 bg-[#040811] border border-[#1b263e] rounded p-2 text-xs uppercase text-center text-gray-200" placeholder="Symbol">
+                            </div>
                         </div>
 
                         <div class="grid grid-cols-2 gap-2">
@@ -2112,6 +2154,20 @@ ADMIN_DASHBOARD_HTML = """
         // Pre-fill active asset price data to helper fields in Signal form
         function preFillSignal(symbol, entryPrice) {
             document.getElementById('sig-symbol').value = symbol;
+            const selectEl = document.getElementById('sig-symbol-select');
+            if (selectEl) {
+                let found = false;
+                for (let i = 0; i < selectEl.options.length; i++) {
+                    if (selectEl.options[i].value === symbol) {
+                        selectEl.selectedIndex = i;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    selectEl.value = ""; // Show as Khác/custom
+                }
+            }
             document.getElementById('sig-entry').value = entryPrice.toFixed(2);
             const atr = entryPrice * 0.012;
             const direction = document.getElementById('sig-direction').value;

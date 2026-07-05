@@ -27,7 +27,7 @@ class Config:
         self.MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
         self.NVIDIA_API_KEY  = os.getenv("NVIDIA_API_KEY", "")
 
-        self.RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+        self.RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
         self.ADMIN_SECRET        = os.getenv("ADMIN_SECRET", "admin123")
 
         self._validate()

@@ -27,6 +27,11 @@ class BingXExchange:
         if params is None:
             params = {}
         
+        # Convert any boolean to lowercase string "true"/"false" for query formatting
+        for k, v in list(params.items()):
+            if isinstance(v, bool):
+                params[k] = "true" if v else "false"
+        
         # Tự động định dạng Symbol thành chuẩn BingX (có dấu gạch ngang, ví dụ: BTC-USDT)
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
