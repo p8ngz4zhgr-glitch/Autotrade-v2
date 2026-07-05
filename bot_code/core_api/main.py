@@ -530,8 +530,8 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
     _LAST_REVERSAL_EVAL[sym] = now
     
     try:
-        from analyzer.engine import TradingEngine
-        engine = TradingEngine()
+        from analyzer.engine import SignalEngine
+        engine = SignalEngine()
         analysis = engine.full_analysis(sym)
         new_direction = analysis.get("final", "WAIT")
         conf = analysis.get("confidence", 0)
