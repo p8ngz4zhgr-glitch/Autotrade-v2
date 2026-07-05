@@ -66,13 +66,14 @@ class BingXExchange:
         full_url = f"{self.BASE_URL}{path}?{query_string}&signature={signature}"
 
         headers = {
-            "X-BX-APIKEY": self.api_key,
-            "Content-Type": "application/json"
+            "X-BX-APIKEY": self.api_key
         }
 
         try:
             if method.upper() == "GET":
                 r = requests.get(full_url, headers=headers, timeout=10)
+            elif method.upper() == "DELETE":
+                r = requests.delete(full_url, headers=headers, timeout=10)
             else:
                 r = requests.post(full_url, headers=headers, timeout=10)
             
@@ -110,13 +111,19 @@ class BingXExchange:
                 return float(data.get("price", 0))
         return 0.0
 
-    def set_leverage(self, symbol: str, leverage: int, side: str = "LONG") -> dict:
-        """Thiết lập đòn bẩy cho lệnh"""
-        return self._request("POST", "/openApi/swap/v2/trade/leverage", {
+    def set_leverage(self, symbol: str, leverage: int) -> dict:
+        """Thiết lập đòn bẩy cho lệnh (cả LONG và SHORT)"""
+        res_long = self._request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": symbol,
             "leverage": leverage,
-            "side": side
+            "side": "LONG"
         })
+        res_short = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+            "symbol": symbol,
+            "leverage": leverage,
+            "side": "SHORT"
+        })
+        return res_long
 
     def get_open_positions(self, symbol: str = None) -> list:
         """Lấy danh sách các vị thế đang mở"""
@@ -135,10 +142,14 @@ class BingXExchange:
                             continue
                         sym = p.get("symbol", "")
                         normalized_sym = sym.replace("-", "") if sym else ""
+                        
+                        # Fix for Float Division by Zero: avgPrice is the standard key in BingX Swap V2
+                        entry_price = float(p.get("avgPrice") or p.get("entryPrice") or 0)
+                        
                         positions.append({
                             "symbol": normalized_sym,
                             "direction": "LONG" if qty > 0 else "SHORT",
-                            "entry": float(p.get("entryPrice", 0)),
+                            "entry": entry_price,
                             "qty": abs(qty),
                             "pnl": float(p.get("unrealizedProfit", 0)),
                         })
@@ -184,6 +195,8 @@ class BingXExchange:
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
 
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
+        if qty <= 0:
+            return
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
         if sl_price > 0:
@@ -193,8 +206,7 @@ class BingXExchange:
                 "type": "STOP_MARKET",
                 "stopPrice": sl_price,
                 "quantity": qty,
-                "positionSide": position_side,
-                "reduceOnly": True
+                "positionSide": position_side
             })
         if tp_price > 0:
             self._request("POST", "/openApi/swap/v2/trade/order", {
@@ -203,13 +215,12 @@ class BingXExchange:
                 "type": "TAKE_PROFIT_MARKET",
                 "stopPrice": tp_price,
                 "quantity": qty,
-                "positionSide": position_side,
-                "reduceOnly": True
+                "positionSide": position_side
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
         """Hủy toàn bộ lệnh chờ của Symbol"""
-        return self._request("POST", "/openApi/swap/v2/trade/cancelAllAfter", {
+        return self._request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", {
             "symbol": symbol
         })
 
@@ -221,8 +232,7 @@ class BingXExchange:
             "side": opposite_side,
             "type": "MARKET",
             "quantity": qty,
-            "positionSide": direction,
-            "reduceOnly": True
+            "positionSide": direction
         }
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         if res.get("code") == 0:
@@ -232,7 +242,21 @@ class BingXExchange:
 
     def handle_tp1_hit(self, symbol: str, direction: str, total_qty: float, entry_price: float, tp2_price: float) -> dict:
         """Xử lý chốt lời TP1 một phần (50%) vị thế và di dời SL về Entry"""
+        # Nếu khối lượng quá nhỏ không thể chia đôi, chỉ kéo SL về entry và giữ nguyên lệnh tới TP2
+        # Tạm thời chia đôi chính xác đến 4 chữ số thập phân
         half_qty = round(total_qty * 0.5, 4)
+        if half_qty <= 0 or half_qty == total_qty:
+            log.info("Qty too small to split (%s), moving SL to entry only for %s", total_qty, symbol)
+            self.cancel_all_orders(symbol)
+            self._place_sl_tp(
+                symbol=symbol,
+                side="BUY" if direction == "LONG" else "SELL",
+                qty=total_qty,
+                sl_price=entry_price,
+                tp_price=tp2_price
+            )
+            return {"ok": True, "split": False}
+            
         log.info("Handling partial TP1 close for %s: %s, qty=%s", symbol, direction, half_qty)
         
         # 1. Đóng một nửa vị thế bằng lệnh Market
