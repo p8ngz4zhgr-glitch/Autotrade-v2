@@ -135,14 +135,10 @@ class BingXExchange:
                             continue
                         sym = p.get("symbol", "")
                         normalized_sym = sym.replace("-", "") if sym else ""
-                        
-                        # FIX: Lấy avgPrice nếu không có entryPrice
-                        entry_price = float(p.get("avgPrice") or p.get("entryPrice") or p.get("price") or 0)
-                        
                         positions.append({
                             "symbol": normalized_sym,
                             "direction": "LONG" if qty > 0 else "SHORT",
-                            "entry": entry_price,
+                            "entry": float(p.get("entryPrice", 0)),
                             "qty": abs(qty),
                             "pnl": float(p.get("unrealizedProfit", 0)),
                         })
@@ -180,6 +176,7 @@ class BingXExchange:
         }
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         if res.get("code") == 0:
+            # Thành công -> Tiếp tục đặt lệnh TP/SL nếu có
             order_id = res.get("data", {}).get("orderId")
             log.info("Placed Market Order %s OK: %s", order_id, side)
             self._place_sl_tp(symbol, side, qty, sl_price, tp_price)
@@ -238,12 +235,15 @@ class BingXExchange:
         half_qty = round(total_qty * 0.5, 4)
         log.info("Handling partial TP1 close for %s: %s, qty=%s", symbol, direction, half_qty)
         
+        # 1. Đóng một nửa vị thế bằng lệnh Market
         res = self.close_position(symbol, half_qty, direction)
         if not res.get("ok"):
             return res
 
+        # 2. Hủy SL/TP cũ và thiết lập SL mới về Entry, TP2 mới cho phần còn lại
         self.cancel_all_orders(symbol)
         
+        # Đặt SL mới về Entry (Breakeven) và giữ TP2 cho nửa còn lại
         self._place_sl_tp(
             symbol=symbol,
             side="BUY" if direction == "LONG" else "SELL",

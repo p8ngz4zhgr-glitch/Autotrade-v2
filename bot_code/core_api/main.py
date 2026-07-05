@@ -492,12 +492,8 @@ def _tp1_monitor():
                     half_qty = round(qty * 0.5, 4)
                     remaining = round(qty - half_qty, 4)
                     
-                    # FIX: Bảo vệ chia cho 0
-                    pnl_pct = 0.0
-                    if entry > 0:
-                        pnl_pct = ((tp1 - entry) / entry * 100 if direction == "LONG"
-                                   else (entry - tp1) / entry * 100)
-                                   
+                    pnl_pct = ((tp1 - entry) / entry * 100 if direction == "LONG"
+                               else (entry - tp1) / entry * 100)
                     pnl_usd = user.capital * (user.max_risk_pct / 100) * pnl_pct / 100
 
                     _tg_send(
@@ -545,11 +541,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         if is_reversal and conf >= 70:
             bx = get_bx(user)
             in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
-            
-            # FIX: Bảo vệ chia cho 0
-            pnl_pct = 0.0
-            if entry > 0:
-                pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
+            pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
             
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
             emoji = "💰" if in_profit else "⚠️"
@@ -584,11 +576,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 if new_tp2 <= 0:
                     new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
                 
-                # FIX: Bảo vệ chia cho 0
-                sl_pct = 0.0
-                if new_entry > 0:
-                    sl_pct = abs(new_entry - new_sl) / new_entry
-                    
+                sl_pct = abs(new_entry - new_sl) / new_entry
                 if sl_pct >= 0.001:
                     risk_amt = user.capital * (user.max_risk_pct / 100)
                     new_qty = round(risk_amt / (new_entry * sl_pct), 4)
@@ -607,6 +595,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             )
     except Exception as e:
         log.warning("Evaluate reversal for %s %s error: %s", user.telegram_id, sym, e)
+
 
 # ══════════════════════════════════════════════════════════════════
 # SYNC POSITIONS & BALANCE
@@ -663,18 +652,8 @@ def sync_bingx_positions():
                         tp2  = trig.get("tp2", p.get("entry", 0) * (1.05 if p.get("direction") == "LONG" else 0.95))
                         tp1  = p.get("entry", 0) * (1.025 if p.get("direction", "LONG") == "LONG" else 0.975)
                         pnl  = p.get("pnl", 0)
-                        
-                        # Fix: Sử dụng pnl_pct trực tiếp từ API thay vì tính toán sai
-                        pct = p.get("pnl_pct", 0)
-                        if pct == 0 and cur > 0 and p.get("entry", 0) > 0:
-                            entry_p = p.get("entry", 0)
-                            if p.get("direction", "LONG") == "LONG":
-                                raw_pct = (cur - entry_p) / entry_p
-                            else:
-                                raw_pct = (entry_p - cur) / entry_p
-                            pct = round(raw_pct * user.leverage * 100, 2)
-                        else:
-                            pct = round(pct, 2)
+                        margin = user.capital * (user.max_risk_pct / 100)
+                        pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
 
                         pos_key = f"{tid}_{sym}_{p.get('direction', 'LONG')}"
                         current_map[pos_key] = {
@@ -937,15 +916,8 @@ def _execute_for_user(user: User, signal: dict):
         tp2   = float(signal["plan"].get("tp2", 0))
         if tp2 <= 0:
             tp2 = round(tp1 + abs(tp1 - entry), 4)
-            
-        # FIX: Bảo vệ chia cho 0
-        sl_pct = 0.0
-        if entry > 0:
-            sl_pct = abs(entry - sl) / entry
-        else:
-            log.warning("Lỗi tín hiệu entry=0: Bỏ qua")
-            return
-            
+
+        sl_pct = abs(entry - sl) / entry
         if sl_pct < 0.001:
             log.warning("SL qua gan entry (%.4f%%) - bo qua", sl_pct * 100)
             return
@@ -982,6 +954,7 @@ def _execute_for_user(user: User, signal: dict):
 
     except Exception as e:
         log.error("_execute_for_user %s: %s", user.telegram_id, e)
+
 
 def run_trade_worker():
     asyncio.run(_trade_worker_async())
@@ -1188,8 +1161,7 @@ def register_user(data: UserRegister, db: Session = Depends(get_db)):
             price = bx.get_latest_price("BTC-USDT")
             if price <= 0:
                 raise HTTPException(400, "API Key không hợp lệ hoặc không kết nối được BingX")
-            # Bỏ cơ chế gán 100$, báo lỗi nếu tài khoản thực sự trống tiền
-            raise HTTPException(400, "API Key hợp lệ nhưng số dư USDT bằng 0. Vui lòng nạp tiền vào tài khoản Futures!")
+            capital = float(os.getenv("DEFAULT_CAPITAL", "100"))
     except HTTPException:
         raise
     except Exception as e:
