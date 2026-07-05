@@ -32,7 +32,7 @@ class BingXExchange:
             if isinstance(v, bool):
                 params[k] = "true" if v else "false"
         
-        # Tự động định dạng Symbol thành chuẩn BingX
+        # Tự động định dạng Symbol thành chuẩn BingX (có dấu gạch ngang, ví dụ: BTC-USDT)
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
             if "-" not in sym:
@@ -41,6 +41,7 @@ class BingXExchange:
                 elif sym.endswith("USDC"):
                     params["symbol"] = sym[:-4] + "-USDC"
 
+        # Tránh gửi request và log spam nếu API Key/Secret trống, bị thiếu hoặc là mock key
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
         
@@ -54,10 +55,14 @@ class BingXExchange:
 
         params["timestamp"] = int(time.time() * 1000)
         
+        # Sắp xếp alphabet các tham số và tạo query string
         sorted_items = sorted(params.items())
         query_string = urllib.parse.urlencode(sorted_items)
+        
+        # Tính toán chữ ký dựa trên query string đã sắp xếp
         signature = self._sign(params)
 
+        # Tạo URL đầy đủ chứa query string và chữ ký đã khớp hoàn hảo thứ tự
         full_url = f"{self.BASE_URL}{path}?{query_string}&signature={signature}"
 
         headers = {
@@ -88,40 +93,16 @@ class BingXExchange:
         res = self._request("GET", "/openApi/swap/v2/user/balance")
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
-            
-            def extract_usdt(item):
-                if isinstance(item, dict) and item.get("asset") == "USDT":
-                    # Lấy số dư: ưu tiên equity (vốn chủ sở hữu), sau đó balance
-                    return float(item.get("equity", 0) or item.get("balance", 0) or item.get("availableMargin", 0))
-                return None
-
-            # Quét đa dạng các cấu trúc API trả về
-            if isinstance(data, list):
-                for item in data:
-                    val = extract_usdt(item)
-                    if val is not None: return val
-            elif isinstance(data, dict):
-                balances = data.get("balance")
+            if isinstance(data, dict):
+                balances = data.get("balance", [])
                 if isinstance(balances, list):
                     for item in balances:
-                        val = extract_usdt(item)
-                        if val is not None: return val
-                elif isinstance(balances, dict):
-                    val = extract_usdt(balances)
-                    if val is not None: return val
-                
-                val = extract_usdt(data)
-                if val is not None: return val
-                
-                assets = data.get("assets", [])
-                if isinstance(assets, list):
-                    for item in assets:
-                        val = extract_usdt(item)
-                        if val is not None: return val
-
+                        if isinstance(item, dict) and item.get("asset") == "USDT":
+                            return float(item.get("balance", 0))
         return 0.0
 
     def get_latest_price(self, symbol: str) -> float:
+        """Lấy giá mới nhất của Symbol"""
         res = self._request("GET", "/openApi/swap/v1/ticker/price", {"symbol": symbol})
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
@@ -130,6 +111,7 @@ class BingXExchange:
         return 0.0
 
     def set_leverage(self, symbol: str, leverage: int, side: str = "LONG") -> dict:
+        """Thiết lập đòn bẩy cho lệnh"""
         return self._request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": symbol,
             "leverage": leverage,
@@ -137,6 +119,7 @@ class BingXExchange:
         })
 
     def get_open_positions(self, symbol: str = None) -> list:
+        """Lấy danh sách các vị thế đang mở"""
         params = {}
         if symbol:
             params["symbol"] = symbol
@@ -153,24 +136,20 @@ class BingXExchange:
                         sym = p.get("symbol", "")
                         normalized_sym = sym.replace("-", "") if sym else ""
                         
-                        # Fix: Sử dụng avgPrice thay vì entryPrice cho BingX v2
-                        entry_price = float(p.get("avgPrice", 0) or p.get("entryPrice", 0))
+                        # FIX: Lấy avgPrice nếu không có entryPrice
+                        entry_price = float(p.get("avgPrice") or p.get("entryPrice") or p.get("price") or 0)
                         
-                        # Fix: Lấy PnL Ratio trực tiếp từ API thay vì tính toán sai
-                        pnl_ratio = p.get("pnlRatio")
-                        pnl_pct = float(pnl_ratio) * 100 if pnl_ratio is not None else 0.0
-
                         positions.append({
                             "symbol": normalized_sym,
                             "direction": "LONG" if qty > 0 else "SHORT",
                             "entry": entry_price,
                             "qty": abs(qty),
                             "pnl": float(p.get("unrealizedProfit", 0)),
-                            "pnl_pct": pnl_pct
                         })
         return positions
 
     def get_trigger_orders(self) -> dict:
+        """Lấy danh sách các lệnh kích hoạt (SL/TP)"""
         res = self._request("GET", "/openApi/swap/v2/trade/openOrders")
         triggers = {}
         if isinstance(res, dict) and res.get("code") == 0:
@@ -190,6 +169,7 @@ class BingXExchange:
         return triggers
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
+        """Đặt lệnh Market + cài SL/TP đi kèm"""
         position_side = "LONG" if side == "BUY" else "SHORT"
         params = {
             "symbol": symbol,
@@ -231,11 +211,13 @@ class BingXExchange:
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
+        """Hủy toàn bộ lệnh chờ của Symbol"""
         return self._request("POST", "/openApi/swap/v2/trade/cancelAllAfter", {
             "symbol": symbol
         })
 
     def close_position(self, symbol: str, qty: float, direction: str) -> dict:
+        """Đóng vị thế bằng lệnh ngược hướng"""
         opposite_side = "SELL" if direction == "LONG" else "BUY"
         params = {
             "symbol": symbol,
@@ -252,6 +234,7 @@ class BingXExchange:
         return {"ok": False, "msg": res.get("msg", "Error closing")}
 
     def handle_tp1_hit(self, symbol: str, direction: str, total_qty: float, entry_price: float, tp2_price: float) -> dict:
+        """Xử lý chốt lời TP1 một phần (50%) vị thế và di dời SL về Entry"""
         half_qty = round(total_qty * 0.5, 4)
         log.info("Handling partial TP1 close for %s: %s, qty=%s", symbol, direction, half_qty)
         
