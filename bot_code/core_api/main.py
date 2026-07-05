@@ -523,6 +523,8 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
     direction = pos["direction"]
     qty = float(pos.get("qty", 0))
     entry = float(pos.get("entry", 0))
+    if entry <= 0:
+        return
     
     now = time.time()
     if now - _LAST_REVERSAL_EVAL.get(sym, 0) < 180:
