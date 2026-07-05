@@ -803,3 +803,123 @@ class Indicators:
             "last_swing_high": round(last_sh, 4),
             "last_swing_low":  round(last_sl, 4),
         }
+
+    @staticmethod
+    def elliott_wave_analysis(closes: list, highs: list, lows: list) -> dict:
+        EMPTY = {
+            "wave_pattern": "Neutral Wave Accumulation",
+            "current_wave": "None",
+            "trend": "NEUTRAL",
+            "description": "Cấu trúc sóng dao động trong biên độ tích lũy ngang, chưa hình thành xu hướng Elliot rõ ràng.",
+            "score_adj": 0
+        }
+        n = len(closes)
+        if n < 15:
+            return EMPTY
+
+        try:
+            h = [float(x) for x in highs[-15:]]
+            l = [float(x) for x in lows[-15:]]
+            c = [float(x) for x in closes[-15:]]
+
+            sw_highs = []
+            sw_lows = []
+
+            for i in range(2, 13):
+                if h[i] == max(h[i-2:i+3]):
+                    sw_highs.append((i, h[i]))
+                if l[i] == min(l[i-2:i+3]):
+                    sw_lows.append((i, l[i]))
+
+            sw_highs.sort(key=lambda x: x[0])
+            sw_lows.sort(key=lambda x: x[0])
+
+            if len(sw_highs) < 2 or len(sw_lows) < 2:
+                if c[-1] > c[-8]:
+                    return {
+                        "wave_pattern": "Impulse Wave 1/3 Rising",
+                        "current_wave": "Wave 3",
+                        "trend": "BULLISH",
+                        "description": "Sóng tăng trưởng ngắn hạn đang đẩy giá lên, xu hướng Elliot thiên hướng Bullish Impulse.",
+                        "score_adj": 5
+                    }
+                else:
+                    return {
+                        "wave_pattern": "Corrective Wave A/C Descending",
+                        "current_wave": "Wave C",
+                        "trend": "BEARISH",
+                        "description": "Sóng điều chỉnh ngắn hạn đang giảm, xu hướng Elliot thiên hướng Bearish Correction.",
+                        "score_adj": -5
+                    }
+
+            sh1_idx, sh1_val = sw_highs[-1]
+            sh2_idx, sh2_val = sw_highs[-2]
+            sl1_idx, sl1_val = sw_lows[-1]
+            sl2_idx, sl2_val = sw_lows[-2]
+
+            price_now = c[-1]
+
+            if sl1_val > sl2_val and sh1_val > sh2_val:
+                if price_now > sh1_val:
+                    return {
+                        "wave_pattern": "5-Wave Bullish Impulse",
+                        "current_wave": "Wave 3",
+                        "trend": "BULLISH",
+                        "description": "Sóng 3 Elliot Impulse đột phá đỉnh cũ. Sóng tăng trưởng mạnh nhất trong chu kỳ kỹ thuật, hỗ trợ lực mua mạnh mẽ.",
+                        "score_adj": 12
+                    }
+                else:
+                    return {
+                        "wave_pattern": "5-Wave Bullish Impulse",
+                        "current_wave": "Wave 4",
+                        "trend": "NEUTRAL",
+                        "description": "Sóng 4 Elliot điều chỉnh tích lũy sau đợt tăng Sóng 3. Áp lực bán nhẹ, cơ hội gom hàng khi retest hỗ trợ.",
+                        "score_adj": 3
+                    }
+
+            elif sl1_val < sl2_val and sh1_val < sh2_val:
+                if price_now < sl1_val:
+                    return {
+                        "wave_pattern": "3-Wave Bearish Correction",
+                        "current_wave": "Wave C",
+                        "trend": "BEARISH",
+                        "description": "Sóng C điều chỉnh hoảng loạn phá vỡ đáy cũ. Lực bán tháo chiếm ưu thế tuyệt đối, khuyến nghị hạn chế bắt đáy.",
+                        "score_adj": -12
+                    }
+                else:
+                    return {
+                        "wave_pattern": "3-Wave Bearish Correction",
+                        "current_wave": "Wave B",
+                        "trend": "BULLISH",
+                        "description": "Sóng B hồi phục kỹ thuật trong kênh giảm giá. Lực mua mang tính ngắn hạn và rủi ro cao, chờ tín hiệu xác nhận.",
+                        "score_adj": -3
+                    }
+
+            else:
+                if price_now > sh1_val:
+                    return {
+                        "wave_pattern": "Wave 5 Extended",
+                        "current_wave": "Wave 5",
+                        "trend": "BULLISH",
+                        "description": "Sóng 5 tăng mở rộng vượt đỉnh cũ. Đà tăng cuối chu kỳ, cẩn trọng vùng quá mua đảo chiều.",
+                        "score_adj": 6
+                    }
+                elif price_now < sl1_val:
+                    return {
+                        "wave_pattern": "Wave A Impulse",
+                        "current_wave": "Wave A",
+                        "trend": "BEARISH",
+                        "description": "Sóng A điều chỉnh khởi đầu cho chu kỳ giảm giá mới. Áp lực chốt lời gia tăng rõ rệt.",
+                        "score_adj": -6
+                    }
+                else:
+                    return {
+                        "wave_pattern": "Neutral Wave Accumulation",
+                        "current_wave": "Wave 2/4 Sideways",
+                        "trend": "NEUTRAL",
+                        "description": "Sóng Elliot đang đi ngang tích lũy tích cực tích cực (Sóng 2 hoặc Sóng 4 phẳng). Chờ đợi breakout bùng nổ.",
+                        "score_adj": 1
+                    }
+
+        except Exception as e:
+            return EMPTY

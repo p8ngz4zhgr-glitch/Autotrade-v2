@@ -64,6 +64,7 @@ class SignalEngine:
         vol_d  = self.ind.volume_analysis(closes, highs, lows, vols, tbvols)
         candle = self.ind.candlestick_patterns(data["open"], highs, lows, closes, vols)
         mstruct = self.ind.market_structure(closes, highs, lows)
+        elliott = self.ind.elliott_wave_analysis(closes, highs, lows)
 
         ema20  = self.ind.ema(closes, 20)
         ema50  = self.ind.ema(closes, 50)
@@ -195,6 +196,8 @@ class SignalEngine:
         elif mstruct.get("bos"):
             score += ms_adj * 1.0
 
+        # 12. Elliott Wave (weight 12)
+        score += elliott.get("score_adj", 0)
         score = max(5, min(95, score))
 
         # ══════════════════════════════════════════════════════
@@ -244,6 +247,7 @@ class SignalEngine:
             "fibo": fibo, "wyckoff": wyc, "cvd": cvd_d,
             "breakout": bo, "whale": whale, "volume": vol_d,
             "candle": candle, "market_structure": mstruct,
+            "elliott": elliott,
             "atr": round(atr, 4), "atr_pct": round(atr_pct, 3),
             "is_trending": is_trending, "price": price,
             "high": highs, "low": lows, "close": closes
@@ -542,6 +546,7 @@ class SignalEngine:
             "breakout": bo_1h, "whale": wh_1h,
             "volume_1h": vol_1h, "volume_4h": vol_4h,
             "candle": candle_summary,
+            "elliott_4h": results.get("4h", {}).get("elliott", {}),
             "market_structure_1h": ms_1h,
             "market_structure_4h": ms_4h,
             "oi_signal": oi_signal, "oi_desc": oi_desc,

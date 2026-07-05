@@ -516,6 +516,82 @@ def _tp1_monitor():
         time.sleep(30)
 
 
+_LAST_REVERSAL_EVAL = {}
+
+def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, db):
+    sym = pos["symbol"]
+    direction = pos["direction"]
+    qty = float(pos.get("qty", 0))
+    entry = float(pos.get("entry", 0))
+    
+    now = time.time()
+    if now - _LAST_REVERSAL_EVAL.get(sym, 0) < 180:
+        return
+    _LAST_REVERSAL_EVAL[sym] = now
+    
+    try:
+        from analyzer.engine import TradingEngine
+        engine = TradingEngine()
+        analysis = engine.full_analysis(sym)
+        new_direction = analysis.get("final", "WAIT")
+        conf = analysis.get("confidence", 0)
+        
+        is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
+        
+        if is_reversal and conf >= 70:
+            bx = get_bx(user)
+            in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
+            pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
+            
+            action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
+            emoji = "💰" if in_profit else "⚠️"
+            
+            log.info("🚨 Reversal detected for %s %s: %s", user.telegram_id, sym, action_type)
+            
+            res = bx.close_position(sym, qty, direction)
+            if res.get("ok"):
+                _tg_send(
+                    REGISTER_TOKEN, user.telegram_id,
+                    f"{emoji} <b>{action_type} (REVERSAL): {sym}</b>\n\n"
+                    f"🔄 Xu hướng thị trường đã đảo chiều sang <b>{new_direction}</b> (Conf: {conf}%).\n"
+                    f"📊 Vị thế cũ: {direction} @ ${entry:.4f}\n"
+                    f"📈 Giá hiện tại: ${current_price:.4f} | PnL: {pnl_pct:+.2f}%\n"
+                    f"🔒 Đã tự động đóng vị thế cũ để bảo vệ vốn.\n\n"
+                    f"⚡ <i>Hệ thống phân tích lại thị trường và đảo lệnh theo xu hướng mới...</i>"
+                )
+                
+                _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
+                
+                time.sleep(1.5)
+                
+                new_entry = float(analysis["plan"]["entry"])
+                new_sl    = float(analysis["plan"]["sl"])
+                new_tp1   = float(analysis["plan"]["tp1"])
+                new_tp2   = float(analysis["plan"].get("tp2", 0))
+                if new_tp2 <= 0:
+                    new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
+                
+                sl_pct = abs(new_entry - new_sl) / new_entry
+                if sl_pct >= 0.001:
+                    risk_amt = user.capital * (user.max_risk_pct / 100)
+                    new_qty = round(risk_amt / (new_entry * sl_pct), 4)
+                    if new_qty > 0:
+                        bx.set_leverage(sym, leverage=user.leverage)
+                        bx.cancel_all_orders(sym)
+                        new_order_res = bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2)
+                        if new_order_res.get("ok"):
+                            _tg_send(
+                                REGISTER_TOKEN, user.telegram_id,
+                                f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
+                                f"📈 {new_direction} | Conf: {conf:.1f}%\n"
+                                f"💰 Qty: {new_qty:.4f} | Lev: {user.leverage}x\n"
+                                f"🛑 SL: <code>${new_sl:.4f}</code>\n"
+                                f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code>"
+                            )
+    except Exception as e:
+        log.warning("Evaluate reversal for %s %s error: %s", user.telegram_id, sym, e)
+
+
 # ══════════════════════════════════════════════════════════════════
 # SYNC POSITIONS & BALANCE
 # ══════════════════════════════════════════════════════════════════
@@ -552,6 +628,9 @@ def sync_bingx_positions():
                     for p in positions:
                         sym  = p["symbol"]
                         cur  = bx.get_latest_price(sym) or p["entry"]
+                        
+                        # Evaluate for reversal / early close / lock profit
+                        evaluate_reversal_for_position(user, p, cur, db)
                         trig = triggers.get(sym, {})
                         sl   = trig.get("sl",  p["entry"] * (0.98 if p["direction"] == "LONG" else 1.02))
                         tp2  = trig.get("tp2", p["entry"] * (1.05 if p["direction"] == "LONG" else 0.95))
@@ -2151,4 +2230,466 @@ ADMIN_DASHBOARD_HTML = """
 @app.get("/dashboard", response_class=HTMLResponse)
 def get_dashboard_admin(request: Request, token: str = Query(default="")):
     return HTMLResponse(content=ADMIN_DASHBOARD_HTML, status_code=200)
+
+
+MINIAPP_CONNECT_HTML = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>SignalBot API Registration</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts: Inter & Space Grotesk -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght=400;500;600;700&family=Space+Grotesk:wght=500;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        display: ['Space Grotesk', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #030712;
+            color: #f3f4f6;
+            -webkit-tap-highlight-color: transparent;
+        }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen px-4 py-6 justify-center">
+    <div class="max-w-md w-full mx-auto bg-gray-900/60 border border-gray-800/80 rounded-2xl p-6 shadow-2xl backdrop-blur-xl">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-emerald-500/10 text-emerald-400 mb-3 border border-emerald-500/20">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+            </div>
+            <h1 class="text-2xl font-bold font-display tracking-tight text-white mb-1">SignalBot Auto-Trade</h1>
+            <p class="text-sm text-gray-400">Kết nối API BingX để tự động copy trade real-time</p>
+        </div>
+
+        <!-- Form -->
+        <form id="registerForm" onsubmit="handleRegister(event)" class="space-y-5">
+            <div>
+                <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Telegram UID</label>
+                <input type="text" id="telegram_id" required 
+                    class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white font-mono placeholder-gray-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
+                    placeholder="Nhập Telegram UID của bạn...">
+            </div>
+
+            <div>
+                <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">BingX API Key</label>
+                <input type="text" id="api_key" required 
+                    class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white font-mono placeholder-gray-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
+                    placeholder="Dán API Key...">
+            </div>
+
+            <div>
+                <label class="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">BingX API Secret</label>
+                <input type="password" id="api_secret" required 
+                    class="w-full bg-gray-950 border border-gray-800 rounded-xl px-4 py-3 text-white font-mono placeholder-gray-600 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
+                    placeholder="Dán API Secret...">
+            </div>
+
+            <div class="pt-2">
+                <button type="submit" id="submitBtn"
+                    class="w-full bg-emerald-500 hover:bg-emerald-600 text-gray-950 font-bold py-3.5 rounded-xl shadow-lg shadow-emerald-500/20 active:scale-[0.98] transition-all flex items-center justify-center space-x-2">
+                    <span>Kết Nối Tài Khoản</span>
+                </button>
+            </div>
+        </form>
+
+        <!-- Result Box -->
+        <div id="resultBox" class="hidden mt-6 p-4 rounded-xl border"></div>
+    </div>
+
+    <!-- Script -->
+    <script>
+        // Auto fill UID from query params
+        window.addEventListener('DOMContentLoaded', () => {
+            const params = new URLSearchParams(window.location.search);
+            const uid = params.get('uid') || params.get('telegram_id') || params.get('id');
+            if (uid) {
+                document.getElementById('telegram_id').value = uid;
+            }
+        });
+
+        async function handleRegister(e) {
+            e.preventDefault();
+            const submitBtn = document.getElementById('submitBtn');
+            const resultBox = document.getElementById('resultBox');
+            
+            const telegram_id = document.getElementById('telegram_id').value.trim();
+            const api_key = document.getElementById('api_key').value.trim();
+            const api_secret = document.getElementById('api_secret').value.trim();
+            
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = `
+                <svg class="animate-spin h-5 w-5 mr-3 text-gray-950" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span>Đang kết nối...</span>
+            `;
+            
+            resultBox.classList.add('hidden');
+            
+            try {
+                const response = await fetch('/api/users/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ telegram_id, api_key, api_secret })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultBox.className = "mt-6 p-4 rounded-xl bg-emerald-500/10 border-emerald-500/20 text-emerald-400 space-y-2";
+                    resultBox.innerHTML = `
+                        <div class="font-bold flex items-center space-x-2">
+                            <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            <span>Kết Nối Thành Công!</span>
+                        </div>
+                        <p class="text-xs text-gray-300">Tài khoản của bạn đã được liên kết với hệ thống auto-trade.</p>
+                        <div class="pt-2 text-xs border-t border-emerald-500/10 space-y-1">
+                            <div>• Tier: <span class="font-bold text-white">${data.label || data.tier}</span></div>
+                            <div>• Số dư: <span class="font-bold text-white">${data.capital}</span></div>
+                            <div>• Đòn bẩy tối đa: <span class="font-bold text-white">${data.leverage || 'Tự động'}x</span></div>
+                        </div>
+                    `;
+                } else {
+                    throw new Error(data.detail || 'Không thể liên kết API Key. Vui lòng kiểm tra lại.');
+                }
+            } catch (err) {
+                resultBox.className = "mt-6 p-4 rounded-xl bg-red-500/10 border-red-500/20 text-red-400 space-y-1 text-sm";
+                resultBox.innerHTML = `
+                    <div class="font-bold flex items-center space-x-2">
+                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <span>Lỗi Kết Nối</span>
+                    </div>
+                    <p class="text-xs text-gray-300">${err.message}</p>
+                `;
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<span>Kết Nối Tài Khoản</span>';
+                resultBox.classList.remove('hidden');
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+MINIAPP_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>SignalBot User Dashboard</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght=400;500;600;700&family=Space+Grotesk:wght=500;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                        display: ['Space Grotesk', 'sans-serif'],
+                        mono: ['JetBrains Mono', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #030712;
+            color: #f3f4f6;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .shimmer {
+            background: linear-gradient(90deg, #1f2937 25%, #374151 50%, #1f2937 75%);
+            background-size: 200% 100%;
+            animation: loading 1.5s infinite;
+        }
+        @keyframes loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+    </style>
+</head>
+<body class="min-h-screen px-4 py-6">
+    <div class="max-w-md mx-auto space-y-6">
+        <!-- Header -->
+        <div class="flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20 text-emerald-400">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                    </svg>
+                </div>
+                <div>
+                    <h1 class="text-lg font-bold font-display text-white">My Dashboard</h1>
+                    <p class="text-xs text-gray-400" id="uid-display">Telegram: ...</p>
+                </div>
+            </div>
+            <button onclick="loadData()" class="p-2 rounded-xl bg-gray-900 border border-gray-800 text-gray-400 hover:text-white transition-all">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 4.89M9 11l3-3 3 3m0 0a1 1 0 01-1 1H10a1 1 0 01-1-1z" />
+                </svg>
+            </button>
+        </div>
+
+        <!-- ID Input for testing if opened in standard browser without query param -->
+        <div id="uid-input-box" class="hidden p-4 bg-gray-900/40 border border-gray-800 rounded-xl space-y-3">
+            <p class="text-xs text-gray-400">Vui lòng nhập Telegram UID để xem dữ liệu:</p>
+            <div class="flex space-x-2">
+                <input type="text" id="manual-uid" class="flex-1 bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-white font-mono" placeholder="Nhập Telegram UID...">
+                <button onclick="setManualUid()" class="bg-emerald-500 hover:bg-emerald-600 text-gray-950 font-bold px-4 py-2 rounded-lg text-sm">Xem</button>
+            </div>
+        </div>
+
+        <!-- Profile Overview Card -->
+        <div class="bg-gray-900/60 border border-gray-800 rounded-2xl p-5 space-y-4 shadow-xl backdrop-blur-md">
+            <div class="grid grid-cols-2 gap-4">
+                <div class="bg-gray-950/60 p-3.5 rounded-xl border border-gray-800/60">
+                    <span class="text-xs text-gray-400 block mb-1">Số dư (Equity)</span>
+                    <span class="text-lg font-bold text-white font-mono" id="val-balance">$-.--</span>
+                </div>
+                <div class="bg-gray-950/60 p-3.5 rounded-xl border border-gray-800/60">
+                    <span class="text-xs text-gray-400 block mb-1">Cấp độ (Tier)</span>
+                    <span class="text-sm font-bold text-emerald-400 uppercase tracking-wider block mt-1" id="val-tier">-</span>
+                </div>
+            </div>
+
+            <div class="flex items-center justify-between pt-2 border-t border-gray-800/60">
+                <div class="flex items-center space-x-2">
+                    <span class="w-2.5 h-2.5 rounded-full" id="status-dot"></span>
+                    <span class="text-xs text-gray-300" id="val-status">Trạng thái: Đang tải...</span>
+                </div>
+                <span class="text-xs font-mono text-gray-500" id="val-confidence">Conf tối thiểu: --%</span>
+            </div>
+        </div>
+
+        <!-- Section: Active Positions -->
+        <div>
+            <div class="flex items-center justify-between mb-3.5">
+                <h2 class="text-sm font-bold uppercase tracking-wider text-gray-400 font-display">Vị thế đang mở</h2>
+                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-gray-900 border border-gray-800 text-gray-400" id="pos-count">0</span>
+            </div>
+
+            <!-- Position List -->
+            <div id="position-list" class="space-y-3">
+                <!-- Loading Shimmer -->
+                <div class="shimmer h-24 rounded-xl opacity-25"></div>
+            </div>
+        </div>
+
+        <!-- Section: Latest Market Signals -->
+        <div>
+            <div class="flex items-center justify-between mb-3.5">
+                <h2 class="text-sm font-bold uppercase tracking-wider text-gray-400 font-display">Tín hiệu bot mới nhất</h2>
+            </div>
+
+            <div id="signal-list" class="space-y-3">
+                <div class="shimmer h-20 rounded-xl opacity-10"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script -->
+    <script>
+        let currentUid = '';
+
+        window.addEventListener('DOMContentLoaded', () => {
+            const params = new URLSearchParams(window.location.search);
+            currentUid = params.get('uid') || params.get('telegram_id') || params.get('id');
+            
+            if (!currentUid) {
+                document.getElementById('uid-input-box').classList.remove('hidden');
+            } else {
+                document.getElementById('uid-display').innerText = `Telegram UID: ${currentUid}`;
+                loadData();
+            }
+        });
+
+        function setManualUid() {
+            const val = document.getElementById('manual-uid').value.trim();
+            if (val) {
+                currentUid = val;
+                document.getElementById('uid-display').innerText = `Telegram UID: ${currentUid}`;
+                document.getElementById('uid-input-box').classList.add('hidden');
+                loadData();
+            }
+        }
+
+        async function loadData() {
+            if (!currentUid) return;
+            
+            try {
+                const response = await fetch(`/api/state?uid=${currentUid}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+
+                // Render Summary
+                document.getElementById('val-balance').innerText = `$${(data.stats.equity || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+                document.getElementById('val-tier').innerText = data.tier_label || data.tier;
+                document.getElementById('val-confidence').innerText = `Conf tối thiểu: ${data.min_confidence || 68}%`;
+                
+                const statusDot = document.getElementById('status-dot');
+                const statusText = document.getElementById('val-status');
+                
+                if (data.auto_trade && !data.kill_switch) {
+                    statusDot.className = "w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse";
+                    statusText.innerText = "Trạng thái: Hoạt động (Auto)";
+                } else if (data.kill_switch) {
+                    statusDot.className = "w-2.5 h-2.5 rounded-full bg-red-500";
+                    statusText.innerText = "Trạng thái: Kill Switch ĐANG BẬT";
+                } else {
+                    statusDot.className = "w-2.5 h-2.5 rounded-full bg-amber-500";
+                    statusText.innerText = "Trạng thái: Đang Tắt (Hủy Kích Hoạt)";
+                }
+
+                // Render Positions
+                const posList = document.getElementById('position-list');
+                const posCount = document.getElementById('pos-count');
+                const positions = data.positions || [];
+                
+                posCount.innerText = positions.length;
+                
+                if (positions.length === 0) {
+                    posList.innerHTML = `
+                        <div class="text-center py-8 bg-gray-900/30 border border-gray-800/40 rounded-xl">
+                            <span class="text-gray-600 block text-2xl mb-1">📦</span>
+                            <span class="text-xs text-gray-500">Chưa có vị thế nào được mở.</span>
+                        </div>
+                    `;
+                } else {
+                    posList.innerHTML = '';
+                    positions.forEach(p => {
+                        const sideBg = p.direction === 'LONG' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20';
+                        const pnlColor = p.pnl_pct >= 0 ? 'text-emerald-400' : 'text-red-400';
+                        const pnlSign = p.pnl_pct >= 0 ? '+' : '';
+                        
+                        const div = document.createElement('div');
+                        div.className = "bg-gray-900 border border-gray-800 rounded-xl p-4 shadow-md space-y-3";
+                        div.innerHTML = `
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center space-x-2">
+                                    <span class="text-sm font-bold font-display text-white">${p.symbol}</span>
+                                    <span class="px-2 py-0.5 rounded text-[10px] font-bold border ${sideBg}">${p.direction}</span>
+                                </div>
+                                <button onclick="closePosition('${p.symbol}')" class="px-2.5 py-1 text-[10px] font-bold bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-lg border border-red-500/20 transition-all">Đóng</button>
+                            </div>
+                            
+                            <div class="grid grid-cols-3 gap-2 pt-2 border-t border-gray-800/60 text-center">
+                                <div>
+                                    <span class="text-[10px] text-gray-500 block">Vào lệnh</span>
+                                    <span class="text-xs font-semibold text-gray-300 font-mono">$${p.entry.toFixed(4)}</span>
+                                </div>
+                                <div>
+                                    <span class="text-[10px] text-gray-500 block">Hiện tại</span>
+                                    <span class="text-xs font-semibold text-gray-300 font-mono">$${p.current_price.toFixed(4)}</span>
+                                </div>
+                                <div>
+                                    <span class="text-[10px] text-gray-500 block">Lợi nhuận (PnL)</span>
+                                    <span class="text-xs font-bold ${pnlColor} font-mono">${pnlSign}${p.pnl_pct}%</span>
+                                </div>
+                            </div>
+                        `;
+                        posList.appendChild(div);
+                    });
+                }
+
+                // Render Signals
+                const sigList = document.getElementById('signal-list');
+                const signals = data.signals || [];
+                
+                if (signals.length === 0) {
+                    sigList.innerHTML = `
+                        <div class="text-center py-6 bg-gray-900/30 border border-gray-800/40 rounded-xl">
+                            <span class="text-xs text-gray-600">Không có tín hiệu gần đây.</span>
+                        </div>
+                    `;
+                } else {
+                    sigList.innerHTML = '';
+                    signals.slice(0, 3).forEach(s => {
+                        const sideBg = s.final === 'LONG' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400';
+                        
+                        const div = document.createElement('div');
+                        div.className = "bg-gray-900/40 border border-gray-800 rounded-xl p-3 flex items-center justify-between text-xs";
+                        div.innerHTML = `
+                            <div class="space-y-1">
+                                <div class="flex items-center space-x-2">
+                                    <span class="font-bold text-white">${s.symbol}</span>
+                                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold ${sideBg}">${s.final}</span>
+                                </div>
+                                <div class="text-[10px] text-gray-500">Confidence: ${s.confidence}% | Entry: ${s.plan?.entry || '-'}</div>
+                            </div>
+                            <span class="text-[10px] font-mono text-gray-600">${s.timestamp || 'Mới'}</span>
+                        `;
+                        sigList.appendChild(div);
+                    });
+                }
+
+            } catch (err) {
+                console.error("Dashboard error:", err);
+            }
+        }
+
+        async function closePosition(symbol) {
+            if (!confirm(`Bạn có chắc muốn đóng ngay vị thế ${symbol} bằng lệnh MARKET?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/user/close', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ user_id: currentUid, symbol })
+                });
+                
+                const data = await response.json();
+                alert(data.msg || 'Yêu cầu đóng vị thế đã được gửi.');
+                setTimeout(loadData, 1500);
+            } catch (err) {
+                alert('Có lỗi xảy ra: ' + err.message);
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+@app.get("/miniapp/connect", response_class=HTMLResponse)
+def get_miniapp_connect(request: Request):
+    return HTMLResponse(content=MINIAPP_CONNECT_HTML, status_code=200)
+
+
+@app.get("/my-dashboard", response_class=HTMLResponse)
+@app.get("/miniapp/dashboard", response_class=HTMLResponse)
+def get_miniapp_dashboard(request: Request):
+    return HTMLResponse(content=MINIAPP_DASHBOARD_HTML, status_code=200)
 

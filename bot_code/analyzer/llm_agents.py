@@ -170,6 +170,7 @@ class LLMChain:
         wy    = data.get("wyckoff", {})
         cvd   = data.get("cvd", {})
         vol   = data.get("volume_1h", {})
+        ell   = data.get("elliott_4h", {})
         atype = data.get("asset_type", "CRYPTO")
         ctx   = {"CRYPTO": "crypto futures", "STOCK": "cổ phiếu Mỹ",
                  "GOLD":   "vàng XAU/USD"}.get(atype, "")
@@ -179,6 +180,7 @@ class LLMChain:
                 + data["symbol"] + " $" + str(data["price"]) + " | "
                 + data["final"] + " " + str(data["confidence"]) + "%\n"
                 "TF: " + tfs + "\n"
+                "Elliott:" + str(ell.get("wave_pattern","?")) + " (" + str(ell.get("current_wave","?")) + ")\n"
                 "CVD:" + str(cvd.get("trend","?")) + " Vol:" + str(vol.get("vol_trend","?")) + "\n"
                 "Fibo:" + str(fibo.get("trend","?")) + " Zone:" + str(fibo.get("zone","?")) + "\n"
                 "Wyckoff:" + str(wy.get("phase","?")) + " " + str(wy.get("bias","?")) + "\n"
@@ -354,6 +356,10 @@ class LLMChain:
             "MARKDOWN":        "Markdown phase — downtrend xác nhận",
         }.get(wy_phase, "Phase đang chuyển đổi")
         fibo_wyc_points.append("Wyckoff " + wy_phase + ": " + wy_desc)
+
+        ell = data.get("elliott_4h", {})
+        if ell.get("wave_pattern"):
+            fibo_wyc_points.append(f"Elliott Wave: {ell.get('wave_pattern')} ({ell.get('current_wave')}) — {ell.get('description')}")
 
         smart_points = []
         cvd_trend = cvd.get("trend", "NEUTRAL")
