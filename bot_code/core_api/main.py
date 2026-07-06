@@ -42,8 +42,8 @@ app = FastAPI(title="SignalBot v6.1")
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 73.0, "max_risk_pct": 2.0,
-        "max_positions": 3, "leverage": 5, "target_monthly": "5-8%",
+        "min_confidence": 68.0, "max_risk_pct": 2.0,
+        "max_positions": 2, "leverage": 5, "target_monthly": "5-8%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
@@ -525,16 +525,30 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
     entry = float(pos.get("entry", 0))
     
     now = time.time()
-    if now - _LAST_REVERSAL_EVAL.get(sym, 0) < 180:
-        return
-    _LAST_REVERSAL_EVAL[sym] = now
     
-    try:
-        from analyzer.engine import SignalEngine
-        engine = SignalEngine()
-        analysis = engine.full_analysis(sym)
-        new_direction = analysis.get("final", "WAIT")
-        conf = analysis.get("confidence", 0)
+    # Check cache first
+    cached = _LAST_REVERSAL_EVAL.get(sym)
+    if cached and isinstance(cached, dict) and now - cached.get("time", 0) < 180:
+        new_direction = cached.get("direction", "WAIT")
+        conf = cached.get("conf", 0)
+        analysis = cached.get("analysis", {})
+    else:
+        try:
+            from analyzer.engine import SignalEngine
+            engine = SignalEngine()
+            analysis = engine.full_analysis(sym)
+            new_direction = analysis.get("final", "WAIT")
+            conf = analysis.get("confidence", 0)
+            
+            _LAST_REVERSAL_EVAL[sym] = {
+                "time": now,
+                "direction": new_direction,
+                "conf": conf,
+                "analysis": analysis
+            }
+        except Exception as e:
+            log.warning("Evaluate reversal for %s error: %s", sym, e)
+            return
         
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
         
