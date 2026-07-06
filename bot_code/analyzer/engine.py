@@ -65,6 +65,7 @@ class SignalEngine:
         candle = self.ind.candlestick_patterns(data["open"], highs, lows, closes, vols)
         mstruct = self.ind.market_structure(closes, highs, lows)
         elliott = self.ind.elliott_wave_analysis(closes, highs, lows)
+        fvg = self.ind.order_flow_fvg(highs, lows, closes)
 
         ema20  = self.ind.ema(closes, 20)
         ema50  = self.ind.ema(closes, 50)
@@ -248,6 +249,7 @@ class SignalEngine:
             "breakout": bo, "whale": whale, "volume": vol_d,
             "candle": candle, "market_structure": mstruct,
             "elliott": elliott,
+            "fvg": fvg,
             "atr": round(atr, 4), "atr_pct": round(atr_pct, 3),
             "is_trending": is_trending, "price": price,
             "high": highs, "low": lows, "close": closes
