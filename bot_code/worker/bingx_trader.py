@@ -32,7 +32,7 @@ class BingXExchange:
             if isinstance(v, bool):
                 params[k] = "true" if v else "false"
         
-        # Tá»± Äá»ng Äá»nh dáº¡ng Symbol thÃ nh chuáº©n BingX (cÃ³ dáº¥u gáº¡ch ngang, vÃ­ dá»¥: BTC-USDT)
+        # Tự động định dạng Symbol thành chuẩn BingX (có dấu gạch ngang, ví dụ: BTC-USDT)
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
             if "-" not in sym:
@@ -41,7 +41,7 @@ class BingXExchange:
                 elif sym.endswith("USDC"):
                     params["symbol"] = sym[:-4] + "-USDC"
 
-        # TrÃ¡nh gá»­i request vÃ  log spam náº¿u API Key/Secret trá»ng, bá» thiáº¿u hoáº·c lÃ  mock key
+        # Tránh gửi request và log spam nếu API Key/Secret trống, bị thiếu hoặc là mock key
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
         
@@ -55,14 +55,14 @@ class BingXExchange:
 
         params["timestamp"] = int(time.time() * 1000)
         
-        # Sáº¯p xáº¿p alphabet cÃ¡c tham sá» vÃ  táº¡o query string
+        # Sắp xếp alphabet các tham số và tạo query string
         sorted_items = sorted(params.items())
         query_string = urllib.parse.urlencode(sorted_items)
         
-        # TÃ­nh toÃ¡n chá»¯ kÃ½ dá»±a trÃªn query string ÄÃ£ sáº¯p xáº¿p
+        # Tính toán chữ ký dựa trên query string đã sắp xếp
         signature = self._sign(params)
 
-        # Táº¡o URL Äáº§y Äá»§ chá»©a query string vÃ  chá»¯ kÃ½ ÄÃ£ khá»p hoÃ n háº£o thá»© tá»±
+        # Tạo URL đầy đủ chứa query string và chữ ký đã khớp hoàn hảo thứ tự
         full_url = f"{self.BASE_URL}{path}?{query_string}&signature={signature}"
 
         headers = {
@@ -90,7 +90,7 @@ class BingXExchange:
             return {"code": -1, "msg": str(e), "data": {}}
 
     def get_balance(self) -> float:
-        """Láº¥y sá» dÆ° kháº£ dá»¥ng (USDT) cá»§a tÃ i khoáº£n Futures VST/Standard/Perpetual"""
+        """Lấy số dư khả dụng (USDT) của tài khoản Futures VST/Standard/Perpetual"""
         res = self._request("GET", "/openApi/swap/v2/user/balance")
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
@@ -103,7 +103,7 @@ class BingXExchange:
         return 0.0
 
     def get_latest_price(self, symbol: str) -> float:
-        """Láº¥y giÃ¡ má»i nháº¥t cá»§a Symbol"""
+        """Lấy giá mới nhất của Symbol"""
         res = self._request("GET", "/openApi/swap/v1/ticker/price", {"symbol": symbol})
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
@@ -112,7 +112,7 @@ class BingXExchange:
         return 0.0
 
     def set_leverage(self, symbol: str, leverage: int) -> dict:
-        """Thiáº¿t láº­p ÄÃ²n báº©y cho lá»nh (cáº£ LONG vÃ  SHORT)"""
+        """Thiết lập đòn bẩy cho lệnh (cả LONG và SHORT)"""
         res_long = self._request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": symbol,
             "leverage": leverage,
@@ -126,7 +126,7 @@ class BingXExchange:
         return res_long
 
     def get_open_positions(self, symbol: str = None) -> list:
-        """Láº¥y danh sÃ¡ch cÃ¡c vá» tháº¿ Äang má»"""
+        """Lấy danh sách các vị thế đang mở"""
         params = {}
         if symbol:
             params["symbol"] = symbol
@@ -156,7 +156,7 @@ class BingXExchange:
         return positions
 
     def get_trigger_orders(self) -> dict:
-        """Láº¥y danh sÃ¡ch cÃ¡c lá»nh kÃ­ch hoáº¡t (SL/TP)"""
+        """Lấy danh sách các lệnh kích hoạt (SL/TP)"""
         res = self._request("GET", "/openApi/swap/v2/trade/openOrders")
         triggers = {}
         if isinstance(res, dict) and res.get("code") == 0:
@@ -176,7 +176,7 @@ class BingXExchange:
         return triggers
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
-        """Äáº·t lá»nh Market + cÃ i SL/TP Äi kÃ¨m"""
+        """Đặt lệnh Market + cài SL/TP đi kèm"""
         position_side = "LONG" if side == "BUY" else "SHORT"
         params = {
             "symbol": symbol,
@@ -187,7 +187,7 @@ class BingXExchange:
         }
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         if res.get("code") == 0:
-            # ThÃ nh cÃ´ng -> Tiáº¿p tá»¥c Äáº·t lá»nh TP/SL náº¿u cÃ³
+            # Thành công -> Tiếp tục đặt lệnh TP/SL nếu có
             order_id = res.get("data", {}).get("orderId")
             log.info("Placed Market Order %s OK: %s", order_id, side)
             self._place_sl_tp(symbol, side, qty, sl_price, tp_price)
@@ -219,13 +219,29 @@ class BingXExchange:
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
-        """Há»§y toÃ n bá» lá»nh chá» cá»§a Symbol"""
+        """Hủy toàn bộ lệnh chờ của Symbol"""
         return self._request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", {
             "symbol": symbol
         })
 
     def close_position(self, symbol: str, qty: float, direction: str) -> dict:
-        """ÄÃ³ng vá» tháº¿ báº±ng lá»nh ngÆ°á»£c hÆ°á»ng"""
+        """Đóng vị thế bằng lệnh ngược hướng"""
+        
+        # FIX: Kiểm tra xem có vị thế đang mở trước khi đóng để tránh lỗi 101205
+        open_positions = self.get_open_positions(symbol)
+        position_exists = False
+        normalized_symbol = symbol.replace("-", "").upper()
+        
+        for p in open_positions:
+            if p["symbol"] == normalized_symbol and p["direction"] == direction.upper():
+                position_exists = True
+                break
+                
+        if not position_exists:
+            log.info("Bỏ qua lệnh đóng: Không tìm thấy vị thế %s cho cặp %s", direction, symbol)
+            return {"ok": False, "msg": "No position to close"}
+
+        # Nếu vị thế tồn tại, tiến hành đóng
         opposite_side = "SELL" if direction == "LONG" else "BUY"
         params = {
             "symbol": symbol,
@@ -241,9 +257,10 @@ class BingXExchange:
         return {"ok": False, "msg": res.get("msg", "Error closing")}
 
     def handle_tp1_hit(self, symbol: str, direction: str, total_qty: float, entry_price: float, tp2_price: float) -> dict:
-        """Xá»­ lÃ½ chá»t lá»i TP1 má»t pháº§n (50%) vá» tháº¿ vÃ  di dá»i SL vá» Entry"""
-        # Náº¿u khá»i lÆ°á»£ng quÃ¡ nhá» khÃ´ng thá» chia ÄÃ´i, chá» kÃ©o SL vá» entry vÃ  giá»¯ nguyÃªn lá»nh tá»i TP2
-        # Táº¡m thá»i chia ÄÃ´i chÃ­nh xÃ¡c Äáº¿n 4 chá»¯ sá» tháº­p phÃ¢n
+        """Xử lý chốt lời TP1 một phần (50%) vị thế và di dời SL về Entry"""
+        
+        # Nếu khối lượng quá nhỏ không thể chia đôi, chỉ kéo SL về entry và giữ nguyên lệnh tới TP2
+        # Tạm thời chia đôi chính xác đến 4 chữ số thập phân
         half_qty = round(total_qty * 0.5, 4)
         if half_qty <= 0 or half_qty == total_qty:
             log.info("Qty too small to split (%s), moving SL to entry only for %s", total_qty, symbol)
@@ -259,15 +276,15 @@ class BingXExchange:
             
         log.info("Handling partial TP1 close for %s: %s, qty=%s", symbol, direction, half_qty)
         
-        # 1. ÄÃ³ng má»t ná»­a vá» tháº¿ báº±ng lá»nh Market
+        # 1. Đóng một nửa vị thế bằng lệnh Market
         res = self.close_position(symbol, half_qty, direction)
         if not res.get("ok"):
             return res
 
-        # 2. Há»§y SL/TP cÅ© vÃ  thiáº¿t láº­p SL má»i vá» Entry, TP2 má»i cho pháº§n cÃ²n láº¡i
+        # 2. Hủy SL/TP cũ và thiết lập SL mới về Entry, TP2 mới cho phần còn lại
         self.cancel_all_orders(symbol)
         
-        # Äáº·t SL má»i vá» Entry (Breakeven) vÃ  giá»¯ TP2 cho ná»­a cÃ²n láº¡i
+        # Đặt SL mới về Entry (Breakeven) và giữ TP2 cho nửa còn lại
         self._place_sl_tp(
             symbol=symbol,
             side="BUY" if direction == "LONG" else "SELL",
