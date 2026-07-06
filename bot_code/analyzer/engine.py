@@ -199,6 +199,7 @@ class SignalEngine:
 
         # 12. Elliott Wave (weight 12)
         score += elliott.get("score_adj", 0)
+        score += fvg.get("score_adj", 0)
         score = max(5, min(95, score))
 
         # ══════════════════════════════════════════════════════
