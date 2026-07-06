@@ -923,3 +923,81 @@ class Indicators:
 
         except Exception as e:
             return EMPTY
+
+
+    @staticmethod
+    def order_flow_fvg(highs: list, lows: list, closes: list, lookback: int = 50) -> dict:
+        EMPTY = {"fvg_type": "NONE", "gap_top": 0, "gap_bottom": 0, "score_adj": 0, "bull_count": 0, "bear_count": 0}
+        n = min(len(highs), len(lows), len(closes), lookback)
+        if n < 3:
+            return EMPTY
+            
+        h = [float(x) for x in highs[-n:]]
+        l = [float(x) for x in lows[-n:]]
+        c = [float(x) for x in closes[-n:]]
+        
+        bullish_fvgs = []
+        bearish_fvgs = []
+        
+        for i in range(2, n):
+            if l[i] > h[i-2] and c[i-1] > c[i-2]:  
+                bullish_fvgs.append({"top": l[i], "bottom": h[i-2], "idx": i, "mitigated": False})
+            elif h[i] < l[i-2] and c[i-1] < c[i-2]:
+                bearish_fvgs.append({"top": l[i-2], "bottom": h[i], "idx": i, "mitigated": False})
+                
+        for fvg in bullish_fvgs:
+            for j in range(fvg["idx"] + 1, n):
+                if l[j] <= fvg["top"]:
+                    if l[j] <= fvg["bottom"]:
+                        fvg["mitigated"] = True
+                        break
+                    else:
+                        fvg["top"] = l[j]
+
+        for fvg in bearish_fvgs:
+            for j in range(fvg["idx"] + 1, n):
+                if h[j] >= fvg["bottom"]:
+                    if h[j] >= fvg["top"]:
+                        fvg["mitigated"] = True
+                        break
+                    else:
+                        fvg["bottom"] = h[j]
+                        
+        unmitigated_bullish = [f for f in bullish_fvgs if not f["mitigated"]]
+        unmitigated_bearish = [f for f in bearish_fvgs if not f["mitigated"]]
+        
+        score_adj = len(unmitigated_bullish) * 8 - len(unmitigated_bearish) * 8
+        score_adj = max(-24, min(24, score_adj))
+        
+        latest_type = "NONE"
+        gap_top = 0
+        gap_bottom = 0
+        
+        if unmitigated_bullish and not unmitigated_bearish:
+            latest_type = "BULLISH_FVG"
+            gap_top = unmitigated_bullish[-1]["top"]
+            gap_bottom = unmitigated_bullish[-1]["bottom"]
+        elif unmitigated_bearish and not unmitigated_bullish:
+            latest_type = "BEARISH_FVG"
+            gap_top = unmitigated_bearish[-1]["top"]
+            gap_bottom = unmitigated_bearish[-1]["bottom"]
+        elif unmitigated_bullish and unmitigated_bearish:
+            bull_idx = unmitigated_bullish[-1]["idx"]
+            bear_idx = unmitigated_bearish[-1]["idx"]
+            if bull_idx > bear_idx:
+                latest_type = "BULLISH_FVG"
+                gap_top = unmitigated_bullish[-1]["top"]
+                gap_bottom = unmitigated_bullish[-1]["bottom"]
+            else:
+                latest_type = "BEARISH_FVG"
+                gap_top = unmitigated_bearish[-1]["top"]
+                gap_bottom = unmitigated_bearish[-1]["bottom"]
+                
+        return {
+            "fvg_type": latest_type,
+            "gap_top": round(gap_top, 4) if gap_top else 0,
+            "gap_bottom": round(gap_bottom, 4) if gap_bottom else 0,
+            "score_adj": score_adj,
+            "bull_count": len(unmitigated_bullish),
+            "bear_count": len(unmitigated_bearish)
+        }
