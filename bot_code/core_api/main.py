@@ -389,7 +389,7 @@ def sync_bingx_positions():
 
                 db.close()
 
-            except Exception as e:
+        except Exception as e:
                 log.error("sync_bingx_positions: %s", e)
 
             cleanup_counter += 1
