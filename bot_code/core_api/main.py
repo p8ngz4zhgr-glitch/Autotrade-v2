@@ -266,174 +266,174 @@ def sync_bingx_positions():
 
     while True:
         try:
-            db           = SessionLocal()
-            active_users = db.query(User).filter(User.is_active == True).all()
+                db           = SessionLocal()
+                active_users = db.query(User).filter(User.is_active == True).all()
 
-            current_all: list = []
-            current_map: dict = {}
+                current_all: list = []
+                current_map: dict = {}
 
-            for user in active_users:
-                tid = user.telegram_id
-                try:
-                    if tid not in _bx_cache:
-                        _bx_cache[tid] = get_bx(user)
-                    bx = _bx_cache[tid]
+                for user in active_users:
+                    tid = user.telegram_id
+                    try:
+                        if tid not in _bx_cache:
+                            _bx_cache[tid] = get_bx(user)
+                        bx = _bx_cache[tid]
 
-                    balance = bx.get_balance()
-                    if balance > 0 and abs(balance - (user.capital or 0)) / max(user.capital or 1, 1) > 0.02:
-                        _update_user_balance_and_tier(user, balance, db)
+                        balance = bx.get_balance()
+                        if balance > 0 and abs(balance - (user.capital or 0)) / max(user.capital or 1, 1) > 0.02:
+                            _update_user_balance_and_tier(user, balance, db)
 
-                    if user.capital < MIN_CAPITAL_TO_TRADE:
-                        continue
-
-                    positions = bx.get_open_positions()
-                    triggers  = bx.get_trigger_orders()
-
-                    if not isinstance(positions, list):
-                        positions = []
-                    if not isinstance(triggers, dict):
-                        triggers = {}
-
-                    for p in positions:
-                        if not isinstance(p, dict):
+                        if user.capital < MIN_CAPITAL_TO_TRADE:
                             continue
-                        sym  = p.get("symbol", "")
-                        if not sym:
-                            continue
-                        cur  = bx.get_latest_price(sym) or p.get("entry", 0)
+
+                        positions = bx.get_open_positions()
+                        triggers  = bx.get_trigger_orders()
+
+                        if not isinstance(positions, list):
+                            positions = []
+                        if not isinstance(triggers, dict):
+                            triggers = {}
+
+                        for p in positions:
+                            if not isinstance(p, dict):
+                                continue
+                            sym  = p.get("symbol", "")
+                            if not sym:
+                                continue
+                            cur  = bx.get_latest_price(sym) or p.get("entry", 0)
                         
-                        # Evaluate for reversal / early close / lock profit
-                        evaluate_reversal_for_position(user, p, cur, db)
-                        trig = triggers.get(sym, {})
-                        if not isinstance(trig, dict):
-                            trig = {}
-                        sl   = trig.get("sl",  p.get("entry", 0) * (0.98 if p.get("direction") == "LONG" else 1.02))
-                        tp2  = trig.get("tp2", p.get("entry", 0) * (1.05 if p.get("direction") == "LONG" else 0.95))
-                        tp1  = p.get("entry", 0) * (1.025 if p.get("direction", "LONG") == "LONG" else 0.975)
-                        pnl  = p.get("pnl", 0)
-                        margin = user.capital * (user.max_risk_pct / 100)
-                        pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
+                            # Evaluate for reversal / early close / lock profit
+                            evaluate_reversal_for_position(user, p, cur, db)
+                            trig = triggers.get(sym, {})
+                            if not isinstance(trig, dict):
+                                trig = {}
+                            sl   = trig.get("sl",  p.get("entry", 0) * (0.98 if p.get("direction") == "LONG" else 1.02))
+                            tp2  = trig.get("tp2", p.get("entry", 0) * (1.05 if p.get("direction") == "LONG" else 0.95))
+                            tp1  = p.get("entry", 0) * (1.025 if p.get("direction", "LONG") == "LONG" else 0.975)
+                            pnl  = p.get("pnl", 0)
+                            margin = user.capital * (user.max_risk_pct / 100)
+                            pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
 
-                        pos_key = f"{tid}_{sym}_{p.get('direction', 'LONG')}"
-                        current_map[pos_key] = {
-                            "direction": p.get("direction", "LONG"), "pct": pct,
-                            "qty": p.get("qty", 0), "user_id": tid,
-                            "entry": p.get("entry", 0), "sl": sl, "tp2": tp2,
-                        }
-                        current_all.append({
-                            "user_id": tid, "tier": user.tier, "capital": user.capital,
-                            "symbol": sym, "direction": p.get("direction", "LONG"), "entry": p.get("entry", 0),
-                            "current_price": cur, "pnl": pnl, "pnl_pct": pct,
-                            "qty": p.get("qty", 0), "sl": sl, "tp1": tp1, "tp2": tp2,
-                        })
-                except Exception as e:
-                    log.warning("Sync user %s: %s", tid, e)
-                    _bx_cache.pop(tid, None)
+                            pos_key = f"{tid}_{sym}_{p.get('direction', 'LONG')}"
+                            current_map[pos_key] = {
+                                "direction": p.get("direction", "LONG"), "pct": pct,
+                                "qty": p.get("qty", 0), "user_id": tid,
+                                "entry": p.get("entry", 0), "sl": sl, "tp2": tp2,
+                            }
+                            current_all.append({
+                                "user_id": tid, "tier": user.tier, "capital": user.capital,
+                                "symbol": sym, "direction": p.get("direction", "LONG"), "entry": p.get("entry", 0),
+                                "current_price": cur, "pnl": pnl, "pnl_pct": pct,
+                                "qty": p.get("qty", 0), "sl": sl, "tp1": tp1, "tp2": tp2,
+                            })
+                    except Exception as e:
+                        log.warning("Sync user %s: %s", tid, e)
+                        _bx_cache.pop(tid, None)
 
-            prev_map = getattr(sync_bingx_positions, "_prev", {})
-            for k, v in prev_map.items():
-                if k not in current_map:
-                    parts = k.split("_", 2)
-                    if len(parts) == 3:
-                        user_id, symbol, direction = parts[0], parts[1], parts[2]
-                        pnl_pct = v.get("pct", 0)
-                        qty = v.get("qty", 0)
-                        entry = v.get("entry", 0)
-                        sl = v.get("sl", 0)
-                        tp2 = v.get("tp2", 0)
+                prev_map = getattr(sync_bingx_positions, "_prev", {})
+                for k, v in prev_map.items():
+                    if k not in current_map:
+                        parts = k.split("_", 2)
+                        if len(parts) == 3:
+                            user_id, symbol, direction = parts[0], parts[1], parts[2]
+                            pnl_pct = v.get("pct", 0)
+                            qty = v.get("qty", 0)
+                            entry = v.get("entry", 0)
+                            sl = v.get("sl", 0)
+                            tp2 = v.get("tp2", 0)
 
-                        _save_journal(user_id, symbol, direction, pnl_pct, qty)
+                            _save_journal(user_id, symbol, direction, pnl_pct, qty)
 
-                        # Check if this close was already notified by reversal
-                        was_reversal = False
-                        if redis_client:
-                            try:
-                                rev_key = f"REVERSAL_CLOSED:{user_id}:{symbol}:{direction}"
-                                if redis_client.get(rev_key):
-                                    was_reversal = True
-                                    redis_client.delete(rev_key)
-                            except Exception:
-                                pass
+                            # Check if this close was already notified by reversal
+                            was_reversal = False
+                            if redis_client:
+                                try:
+                                    rev_key = f"REVERSAL_CLOSED:{user_id}:{symbol}:{direction}"
+                                    if redis_client.get(rev_key):
+                                        was_reversal = True
+                                        redis_client.delete(rev_key)
+                                except Exception:
+                                    pass
 
-                        if not was_reversal:
-                            # Send Telegram notification for Closed Position!
-                            # Determine if it hit SL, TP2, or was closed manually
-                            outcome_emoji = "🏆" if pnl_pct > 0 else "🛑"
-                            outcome_text = "CHỐT LỜI THÀNH CÔNG (TP2)" if pnl_pct > 0 else "DỪNG LỖ (SL)"
-                            if abs(pnl_pct) < 0.1:
-                                outcome_emoji = "🛡️"
-                                outcome_text = "HOÀ VỐN / ĐÓNG THỦ CÔNG"
+                            if not was_reversal:
+                                # Send Telegram notification for Closed Position!
+                                # Determine if it hit SL, TP2, or was closed manually
+                                outcome_emoji = "🏆" if pnl_pct > 0 else "🛑"
+                                outcome_text = "CHỐT LỜI THÀNH CÔNG (TP2)" if pnl_pct > 0 else "DỪNG LỖ (SL)"
+                                if abs(pnl_pct) < 0.1:
+                                    outcome_emoji = "🛡️"
+                                    outcome_text = "HOÀ VỐN / ĐÓNG THỦ CÔNG"
 
-                            pnl_usd = 0
-                            try:
-                                user_db = db.query(User).filter(User.telegram_id == user_id).first()
-                                if user_db:
-                                    pnl_usd = user_db.capital * (user_db.max_risk_pct / 100) * pnl_pct / 100
-                            except Exception as e:
-                                log.error("Error getting user_db for closing notification: %s", e)
+                                pnl_usd = 0
+                                try:
+                                    user_db = db.query(User).filter(User.telegram_id == user_id).first()
+                                    if user_db:
+                                        pnl_usd = user_db.capital * (user_db.max_risk_pct / 100) * pnl_pct / 100
+                                except Exception as e:
+                                    log.error("Error getting user_db for closing notification: %s", e)
 
-                            _tg_send(
-                                REGISTER_TOKEN, user_id,
-                                f"{outcome_emoji} <b>VỊ THẾ ĐÃ ĐÓNG: {symbol}</b>\n\n"
-                                f"📈 Hướng: <b>{direction}</b>\n"
-                                f"💰 Khối lượng: {qty:.4f} {symbol}\n"
-                                f"📊 PnL: <b>{pnl_pct:+.2f}% ({'+' if pnl_usd >= 0 else ''}${pnl_usd:.2f})</b>\n"
-                                f"🛑 SL cũ: <code>${sl:.4f}</code> | 🏆 Target: <code>${tp2:.4f}</code>\n"
-                                f"🎯 Kết quả: <b>{outcome_text}</b>"
-                            )
+                                _tg_send(
+                                    REGISTER_TOKEN, user_id,
+                                    f"{outcome_emoji} <b>VỊ THẾ ĐÃ ĐÓNG: {symbol}</b>\n\n"
+                                    f"📈 Hướng: <b>{direction}</b>\n"
+                                    f"💰 Khối lượng: {qty:.4f} {symbol}\n"
+                                    f"📊 PnL: <b>{pnl_pct:+.2f}% ({'+' if pnl_usd >= 0 else ''}${pnl_usd:.2f})</b>\n"
+                                    f"🛑 SL cũ: <code>${sl:.4f}</code> | 🏆 Target: <code>${tp2:.4f}</code>\n"
+                                    f"🎯 Kết quả: <b>{outcome_text}</b>"
+                                )
 
-            sync_bingx_positions._prev = current_map
+                sync_bingx_positions._prev = current_map
 
-            with _POS_LOCK:
-                LIVE_POSITIONS = current_all
+                with _POS_LOCK:
+                    LIVE_POSITIONS = current_all
 
-            db.close()
+                db.close()
 
-        except Exception as e:
-            log.error("sync_bingx_positions: %s", e)
+            except Exception as e:
+                log.error("sync_bingx_positions: %s", e)
 
-        cleanup_counter += 1
-        if cleanup_counter >= 2880:
-            cleanup_counter = 0
-            threading.Thread(target=_cleanup_inactive_users, daemon=True).start()
+            cleanup_counter += 1
+            if cleanup_counter >= 2880:
+                cleanup_counter = 0
+                threading.Thread(target=_cleanup_inactive_users, daemon=True).start()
 
-        time.sleep(30)
+            time.sleep(30)
 
 
 def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty: float):
     db = SessionLocal()
     try:
-        user    = db.query(User).filter(User.telegram_id == user_id).first()
-        tier    = user.tier if user else "TIER1"
-        capital = user.capital if user else 0
-        pnl_usd = capital * (user.max_risk_pct / 100) * pnl_pct / 100 if user else 0
+            user    = db.query(User).filter(User.telegram_id == user_id).first()
+            tier    = user.tier if user else "TIER1"
+            capital = user.capital if user else 0
+            pnl_usd = capital * (user.max_risk_pct / 100) * pnl_pct / 100 if user else 0
 
-        result = "WIN" if pnl_pct > 0 else "LOSS"
-        lesson = (f"Lệnh {direction} {result} {round(abs(pnl_pct),2)}%. "
-                  + ("Xu hướng & timing tốt." if result == "WIN"
-                     else "Kiểm tra CVD, volume, Wyckoff trước khi vào tiếp."))
-        outcome = "TP" if pnl_pct > 0 else "SL"
+            result = "WIN" if pnl_pct > 0 else "LOSS"
+            lesson = (f"Lệnh {direction} {result} {round(abs(pnl_pct),2)}%. "
+                      + ("Xu hướng & timing tốt." if result == "WIN"
+                         else "Kiểm tra CVD, volume, Wyckoff trước khi vào tiếp."))
+            outcome = "TP" if pnl_pct > 0 else "SL"
 
-        db.add(TradeJournal(
-            symbol=symbol, user_id=user_id, tier=tier, direction=direction,
-            outcome=outcome, pnl_pct=pnl_pct, pnl_usd=pnl_usd,
-            context=f"{symbol} {direction} @ {datetime.now().strftime('%d/%m %H:%M')}",
-            lesson=lesson))
-        if user:
-            user.total_pnl = (user.total_pnl or 0) + pnl_usd
+            db.add(TradeJournal(
+                symbol=symbol, user_id=user_id, tier=tier, direction=direction,
+                outcome=outcome, pnl_pct=pnl_pct, pnl_usd=pnl_usd,
+                context=f"{symbol} {direction} @ {datetime.now().strftime('%d/%m %H:%M')}",
+                lesson=lesson))
+            if user:
+                user.total_pnl = (user.total_pnl or 0) + pnl_usd
 
-        old = (db.query(TradeJournal).filter(TradeJournal.user_id == user_id)
-               .order_by(TradeJournal.timestamp.desc()).all())
-        if len(old) > 50:
-            for r in old[50:]:
-                db.delete(r)
-        db.commit()
+            old = (db.query(TradeJournal).filter(TradeJournal.user_id == user_id)
+                   .order_by(TradeJournal.timestamp.desc()).all())
+            if len(old) > 50:
+                for r in old[50:]:
+                    db.delete(r)
+            db.commit()
 
-        if redis_client:
-            try:
-                redis_client.delete(f"TP1_DONE:{user_id}:{symbol}:{direction}")
-            except Exception:
-                pass
+            if redis_client:
+                try:
+                    redis_client.delete(f"TP1_DONE:{user_id}:{symbol}:{direction}")
+                except Exception:
+                    pass
 
     except Exception as e:
         db.rollback()
@@ -803,6 +803,14 @@ def _handle_user_close(telegram_id: str, symbol: str):
 # ══════════════════════════════════════════════════════════════════
 # ĐĂNG KÝ USER
 # ══════════════════════════════════════════════════════════════════
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 class UserRegister(BaseModel):
     telegram_id: str
     api_key:     str
