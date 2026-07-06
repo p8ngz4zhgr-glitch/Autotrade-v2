@@ -699,6 +699,8 @@ def sync_bingx_positions():
 
             current_all: list = []
             current_map: dict = {}
+            price_cache = {}
+
 
             for user in active_users:
                 tid = user.telegram_id
