@@ -57,7 +57,7 @@ class TradeJournal(Base):
     pnl_pct            = Column(Float,    default=0.0)
     pnl_usd            = Column(Float,    default=0.0)
     lesson             = Column(Text,     default="")
-
+    context            = Column(String,   nullable=True)
     timestamp          = Column(DateTime, default=datetime.utcnow)
 
 
