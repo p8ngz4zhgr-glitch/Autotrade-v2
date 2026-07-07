@@ -211,7 +211,7 @@ class TelegramBot:
         AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇"}
         ANAME  = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "BNBUSDT": "BNB Chain",
                   "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla", "NVDA": "NVIDIA",
-                  "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "XAUUSD": "Vàng XAU/USD"}
+                  "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "NCCOGOLD2USD-USDT": "Vàng NCCOGOLD2USD-USDT"}
         WY_IC  = {"ACCUMULATION": "🔵", "MARKUP": "🟢", "RE-ACCUMULATION": "🟩",
                   "DISTRIBUTION": "🔴", "MARKDOWN": "⛔", "TRANSITION": "⚪"}
         BI_IC  = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}
