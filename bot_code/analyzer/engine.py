@@ -15,7 +15,7 @@ log = logging.getLogger("analyzer.engine")
 class SignalEngine:
     TIMEFRAMES = ["15m", "1h", "4h", "1d"]
 
-    # [FIX] Dùng chung 1 ThreadPoolExecutor thay vì tạo mới mỗi lần full_analysis
+    # Dùng chung 1 ThreadPoolExecutor thay vì tạo mới mỗi lần full_analysis
     # max_workers=4 khớp với số TF để tất cả chạy song song
     _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tf-worker")
 
@@ -30,7 +30,8 @@ class SignalEngine:
             return self.crypto, "CRYPTO"
         if symbol in ("TSLA", "NVDA", "SPY", "QQQ"):
             return self.stock, "STOCK"
-        if symbol == "XAUUSD":
+        # Đã cập nhật mã Gold BingX
+        if symbol == "NCCOGOLD2USD-USDT":
             return self.stock, "GOLD"
         return self.crypto, "CRYPTO"
 
@@ -39,7 +40,8 @@ class SignalEngine:
             return True, "Crypto 24/7"
         if symbol in ("TSLA", "NVDA", "SPY", "QQQ"):
             return self.stock.market_open()
-        if symbol == "XAUUSD":
+        # Đã cập nhật mã Gold BingX
+        if symbol == "NCCOGOLD2USD-USDT":
             return self.stock.is_gold_open()
         return True, "OK"
 
@@ -180,7 +182,6 @@ class SignalEngine:
                 score += stoch_adj * 0.4
 
         # 10. Candlestick Patterns (weight 12)
-        # Mô hình nến kinh điển — bổ sung tín hiệu kỹ thuật vi mô
         candle_adj  = candle.get("score_adj", 0)
         candle_str  = candle.get("strength", 0)
         if candle_str >= 30:
