@@ -36,7 +36,7 @@ def get_memory_for_ai(symbol: str) -> str:
 
 class SignalBot:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
-    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "XAUUSD"]
+    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]
 
     _PIPELINE_SEMAPHORE = threading.Semaphore(2)
 
@@ -231,7 +231,7 @@ class SignalBot:
                              str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
                              str(d["confidence"]) + "% [" + bar + "] " + WY.get(wy, "⚪") + wy)
             rows.append("\n📈 <b>CỔ PHIẾU MỸ</b>")
-            for sym in ["TSLA", "NVDA", "SPY", "QQQ", "XAUUSD"]:
+            for sym in ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]:
                 d = self.last_signals.get(sym)
                 if not d or not d.get("final"): continue
                 wy = d.get("wyckoff", {}).get("phase", "?")
