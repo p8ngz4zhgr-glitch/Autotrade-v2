@@ -411,7 +411,8 @@ class StockFetcher:
            "Accept": "application/json",
            "Referer": "https://finance.yahoo.com/"}
     CGK    = "https://api.coingecko.com/api/v3"
-    YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC%3DF"}
+    # Sửa GC%3DF thành GC=F để API requests không bị lỗi encode
+    YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC=F"}
     YH_IV  = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
     YH_RNG = {"15m": "5d", "1h": "30d", "4h": "30d", "1d": "6mo"}
     PLIM   = {"TSLA": (10, 5000), "NVDA": (10, 5000),
@@ -445,21 +446,24 @@ class StockFetcher:
             for base in ["query1", "query2"]:
                 try:
                     r = self._session.get(
-                        f"https://{base}.finance.yahoo.com/v8/finance/chart/GC%3DF"
+                        f"https://{base}.finance.yahoo.com/v8/finance/chart/GC=F"
                         "?interval=1m&range=1d",
                         headers=self.HDR, timeout=10)
                     if r.ok:
-                        data = r.json()["chart"]["result"][0]
-                        meta = data.get("meta", {})
-                        for key in ["regularMarketPrice", "chartPreviousClose"]:
-                            p = float(meta.get(key, 0))
-                            if lo < p < hi:
-                                log.info("Gold Yahoo %s [%s]: $%.2f", base, key, p)
-                                return round(p, 2)
-                        closes = [c for c in data["indicators"]["quote"][0].get("close", [])
-                                  if c and lo < float(c) < hi]
-                        if closes:
-                            return round(closes[-1], 2)
+                        j = r.json()
+                        # Kiểm tra an toàn xem có "result" không
+                        if j.get("chart", {}).get("result"):
+                            data = j["chart"]["result"][0]
+                            meta = data.get("meta", {})
+                            for key in ["regularMarketPrice", "chartPreviousClose"]:
+                                p = float(meta.get(key, 0))
+                                if lo < p < hi:
+                                    log.info("Gold Yahoo %s [%s]: $%.2f", base, key, p)
+                                    return round(p, 2)
+                            closes = [c for c in data["indicators"]["quote"][0].get("close", [])
+                                      if c and lo < float(c) < hi]
+                            if closes:
+                                return round(closes[-1], 2)
                 except Exception as e:
                     log.warning("Yahoo GC=F %s: %s", base, e)
 
@@ -473,15 +477,18 @@ class StockFetcher:
                     f"https://{base}.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d",
                     headers=self.HDR, timeout=10)
                 if r.ok:
-                    data = r.json()["chart"]["result"][0]
-                    meta = data.get("meta", {})
-                    p = float(meta.get("regularMarketPrice", 0))
-                    if lo < p < hi:
-                        return round(p, 2)
-                    closes = [c for c in data["indicators"]["quote"][0].get("close", [])
-                              if c and lo < float(c) < hi]
-                    if closes:
-                        return round(closes[-1], 2)
+                    j = r.json()
+                    # Kiểm tra an toàn xem có "result" không
+                    if j.get("chart", {}).get("result"):
+                        data = j["chart"]["result"][0]
+                        meta = data.get("meta", {})
+                        p = float(meta.get("regularMarketPrice", 0))
+                        if lo < p < hi:
+                            return round(p, 2)
+                        closes = [c for c in data["indicators"]["quote"][0].get("close", [])
+                                  if c and lo < float(c) < hi]
+                        if closes:
+                            return round(closes[-1], 2)
             except Exception as e:
                 log.warning("Yahoo price %s %s: %s", symbol, base, e)
 
@@ -501,7 +508,13 @@ class StockFetcher:
                     headers=self.HDR, timeout=15)
                 if r.status_code != 200:
                     continue
-                q = r.json()["chart"]["result"][0]["indicators"]["quote"][0]
+                    
+                j = r.json()
+                # Kiểm tra an toàn để fix lỗi sập NoneType
+                if not j.get("chart", {}).get("result"):
+                    continue
+                    
+                q = j["chart"]["result"][0]["indicators"]["quote"][0]
 
                 def clean(lst):
                     return [float(x) for x in lst if x is not None and lo < float(x) < hi]
@@ -546,28 +559,4 @@ class StockFetcher:
 
     def market_open(self):
         from datetime import timezone, timedelta
-        et  = timezone(timedelta(hours=-4))
-        now = datetime.now(et)
-        wd, h, m = now.weekday(), now.hour, now.minute
-        if wd >= 5:
-            return False, "📴 Cuối tuần — thị trường đóng"
-        if h < 9 or (h == 9 and m < 30):
-            return False, "⏰ Pre-market (mở lúc 9:30 ET)"
-        if h >= 16:
-            return False, "📴 After-hours (đóng lúc 16:00 ET)"
-        return True, "🟢 NYSE/NASDAQ đang mở"
-
-    def is_gold_open(self):
-        from datetime import timezone, timedelta
-        et  = timezone(timedelta(hours=-4))
-        now = datetime.now(et)
-        wd, h = now.weekday(), now.hour
-        if wd == 5:
-            return False, "📴 Gold đóng cửa (Thứ 7)"
-        if wd == 6 and h < 18:
-            return False, "📴 Gold mở lại CN 18:00 ET"
-        if wd == 4 and h >= 17:
-            return False, "📴 Gold đóng từ T6 17:00 ET"
-        if h == 17:
-            return False, "⏸️ Gold break 17:00–18:00 ET"
-        return True, "🟡 Gold Futures đang giao dịch"
+        et  = timezone(timedelta(hours=-
