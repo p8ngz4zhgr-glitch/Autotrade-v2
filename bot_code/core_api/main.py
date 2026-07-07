@@ -770,7 +770,7 @@ def sync_bingx_positions():
                                 bx.cancel_all_orders(sym)
                                 time.sleep(0.5)
                             except Except as e:
-                                log.warning(f'⚠️ Lỗi khi hủy lệnh treo cho {sym}: {e}")
+                                log.warning(f"⚠️ Lỗi khi hủy lệnh treo cho {sym}: {e}")
                             
                             close_res = bx.close_position(sym, qty, direction)
                             if close_res and close_res.get("ok"):
