@@ -768,7 +768,7 @@ def sync_bingx_positions():
                             log.info(f"🚨 {action_name}: {user.telegram_id} - {sym} ({pct}%)")
                             try:
                                 bx.cancel_all_orders(sym)
-                                 time.sleep(0.5)
+                                time.sleep(0.5)
                             except Except as e:
                                 log.warning(f'⚠️ Lỗi khi hủy lệnh treo cho {sym}: {e}")
                             
