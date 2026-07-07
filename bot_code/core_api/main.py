@@ -1137,7 +1137,8 @@ async def startup_event():
 # ══════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ══════════════════════════════════════════════════════════════════
-@app.get("/")
+# Sửa @app.get("/") thành @app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {"status": "online", "version": "v6.1",
             "tiers": {t: c["label"] for t, c in TIER_CONFIG.items()}}
