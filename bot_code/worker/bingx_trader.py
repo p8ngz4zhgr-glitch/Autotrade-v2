@@ -174,6 +174,13 @@ class BingXExchange:
                         elif "TAKE_PROFIT" in otype or "LIMIT" in otype:
                             triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
         return triggers
+    
+    def _safe_order(self, params: dict) -> dict:
+        res = self._request("POST", "/openApi/swap/v2/trade/order", params)
+        if res.get("code") == 109400: # One-Way mode error
+            params["positionSide"] = "BOTH"
+            res = self._request("POST", "/openApi/swap/v2/trade/order", params)
+        return res
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
         """Đặt lệnh Market + cài SL/TP đi kèm"""
