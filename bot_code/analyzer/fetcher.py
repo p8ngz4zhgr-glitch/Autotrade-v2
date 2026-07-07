@@ -559,4 +559,28 @@ class StockFetcher:
 
     def market_open(self):
         from datetime import timezone, timedelta
-        et  = timezone(timedelta(hours=-
+        et  = timezone(timedelta(hours=-4))
+        now = datetime.now(et)
+        wd, h, m = now.weekday(), now.hour, now.minute
+        if wd >= 5:
+            return False, "📴 Cuối tuần — thị trường đóng"
+        if h < 9 or (h == 9 and m < 30):
+            return False, "⏰ Pre-market (mở lúc 9:30 ET)"
+        if h >= 16:
+            return False, "📴 After-hours (đóng lúc 16:00 ET)"
+        return True, "🟢 NYSE/NASDAQ đang mở"
+
+    def is_gold_open(self):
+        from datetime import timezone, timedelta
+        et  = timezone(timedelta(hours=-4))
+        now = datetime.now(et)
+        wd, h = now.weekday(), now.hour
+        if wd == 5:
+            return False, "📴 Gold đóng cửa (Thứ 7)"
+        if wd == 6 and h < 18:
+            return False, "📴 Gold mở lại CN 18:00 ET"
+        if wd == 4 and h >= 17:
+            return False, "📴 Gold đóng từ T6 17:00 ET"
+        if h == 17:
+            return False, "⏸️ Gold break 17:00–18:00 ET"
+        return True, "🟡 Gold Futures đang giao dịch"
