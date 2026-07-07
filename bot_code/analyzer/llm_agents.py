@@ -173,7 +173,7 @@ class LLMChain:
         ell   = data.get("elliott_4h", {})
         atype = data.get("asset_type", "CRYPTO")
         ctx   = {"CRYPTO": "crypto futures", "STOCK": "cổ phiếu Mỹ",
-                 "GOLD":   "vàng XAU/USD"}.get(atype, "")
+                 "GOLD":   "vàng NCCOGOLD2USD-USDT"}.get(atype, "")
         tfs   = " | ".join(tf + ":" + r["direction"][0] + "(" + str(r["score"]) + ")"
                            for tf, r in data["timeframes"].items())
         return ("Chuyên gia " + ctx + ". Phân tích ngắn (150 từ):\n"
@@ -573,7 +573,7 @@ class LLMChain:
         atype = data.get("asset_type","CRYPTO")
         ctx = {"CRYPTO": "crypto. Xem on-chain, whale, derivatives",
                "STOCK":  "co phieu My. Xem earnings, Fed, sector",
-               "GOLD":   "vang XAU/USD. Xem DXY, lai suat Fed, CPI",
+               "GOLD":   "vang NCCOGOLD2USD-USDT. Xem DXY, lai suat Fed, CPI",
                }.get(atype, "tai san tai chinh")
         return (
             "Ban la 4 chuyen gia phan tich " + ctx + ".\n"
@@ -815,7 +815,7 @@ class MultiAgentPipeline:
         atype = data.get("asset_type","CRYPTO")
         ctx = {"CRYPTO": "crypto. Xem on-chain, whale, derivatives",
                "STOCK":  "co phieu My. Xem earnings, Fed, sector",
-               "GOLD":   "vang XAU/USD. Xem DXY, lai suat Fed, CPI",
+               "GOLD":   "vang NCCOGOLD2USD-USDT. Xem DXY, lai suat Fed, CPI",
                }.get(atype, "tai san tai chinh")
         return (
             "Ban la 4 chuyen gia phan tich " + ctx + ".\n"
