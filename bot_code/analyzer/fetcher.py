@@ -411,13 +411,13 @@ class StockFetcher:
            "Accept": "application/json",
            "Referer": "https://finance.yahoo.com/"}
     CGK    = "https://api.coingecko.com/api/v3"
-    YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "XAUUSD": "GC%3DF"}
+    YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC%3DF"}
     YH_IV  = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
     YH_RNG = {"15m": "5d", "1h": "30d", "4h": "30d", "1d": "6mo"}
     PLIM   = {"TSLA": (10, 5000), "NVDA": (10, 5000),
-               "SPY": (100, 1500), "QQQ": (100, 1500), "XAUUSD": (1500, 6000)}
+               "SPY": (100, 1500), "QQQ": (100, 1500), "NCCOGOLD2USD-USDT": (1500, 6000)}
 
-    _SYNTHETIC_PRICES = {"XAUUSD": 2350.0, "SPY": 540.0, "TSLA": 220.0, "NVDA": 120.0}
+    _SYNTHETIC_PRICES = {"NCCOGOLD2USD-USDT": 2350.0, "SPY": 540.0, "TSLA": 220.0, "NVDA": 120.0}
 
     def __init__(self):
         self._session = _make_session(retries=2, backoff=0.5)
@@ -426,7 +426,7 @@ class StockFetcher:
         lo, hi = self.PLIM.get(symbol, (0, 1e9))
 
         # GOLD
-        if symbol == "XAUUSD":
+        if symbol == "NCCOGOLD2USD-USDT":
             try:
                 r = self._session.get(
                     self.CGK + "/simple/price",
@@ -528,7 +528,7 @@ class StockFetcher:
                 log.warning("Yahoo klines %s %s %s: %s", symbol, interval, base, e)
 
         # Fallback synthetic klines
-        is_open, _ = self.market_open() if symbol != "XAUUSD" else self.is_gold_open()
+        is_open, _ = self.market_open() if symbol != "NCCOGOLD2USD-USDT" else self.is_gold_open()
         if is_open:
             log.error("🚫 Yahoo FAIL khi thị trường đang MỞ cho %s [%s] — bỏ qua TF này", symbol, interval)
             return None
