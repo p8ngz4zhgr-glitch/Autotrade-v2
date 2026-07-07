@@ -126,7 +126,7 @@ class BingXExchange:
         return res_long
 
     def get_open_positions(self, symbol: str = None) -> list:
-        """Lấy danh sách các vị thế đang mở"""
+        """Lấy danh sách các vị thế đang mở (Đã fix lỗi nhận diện nhầm SHORT thành LONG)"""
         params = {}
         if symbol:
             params["symbol"] = symbol
@@ -142,18 +142,24 @@ class BingXExchange:
                             continue
                         sym = p.get("symbol", "")
                         normalized_sym = sym.replace("-", "") if sym else ""
-                        
-                        # Fix for Float Division by Zero: avgPrice is the standard key in BingX Swap V2
                         entry_price = float(p.get("avgPrice") or p.get("entryPrice") or 0)
                         
+                        # --- FIX: Đọc hướng vị thế dựa trên positionSide của BingX ---
+                        pos_side = p.get("positionSide", "").upper()
+                        if pos_side in ["LONG", "SHORT"]:
+                            direction = pos_side
+                        else:
+                            direction = "LONG" if qty > 0 else "SHORT"
+                            
                         positions.append({
                             "symbol": normalized_sym,
-                            "direction": "LONG" if qty > 0 else "SHORT",
+                            "direction": direction,
                             "entry": entry_price,
                             "qty": abs(qty),
                             "pnl": float(p.get("unrealizedProfit", 0)),
                         })
         return positions
+
 
     def get_trigger_orders(self) -> dict:
         """Lấy danh sách các lệnh kích hoạt (SL/TP)"""
