@@ -38,7 +38,7 @@ class SignalBot:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
     STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]
 
-    _PIPELINE_SEMAPHORE = threading.Semaphore(2)
+    _PIPELINE_SEMAPHORE = threading.Semaphore(4)  # Tăng lên 4 luồng song song
 
     def __init__(self):
         self.log = logging.getLogger("SignalBot")
@@ -121,7 +121,10 @@ class SignalBot:
             self.log.error(f"❌ Lỗi đẩy Redis: {e}")
 
     def _run_pipeline_sync(self, sym, data):
-        if data.get("final") == "WAIT" and data.get("confidence", 0) < 70:
+        final_sig = data.get("final", "WAIT")
+        conf = data.get("confidence", 0)
+        ev_ratio = data.get("bayes_ev", {}).get("ev_ratio", 0)
+        if final_sig == "WAIT" and conf < 70 and ev_ratio < 0.3:
             return
         with self._PIPELINE_SEMAPHORE:
             try:
@@ -164,6 +167,16 @@ class SignalBot:
 
                 data = self.engine.full_analysis(sym)
                 data["ai_memory"] = get_memory_for_ai(sym)
+
+                final_sig = data.get("final", "WAIT")
+                conf = data.get("confidence", 0)
+                ev_ratio = data.get("bayes_ev", {}).get("ev_ratio", 0)
+                
+                # [LỌC SỚM TÀI NGUYÊN] Bỏ qua AI cho lệnh WAIT có toán học quá yếu
+                if final_sig == "WAIT" and ev_ratio < 0.2 and conf < 65:
+                    self.log.info("  ⏭️ [Early Filter] Bỏ qua AI cho %s (EV: %.2f, Conf: %.1f%%) để tiết kiệm server", sym, ev_ratio, conf)
+                    time.sleep(1.0)
+                    continue
 
                 llm_text, llm = self.llm.analyze(data)
                 v1h = data.get("volume_1h", {})
