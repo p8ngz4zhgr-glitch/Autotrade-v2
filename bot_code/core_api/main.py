@@ -87,7 +87,8 @@ def apply_tier(user: User, tier: str):
     user.max_risk_pct   = cfg["max_risk_pct"]
     user.max_positions  = cfg["max_positions"]
     user.leverage       = cfg["leverage"]
-    
+
+#    
 ══════════════════════════════════════════════════════════════════
 # ENV & REDIS
 # ══════════════════════════════════════════════════════════════════
