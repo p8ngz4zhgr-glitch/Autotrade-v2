@@ -270,6 +270,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
     now = time.time()
     
     try:
+        # 1. LẤY PHÂN TÍCH TỪ AI (MẮT THẦN GIÁM SÁT)
         cached = _LAST_REVERSAL_EVAL.get(sym)
         if cached and isinstance(cached, dict) and now - cached.get("time", 0) < 180:
             new_direction = cached.get("direction", "WAIT")
@@ -289,112 +290,146 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 "analysis": analysis
             }
 
-        # 1. TÍNH TOÁN LÃI/LỖ TRƯỚC (Để làm cơ sở ngắt lệnh bảo vệ)
+        # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI
+        in_profit = False
+        pnl_pct = 0.0
         if entry > 0:
             in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
             pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
-        else:
-            in_profit = False
-            pnl_pct = 0.0
-            
+
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
-        is_weak_trend = (new_direction == "WAIT" and conf < 40)
         
-        should_close_early = False
+        # Bóc tách mốc TP1, TP2 từ AI
+        plan = analysis.get("plan", {})
+        tp1 = float(plan.get("tp1", 0))
+        tp2 = float(plan.get("tp2", 0))
+        
+        # Kiểm tra cờ Scale Out (Đã chốt 1/2 chưa?)
+        partial_key = f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}"
+        is_scaled_out = False
+        if redis_client:
+            try: is_scaled_out = bool(redis_client.get(partial_key))
+            except: pass
+
+        # ══════════════════════════════════════════════════════════
+        # LOGIC GIAO DỊCH (Ưu tiên kiểm tra BIẾN ĐỘNG trước, GỒNG LÃI sau)
+        # ══════════════════════════════════════════════════════════
+        action = "KEEP"
+        reason = "Xu hướng ủng hộ, tiếp tục giữ lệnh."
         should_reverse = False
+        emoji = "🛡️"
         action_type = ""
-        emoji = ""
-        reason = ""
-        
-        # ══════════════════════════════════════════════════════════
-        # 2. XÉT ĐIỀU KIỆN ĐÓNG LỆNH (Ưu tiên từ trên xuống)
-        # ══════════════════════════════════════════════════════════
-        
-        # Ưu tiên 1: Chạm mốc bảo vệ vốn tuyệt đối (Virtual TP 50% / Virtual SL 30%)
-        if pnl_pct >= 50.0:
-            should_close_early = True
-            action_type = "CHỐT LỜI TỰ ĐỘNG"
-            emoji = "🎯"
-            reason = f"đạt mốc lợi nhuận mục tiêu ({pnl_pct:.2f}%)"
-            
-        elif pnl_pct <= -30.0:
-            should_close_early = True
-            action_type = "CẮT LỖ TỰ ĐỘNG"
-            emoji = "🛑"
-            reason = f"chạm mốc cắt lỗ an toàn ({pnl_pct:.2f}%)"
-            
-        # Ưu tiên 2: Tín hiệu đảo chiều từ AI (Chốt/cắt sớm tối ưu vốn)
-        elif is_reversal and conf >= 70:
-            should_close_early = True
+
+        # ĐIỀU KIỆN 1: THỊ TRƯỜNG QUAY ĐẦU (NGẮT MẠCH NGAY LẬP TỨC)
+        if is_reversal and conf >= 60:
+            action = "CLOSE_ALL"
             should_reverse = True
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
-            emoji = "💰" if in_profit else "⚠️"
-            reason = "đảo chiều mạnh"
+            emoji = "🚨"
+            reason = f"Thị trường QUAY ĐẦU MẠNH sang {new_direction} -> Ngắt lệnh khẩn cấp, không đợi SL/TP cứng."
             
         elif is_reversal and conf >= 40:
-            should_close_early = True
+            action = "CLOSE_ALL"
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
-            emoji = "💰" if in_profit else "⚠️"
-            reason = "đảo chiều yếu"
+            emoji = "⚠️"
+            reason = "Xu hướng có dấu hiệu quay đầu -> Ngắt lệnh bảo toàn vốn."
             
-        elif is_weak_trend:
-            should_close_early = True
+        elif new_direction == "WAIT":
+            action = "CLOSE_ALL"
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
-            emoji = "💰" if in_profit else "⚠️"
-            reason = "xu hướng suy yếu (WAIT)"
+            emoji = "⏸️"
+            reason = "Thị trường gãy sóng/đi ngang mất xu hướng -> Thoát lệnh an toàn."
+
+        # ĐIỀU KIỆN 2: XU HƯỚNG VẪN TỐT & ĐẠT MỤC TIÊU TP1 (CƠ CHẾ GỒNG LÃI)
+        # Chỉ chạy vào đây nếu KHÔNG có tín hiệu quay đầu ở trên
+        elif not is_scaled_out and tp1 > 0:
+            reached_tp1 = (direction == "LONG" and current_price >= tp1) or (direction == "SHORT" and current_price <= tp1)
             
+            if reached_tp1:
+                action = "SCALE_OUT"
+                action_type = "CHỐT LỜI TỪNG PHẦN"
+                emoji = "🎯"
+                reason = "Đã chạm TP1, xu hướng vẫn tốt -> Chốt lời 1/2, dời SL về Entry, thả TP2."
+
         # ══════════════════════════════════════════════════════════
-        # 3. THỰC THI LỆNH ĐÓNG (VÀ ĐẢO CHIỀU NẾU CẦN)
+        # THỰC THI GIAO DỊCH
         # ══════════════════════════════════════════════════════════
-        if should_close_early:
+        if action != "KEEP":
             bx = get_bx(user)
             
-            log.info("🚨 Early Exit detected for %s %s: %s (Reason: %s)", user.telegram_id, sym, action_type, reason)
-            
-            res = bx.close_position(sym, qty, direction)
-            if res.get("ok"):
-                if redis_client:
-                    try:
-                        redis_client.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
-                    except Exception:
-                        pass
-                
-                bx.cancel_all_orders(sym)
-                
-                _tg_send(
-                    REGISTER_TOKEN, user.telegram_id,
-                    f"{emoji} <b>{action_type} ({reason.upper()}): {sym}</b>\n\n"
-                    f"🔄 Đánh giá lại: Xu hướng chuyển sang <b>{new_direction}</b> (Conf: {conf}%).\n"
-                    f"📊 Vị thế cũ: {direction} @ ${entry:.4f}\n"
-                    f"📈 Giá hiện tại: ${current_price:.4f} | PnL: {pnl_pct:+.2f}%\n"
-                    f"🔒 Đã tự động đóng vị thế và huỷ SL/TP cũ để bảo vệ vốn."
-                )
-                
-                _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
-                time.sleep(1.5)
-                
-                # Việc vào lệnh mới CHỈ xảy ra nếu bot nhận định "đảo chiều mạnh" 
-                # (Sẽ không tự động vào lệnh nếu lệnh vừa bị đóng do chạm mức 50% hoặc -30%)
-                if should_reverse:
-                    new_entry = float(analysis["plan"]["entry"])
-                    new_sl    = float(analysis["plan"]["sl"])
-                    new_tp1   = float(analysis["plan"]["tp1"])
-                    new_tp2   = float(analysis["plan"].get("tp2", 0))
-                    if new_tp2 <= 0:
-                        if new_direction == "LONG":
-                            new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
-                        else:
-                            new_tp2 = round(new_tp1 - abs(new_tp1 - new_entry), 4)
+            # --- CƠ CHẾ GỒNG: CHỐT 1/2 & DỜI SL ---
+            if action == "SCALE_OUT":
+                half_qty = round(qty / 2, 4)
+                if half_qty > 0:
+                    bx.cancel_all_orders(sym)
+                    res = bx.close_position(sym, half_qty, direction)
                     
-                    sl_pct = abs(new_entry - new_sl) / new_entry
-                    if sl_pct >= 0.001:
-                        risk_amt = user.capital * (user.max_risk_pct / 100)
-                        new_qty = round(risk_amt / (new_entry * sl_pct), 4)
-                        if new_qty > 0:
-                            bx.set_leverage(sym, leverage=user.leverage)
-                            bx.cancel_all_orders(sym)
-                            new_order_res = bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2)
-                            if new_order_res.get("ok"):
+                    if res.get("ok"):
+                        if redis_client:
+                            try: redis_client.setex(partial_key, 86400, "1")
+                            except: pass
+                        
+                        if tp2 <= 0: 
+                            tp_dist = abs(tp1 - entry)
+                            tp2 = entry + (tp_dist * 2) if direction == "LONG" else entry - (tp_dist * 2)
+                            
+                        # Đặt lệnh phần còn lại: Stoploss hòa vốn (Entry), chốt lời TP2
+                        bx.place_order(sym, "BUY" if direction == "SHORT" else "SELL", half_qty, entry, tp2)
+                        
+                        _tg_send(
+                            REGISTER_TOKEN, user.telegram_id,
+                            f"{emoji} <b>{action_type}: {sym}</b>\n\n"
+                            f"📊 Đã chốt: 1/2 vị thế {direction} (PnL: {pnl_pct:+.2f}%)\n"
+                            f"🔒 SL phần còn lại: Dời về Entry (<code>${entry:.4f}</code>)\n"
+                            f"🎯 Target tiếp theo (TP2): <code>${tp2:.4f}</code>\n"
+                            f"🔍 Lý do: <i>{reason}</i>"
+                        )
+                        _save_journal(user.telegram_id, sym, direction, pnl_pct, half_qty)
+            
+            # --- CƠ CHẾ NGẮT: ĐÓNG TOÀN BỘ VỊ THẾ KHẨN CẤP ---
+            elif action == "CLOSE_ALL":
+                bx.cancel_all_orders(sym)
+                res = bx.close_position(sym, qty, direction)
+                
+                if res.get("ok"):
+                    if redis_client:
+                        try:
+                            redis_client.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
+                            redis_client.delete(partial_key)
+                        except: pass
+                        
+                    _tg_send(
+                        REGISTER_TOKEN, user.telegram_id,
+                        f"{emoji} <b>{action_type}: {sym}</b>\n\n"
+                        f"📊 Vị thế cũ: {direction} @ ${entry:.4f}\n"
+                        f"📈 Giá chốt: ${current_price:.4f} | PnL: {pnl_pct:+.2f}%\n"
+                        f"🔍 Lý do: <i>{reason}</i>"
+                    )
+                    _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
+                    time.sleep(1.5)
+                    
+                    # --- VÀO LỆNH NGƯỢC LẠI NẾU CÓ TÍN HIỆU ĐẢO CHIỀU MẠNH ---
+                    if should_reverse:
+                        new_entry = float(analysis["plan"]["entry"])
+                        new_sl    = float(analysis["plan"]["sl"])
+                        new_tp1   = float(analysis["plan"]["tp1"])
+                        new_tp2   = float(analysis["plan"].get("tp2", 0))
+                        
+                        if new_tp2 <= 0:
+                            if new_direction == "LONG":
+                                new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
+                            else:
+                                new_tp2 = round(new_tp1 - abs(new_tp1 - new_entry), 4)
+                        
+                        sl_pct = abs(new_entry - new_sl) / new_entry
+                        if sl_pct >= 0.001:
+                            risk_amt = user.capital * (user.max_risk_pct / 100)
+                            new_qty = round(risk_amt / (new_entry * sl_pct), 4)
+                            
+                            if new_qty > 0:
+                                bx.set_leverage(sym, leverage=user.leverage)
+                                bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2)
+                                
                                 _tg_send(
                                     REGISTER_TOKEN, user.telegram_id,
                                     f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
@@ -403,6 +438,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                     f"🛑 SL: <code>${new_sl:.4f}</code>\n"
                                     f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code>"
                                 )
+                                
     except Exception as e:
         log.warning("Evaluate reversal for %s %s error: %s", user.telegram_id, sym, e)
 
