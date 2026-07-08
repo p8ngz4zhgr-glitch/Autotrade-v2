@@ -259,9 +259,17 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             
         if should_close_early:
             bx = get_bx(user)
-            in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
-            pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
-            
+            #in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
+            #pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
+            # Kiểm tra an toàn trước khi tính toán
+            if entry > 0:
+               in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
+               pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
+            else:
+     # Gán giá trị mặc định an toàn nếu entry = 0
+               in_profit = False
+               pnl_pct = 0.0
+
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
             emoji = "💰" if in_profit else "⚠️"
             reason = "đảo chiều mạnh" if should_reverse else ("đảo chiều yếu" if is_reversal else "xu hướng suy yếu (WAIT)")
