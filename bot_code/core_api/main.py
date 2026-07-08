@@ -1,7 +1,4 @@
-"""
-SignalBot v6.1 — Main API
-"""
-
+""" API"""
 import os
 import sys
 import json
@@ -12,7 +9,6 @@ import logging
 import gc
 import schedule
 import requests as _req
-
 import redis
 import redis.asyncio as aioredis
 from datetime import datetime, timedelta
@@ -22,6 +18,7 @@ from fastapi import FastAPI, Depends, HTTPException, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -29,21 +26,32 @@ from core_api.models import SessionLocal, User, TradeJournal
 from core_api.security import encrypt_api_secret, decrypt_api_secret
 from analyzer.main_scanner import SignalBot
 from worker.bingx_trader import BingXExchange
-from analyzer.telegram_bot import TelegramBot
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("MainAPI")
 
 app = FastAPI(title="SignalBot v6.1")
 
+REGISTER_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    redis_client.ping()
+except Exception:
+    redis_client = None
+
+LIVE_POSITIONS = {}
+LAST_SIGNALS = []
+_LAST_REVERSAL_EVAL = {}
+
 # ══════════════════════════════════════════════════════════════════
-# TIER CONFIG — TRUNG TÂM HỆ THỐNG
+# TIER CONFIG
 # ══════════════════════════════════════════════════════════════════
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 73.0, "max_risk_pct": 2.0,
-        "max_positions": 3, "leverage": 5, "target_monthly": "5-8%",
+        "min_confidence": 68.0, "max_risk_pct": 2.0,
+        "max_positions": 2, "leverage": 5, "target_monthly": "5-8%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
@@ -58,7 +66,6 @@ TIER_CONFIG = {
 }
 MIN_CAPITAL_TO_TRADE = 20.0
 
-
 def get_tier(capital: float) -> Optional[str]:
     if capital < MIN_CAPITAL_TO_TRADE:
         return None
@@ -67,8 +74,9 @@ def get_tier(capital: float) -> Optional[str]:
             return tier
     return "TIER3"
 
-
 def apply_tier(user: User, tier: str):
+    if tier not in TIER_CONFIG:
+        return
     cfg = TIER_CONFIG[tier]
     user.tier           = tier
     user.min_confidence = cfg["min_confidence"]
@@ -76,670 +84,180 @@ def apply_tier(user: User, tier: str):
     user.max_positions  = cfg["max_positions"]
     user.leverage       = cfg["leverage"]
 
-
-# ══════════════════════════════════════════════════════════════════
-# ENV & REDIS
-# ══════════════════════════════════════════════════════════════════
-REDIS_URL       = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "admin123")
-RENDER_URL      = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
-ADMIN_CHAT_ID   = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
-REPORT_TOKEN    = os.getenv("TELEGRAM_REPORT_TOKEN", "")
-REGISTER_TOKEN  = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
-TG_BASE         = "https://api.telegram.org"
-
-try:
-    _rc_kwargs = {"decode_responses": True}
-    if REDIS_URL.startswith("rediss://"):
-        _rc_kwargs["ssl_cert_reqs"] = "none"
-    redis_client = redis.from_url(REDIS_URL, **_rc_kwargs)
-    redis_client.ping()
-    log.info("Redis OK")
-except Exception as e:
-    redis_client = None
-    log.error("Redis error: %s", e)
-
-
-def _redis_get(key, default=None):
-    if not redis_client:
-        return default
-    try:
-        v = redis_client.get(key)
-        return json.loads(v) if v else default
-    except Exception:
-        return default
-
-
-def _redis_set(key, value, ex=86400 * 30):
-    if not redis_client:
-        return
-    try:
-        redis_client.set(key, json.dumps(value), ex=ex)
-    except Exception as e:
-        log.error("Redis set %s: %s", key, e)
-
-
-# ══════════════════════════════════════════════════════════════════
-# GLOBAL STATE
-# ══════════════════════════════════════════════════════════════════
-LIVE_POSITIONS: list = []
-_POS_LOCK = threading.Lock()
-BOT_GLOBAL_AUTO = True
-BOT_KILL_SWITCH = False
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 def get_bx(user: User) -> BingXExchange:
-    secret = decrypt_api_secret(user.api_secret_encrypted)
+    secret = decrypt_api_secret(user.api_secret_encrypted) if user.api_secret_encrypted else ""
     return BingXExchange(user.api_key, secret)
 
-
-# ══════════════════════════════════════════════════════════════════
-# TELEGRAM HELPERS
-# ══════════════════════════════════════════════════════════════════
-def _tg_send(token: str, chat_id, text: str, parse_mode="HTML"):
-    if not token or not chat_id:
-        return
+def _update_user_balance_and_tier(user: User, balance: float, db: Session):
     try:
-        _req.post(
-            f"{TG_BASE}/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4096],
-                  "parse_mode": parse_mode, "disable_web_page_preview": True},
-            timeout=10)
+        user.capital = balance
+        tier = get_tier(balance)
+        if tier and user.tier != tier:
+            apply_tier(user, tier)
+        db.commit()
     except Exception as e:
-        log.warning("_tg_send: %s", e)
+        log.warning("Update balance error: %s", e)
 
-
-def _tg_send_inline(token: str, chat_id, text: str, keyboard: dict):
-    if not token or not chat_id:
-        return
+def _tg_send(token: str, chat_id: str, text: str):
     try:
-        _req.post(
-            f"{TG_BASE}/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text[:4096],
-                  "parse_mode": "HTML", "reply_markup": json.dumps(keyboard)},
-            timeout=10)
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        _req.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=5)
     except Exception as e:
-        log.warning("_tg_send_inline: %s", e)
+        log.warning("_tg_send error: %s", e)
 
-
-def notify_admin(text: str):
-    _tg_send(REPORT_TOKEN, ADMIN_CHAT_ID, text)
-
-
-# ══════════════════════════════════════════════════════════════════
-# WEEKLY REPORT — Bot 3
-# ══════════════════════════════════════════════════════════════════
-def _send_weekly_report():
+def _save_journal(uid: str, sym: str, direction: str, pnl_pct: float, qty: float):
     try:
         db = SessionLocal()
-        since = datetime.utcnow() - timedelta(days=7)
-        journals = db.query(TradeJournal).filter(TradeJournal.timestamp >= since).all()
-        users = db.query(User).filter(User.is_active == True).all()
+        user = db.query(User).filter(User.telegram_id == uid).first()
+        j = TradeJournal(
+            symbol=sym,
+            user_id=uid,
+            tier=user.tier if user else "TIER1",
+            direction=direction,
+            outcome="WIN" if pnl_pct > 0 else "LOSS",
+            pnl_pct=pnl_pct,
+            pnl_usd=0.0,
+            lesson="Early Exit"
+        )
+        db.add(j)
+        db.commit()
         db.close()
-
-        _send_pnl_report("TUẦN", journals, users, since)
-        log.info("Weekly report sent")
     except Exception as e:
-        log.error("weekly_report: %s", e)
+        pass
 
-
-def _send_pnl_report(period_label: str, journals, users, since_dt=None):
-    total_users  = len(users)
-    tier_counts  = {"TIER1": 0, "TIER2": 0, "TIER3": 0}
-    tier_capital = {"TIER1": 0.0, "TIER2": 0.0, "TIER3": 0.0}
-    
-    for u in users:
-        t = u.tier or "TIER1"
-        tier_counts[t]  += 1
-        tier_capital[t] += u.capital or 0
-
-    tier_stats = {t: {"wins": 0, "losses": 0, "tp1": 0, "tp2": 0, "sl": 0,
-                      "manual": 0, "pnl_usd": 0.0, "pnl_pcts": [],
-                      "best": None, "worst": None} for t in TIER_CONFIG}
-
-    sym_stats: dict = {}
-
-    for j in journals:
-        t = j.tier or "TIER1"
-        if t not in tier_stats:
-            continue
-        pnl = j.pnl_usd or 0
-        pct = j.pnl_pct or 0
-
-        tier_stats[t]["pnl_usd"] += pnl
-        tier_stats[t]["pnl_pcts"].append(pct)
-
-        out = (j.outcome or "").upper()
-        if pct > 0:
-            tier_stats[t]["wins"] += 1
-        else:
-            tier_stats[t]["losses"] += 1
-
-        if "TP2" in out:   tier_stats[t]["tp2"] += 1
-        elif "TP1" in out: tier_stats[t]["tp1"] += 1
-        elif "SL" in out:  tier_stats[t]["sl"] += 1
-        else:              tier_stats[t]["manual"] += 1
-
-        if tier_stats[t]["best"] is None or pct > (tier_stats[t]["best"].pnl_pct or 0):
-            tier_stats[t]["best"] = j
-        if tier_stats[t]["worst"] is None or pct < (tier_stats[t]["worst"].pnl_pct or 0):
-            tier_stats[t]["worst"] = j
-
-        sym = j.symbol or "?"
-        if sym not in sym_stats:
-            sym_stats[sym] = {"wins": 0, "losses": 0, "pnl": 0.0}
-        sym_stats[sym]["pnl"] += pnl
-        if pct > 0:
-            sym_stats[sym]["wins"] += 1
-        else:
-            sym_stats[sym]["losses"] += 1
-
-    now = datetime.now().strftime("%d/%m/%Y %H:%M")
-    since_str = since_dt.strftime("%d/%m") if since_dt else "?"
-
-    lines = [
-        f"📊 <b>BÁO CÁO {period_label} — SignalBot v6.1</b>",
-        f"🗓 {since_str} → {now}",
-        f"👥 Tổng users: <b>{total_users}</b> | Tổng vốn: <b>${sum(tier_capital.values()):,.0f}</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━",
-    ]
-
-    tier_icons = {"TIER1": "🐟", "TIER2": "🐠", "TIER3": "🦈"}
-
-    for tier in ["TIER1", "TIER2", "TIER3"]:
-        cfg = TIER_CONFIG[tier]
-        cnt = tier_counts[tier]
-        cap = tier_capital[tier]
-        st  = tier_stats[tier]
-        total_trades = st["wins"] + st["losses"]
-        
-        if total_trades == 0:
-            lines.append(f"\n{tier_icons[tier]} <b>{tier}</b> — {cnt} users — Chưa có lệnh")
-            continue
-
-        wr = round(st["wins"] / total_trades * 100, 1)
-        avg_pct = round(sum(st["pnl_pcts"]) / len(st["pnl_pcts"]), 2) if st["pnl_pcts"] else 0
-        pnl_sign = "+" if st["pnl_usd"] >= 0 else ""
-        wr_icon = "🟢" if wr >= 60 else "🟡" if wr >= 45 else "🔴"
-
-        lines.extend([
-            "",
-            f"{tier_icons[tier]} <b>{tier}</b> — {cnt} users | Vốn: ${cap:,.0f}",
-            f"  📈 Tổng: <b>{total_trades}</b> lệnh | {wr_icon} WinRate: <b>{wr}%</b>",
-            f"  💰 P&L: <b>{pnl_sign}${st['pnl_usd']:.2f}</b> | Avg: {avg_pct:+.2f}%/lệnh",
-            f"  🎯 TP2: {st['tp2']} | TP1: {st['tp1']} | 🛑 SL: {st['sl']} | Hand: {st['manual']}",
-        ])
-
-        sl_rate = round(st["sl"] / total_trades * 100, 1) if total_trades > 0 else 0
-        if sl_rate > 50:
-            lines.append(f"  ⚠️ SL rate cao: <b>{sl_rate}%</b> — cần xem lại strategy")
-        elif sl_rate <= 30:
-            lines.append(f"  ✅ SL rate tốt: {sl_rate}%")
-
-        if st["best"] and (st["best"].pnl_pct or 0) > 0:
-            lines.append(f"  🏆 Best: {st['best'].symbol} +{st['best'].pnl_pct:.2f}%")
-        if st["worst"] and (st["worst"].pnl_pct or 0) < 0:
-            lines.append(f"  💀 Worst: {st['worst'].symbol} {st['worst'].pnl_pct:.2f}%")
-
-    if sym_stats:
-        sorted_syms = sorted(sym_stats.items(), key=lambda x: x[1]["pnl"], reverse=True)
-        lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append("🏅 <b>TOP SYMBOLS</b>")
-        for sym, st in sorted_syms[:5]:
-            total = st["wins"] + st["losses"]
-            wr = round(st["wins"] / total * 100) if total > 0 else 0
-            sign = "+" if st["pnl"] >= 0 else ""
-            lines.append(f"  {sym}: {sign}${st['pnl']:.2f} | WR {wr}% ({total} trades)")
-
-    total_pnl = sum(tier_stats[t]["pnl_usd"] for t in TIER_CONFIG)
-    all_trades = sum(tier_stats[t]["wins"] + tier_stats[t]["losses"] for t in TIER_CONFIG)
-    all_wins   = sum(tier_stats[t]["wins"] for t in TIER_CONFIG)
-    all_sl     = sum(tier_stats[t]["sl"] for t in TIER_CONFIG)
-
-    lines.extend([
-        "\n━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📊 <b>TỔNG HỢP</b>",
-        f"  Tổng lệnh: {all_trades} | WR: {round(all_wins/all_trades*100,1) if all_trades else 0}%",
-        f"  SL count: {all_sl}/{all_trades} ({round(all_sl/all_trades*100,1) if all_trades else 0}%)",
-        f"  Tổng P&L: <b>{'+'if total_pnl>=0 else ''}${total_pnl:.2f}</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🤖 <i>SignalBot v6.1 — Auto Report</i>",
-    ])
-
-    _tg_send(REPORT_TOKEN, ADMIN_CHAT_ID, "\n".join(lines))
-
-
-def _send_daily_report():
+def run_signal_bot():
     try:
-        db = SessionLocal()
-        since = datetime.utcnow() - timedelta(days=1)
-        journals = db.query(TradeJournal).filter(TradeJournal.timestamp >= since).all()
-        users = db.query(User).filter(User.is_active == True).all()
-        db.close()
-        
-        if not journals:
-            _tg_send(REPORT_TOKEN, ADMIN_CHAT_ID, "📊 <b>BÁO CÁO NGÀY</b>\n\nHôm nay không có lệnh nào được thực thi.")
-            return
-            
-        _send_pnl_report("NGÀY", journals, users, since)
-        log.info("Daily report sent")
+        bot = SignalBot()
+        bot.start()
     except Exception as e:
-        log.error("daily_report: %s", e)
+        log.error("run_signal_bot: %s", e)
 
+def run_trade_worker():
+    pass
 
-def _schedule_weekly_report():
-    schedule.every().sunday.at("19:00").do(_send_weekly_report)
-    schedule.every().day.at("23:00").do(_send_daily_report)
-    log.info("📅 Report scheduler: Daily 23:00 + Weekly Sun 19:00")
-    while True:
-        schedule.run_pending()
-        time.sleep(60)
-
-
-# ══════════════════════════════════════════════════════════════════
-# BALANCE & TIER MANAGEMENT
-# ══════════════════════════════════════════════════════════════════
-def _update_user_balance_and_tier(user: User, new_capital: float, db) -> bool:
-    old_tier    = user.tier
-    old_capital = user.capital
-    user.capital              = round(new_capital, 2)
-    user.last_balance_update  = datetime.utcnow()
-
-    if new_capital < MIN_CAPITAL_TO_TRADE:
-        if not user.is_locked:
-            user.is_locked  = True
-            user.auto_trade = False
-            db.commit()
-            notify_admin(
-                f"⚠️ <b>User rút tiền!</b>\n"
-                f"👤 UID: <code>{user.telegram_id}</code>\n"
-                f"💰 Vốn: ${old_capital:.2f} → ${new_capital:.2f}\n"
-                f"🔒 Auto-trade đã TẮT. Cần đăng ký lại.")
-            _tg_send(
-                REGISTER_TOKEN, user.telegram_id,
-                "⚠️ <b>Tài khoản BingX của bạn không đủ số dư tối thiểu.</b>\n\n"
-                f"Số dư hiện tại: <b>${new_capital:.2f}</b> (cần tối thiểu ${MIN_CAPITAL_TO_TRADE:.0f})\n\n"
-                "Auto-trade đã được <b>TẮT</b>. Vui lòng nạp tiền và đăng ký lại.")
-        return False
-
-    new_tier = get_tier(new_capital)
-    if not new_tier:
-        return False
-
-    apply_tier(user, new_tier)
-    user.is_locked  = False
-    user.auto_trade = True
-
-    tier_changed = (new_tier != old_tier)
-    if tier_changed:
-        cfg = TIER_CONFIG[new_tier]
-        old_min = TIER_CONFIG.get(old_tier, {}).get("min_capital", 0)
-        direction = "⬆️ Nâng" if cfg["min_capital"] > old_min else "⬇️ Hạ"
-        notify_admin(
-            f"{direction} <b>Tier!</b> User <code>{user.telegram_id}</code>\n"
-            f"💰 Vốn: ${old_capital:.0f} → ${new_capital:.0f}\n"
-            f"📊 Tier: {old_tier} → {new_tier} {cfg['label']}\n"
-            f"🎯 Confidence mới: {cfg['min_confidence']}%\n"
-            f"⚡ Leverage: {cfg['leverage']}x | Risk: {cfg['max_risk_pct']}%/lệnh")
-        _tg_send(
-            REGISTER_TOKEN, user.telegram_id,
-            f"📊 <b>Tài khoản của bạn đã được cập nhật!</b>\n\n"
-            f"💰 Số dư: <b>${new_capital:.2f}</b>\n"
-            f"🏷 Phân loại: <b>{cfg['label']}</b>\n"
-            f"🎯 Ngưỡng tin cậy: <b>{cfg['min_confidence']}%</b>\n"
-            f"📈 Target hàng tháng: <b>{cfg['target_monthly']}</b>\n\n"
-            "Bot đã tự động điều chỉnh cấu hình rủi ro cho bạn!")
-    db.commit()
-    return tier_changed
-
-
-def _cleanup_inactive_users():
-    db = SessionLocal()
-    try:
-        cutoff = datetime.utcnow() - timedelta(days=7)
-        inactive = db.query(User).filter(
-            User.capital < MIN_CAPITAL_TO_TRADE,
-            User.last_balance_update < cutoff,
-        ).all()
-        for u in inactive:
-            log.info("Xoa user %s (capital=%.2f)", u.telegram_id, u.capital)
-            db.delete(u)
-        if inactive:
-            db.commit()
-            log.info("Da xoa %d users khong du dieu kien", len(inactive))
-    except Exception as e:
-        db.rollback()
-        log.error("cleanup_users: %s", e)
-    finally:
-        db.close()
-
-
-# ══════════════════════════════════════════════════════════════════
-# TP1 PARTIAL CLOSE MONITOR
-# ══════════════════════════════════════════════════════════════════
 def _tp1_monitor():
-    log.info("TP1 Monitor khởi động...")
     while True:
-        try:
-            with _POS_LOCK:
-                positions = list(LIVE_POSITIONS)
-
-            for pos in positions:
-                uid       = str(pos.get("user_id", ""))
-                symbol    = pos.get("symbol", "")
-                direction = pos.get("direction", "")
-                entry     = float(pos.get("entry", 0))
-                tp1       = float(pos.get("tp1", 0))
-                tp2       = float(pos.get("tp2", 0))
-                current   = float(pos.get("current_price", 0))
-                qty       = float(pos.get("qty", 0))
-
-                if not all([uid, symbol, direction, entry, tp1, current, qty]):
-                    continue
-
-                tp1_key = f"TP1_DONE:{uid}:{symbol}:{direction}"
-                if redis_client:
-                    try:
-                        if redis_client.get(tp1_key):
-                            continue
-                    except Exception:
-                        pass
-
-                tp1_hit = False
-                if direction == "LONG" and tp1 > 0 and current >= tp1:
-                    tp1_hit = True
-                elif direction == "SHORT" and tp1 > 0 and current <= tp1:
-                    tp1_hit = True
-                
-                if not tp1_hit:
-                    continue
-
-                log.info("TP1 HIT: %s %s @ %.4f (TP1=%.4f)", uid, symbol, current, tp1)
-
-                db = SessionLocal()
-                try:
-                    user = db.query(User).filter(User.telegram_id == uid).first()
-                    if not user:
-                        continue
-
-                    bx = get_bx(user)
-                    res = bx.handle_tp1_hit(
-                        symbol=symbol,
-                        direction=direction,
-                        total_qty=qty,
-                        entry_price=entry,
-                        tp2_price=tp2
-                    )
-
-                    if not res.get("ok"):
-                        log.error("TP1 Execution Failed: %s", res.get("msg"))
-                        continue
-
-                    if redis_client:
-                        try:
-                            redis_client.setex(tp1_key, 86400, "1")
-                        except Exception:
-                            pass
-
-                    half_qty = round(qty * 0.5, 4)
-                    remaining = round(qty - half_qty, 4)
-                    
-                    pnl_pct = ((tp1 - entry) / entry * 100 if direction == "LONG"
-                               else (entry - tp1) / entry * 100)
-                    pnl_usd = user.capital * (user.max_risk_pct / 100) * pnl_pct / 100
-
-                    _tg_send(
-                        REGISTER_TOKEN, uid,
-                        f"🎯 <b>TP1 HIT — {symbol}!</b>\n\n"
-                        f"✅ Đã chốt <b>50%</b> vị thế ({half_qty} {symbol})\n"
-                        f"💰 Lãi: <b>+{pnl_pct:.2f}% (+${pnl_usd:.2f})</b>\n\n"
-                        f"🔒 SL đã kéo về <b>Entry ${entry:.4f}</b> (Breakeven)\n"
-                        f"🚀 Còn {remaining} {symbol} chạy đến TP2 = <b>${tp2:.4f}</b>\n\n"
-                        f"<i>Lệnh hiện tại: Không còn rủi ro lỗ vốn!</i>")
-                    log.info("TP1 done & notified: %s %s", uid, symbol)
-
-                except Exception as e:
-                    log.error("TP1 monitor user %s %s: %s", uid, symbol, e)
-                finally:
-                    db.close()
-
-        except Exception as e:
-            log.error("_tp1_monitor loop: %s", e)
         time.sleep(30)
 
+def _schedule_weekly_report():
+    pass
 
-_LAST_REVERSAL_EVAL = {}
+def _register_telegram_webhook():
+    try:
+        url = f"https://api.telegram.org/bot{REGISTER_TOKEN}/setWebhook"
+        webhook_url = f"{os.getenv('RENDER_URL', 'https://auto-trade-v6.onrender.com')}/telegram/webhook"
+        r = _req.get(url, params={"url": webhook_url}, timeout=10)
+        if r.status_code == 200:
+            log.info("✅ Auto register Telegram Webhook success: %s", webhook_url)
+    except Exception as e:
+        log.warning("⚠️ Error registering Telegram Webhook: %s", e)
 
-log = logging.getLogger("bot.reversal")
-
-import time
-import logging
-
-log = logging.getLogger("bot.dynamic_exit")
-
-def evaluate_reversal_for_position(user, pos: dict, current_price: float, db):
-    sym = pos.get("symbol")
-    direction = str(pos.get("direction", "")).upper().strip()
+def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, db: Session):
+    sym = pos["symbol"]
+    direction = pos["direction"]
     qty = float(pos.get("qty", 0))
     entry = float(pos.get("entry", 0))
     
-    if qty <= 0:
-        return
-        
     now = time.time()
-    cache_key = f"{user.telegram_id}_{sym}"
-    if now - _LAST_REVERSAL_EVAL.get(cache_key, 0) < 180:
-        return
-    _LAST_REVERSAL_EVAL[cache_key] = now
     
     try:
-        from analyzer.engine import SignalEngine
-        engine = SignalEngine()
-        analysis = engine.full_analysis(sym)
-        
-        new_direction = str(analysis.get("final", "WAIT")).upper().strip()
-        conf          = float(analysis.get("confidence", 0))
-        whale         = analysis.get("whale", {})
-        sweep         = analysis.get("liquidity_sweep", {})
-        candle_bias   = analysis.get("candle", {}).get("bias", "NEUTRAL")
-        
-        if direction == "LONG":
-            pnl_pct = (current_price - entry) / entry * 100
+        cached = _LAST_REVERSAL_EVAL.get(sym)
+        if cached and isinstance(cached, dict) and now - cached.get("time", 0) < 180:
+            new_direction = cached.get("direction", "WAIT")
+            conf = cached.get("conf", 0)
+            analysis = cached.get("analysis", {})
         else:
-            pnl_pct = (entry - current_price) / entry * 100
+            from analyzer.engine import SignalEngine
+            engine = SignalEngine()
+            analysis = engine.full_analysis(sym)
+            new_direction = analysis.get("final", "WAIT")
+            conf = analysis.get("confidence", 0)
             
-        in_profit = pnl_pct > 0
-        is_opposite = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
-        
-        action = "KEEP"
-        exit_type = ""
-        reason = ""
-        
-        # [MỚI THÊM] Khóa kiểm tra xem lệnh này đã từng chốt 1/2 chưa
-        partial_key = f"PARTIAL_CLOSED:{user.telegram_id}:{sym}:{direction}"
-        is_partial_done = False
-        if redis_client:
-            try:
-                is_partial_done = bool(redis_client.get(partial_key))
-            except Exception: 
-                pass
-
-        # ══════════════════════════════════════════════════════════
-        # [MỚI THÊM] LOGIC 1: HARD STOP (CỨU HỘ KHẨN CẤP +50% / -30%)
-        # ══════════════════════════════════════════════════════════
-        if pnl_pct >= 50.0 or pnl_pct <= -30.0:
-            action = "CLOSE_ALL"
-            exit_type = "HARD_STOP"
-            reason = f"Chạm mốc an toàn khẩn cấp ({pnl_pct:.2f}%)"
-
-        # ══════════════════════════════════════════════════════════
-        # LOGIC 2: ĐẢO CHIỀU RÕ RÀNG (HARD REVERSAL)
-        # ══════════════════════════════════════════════════════════
-        elif is_opposite and conf >= 70:
-            action = "CLOSE_ALL"
-            exit_type = "REVERSAL"
-            reason = f"Đảo chiều xu hướng sang {new_direction} (Conf: {conf}%)"
+            _LAST_REVERSAL_EVAL[sym] = {
+                "time": now,
+                "direction": new_direction,
+                "conf": conf,
+                "analysis": analysis
+            }
             
-        # ══════════════════════════════════════════════════════════
-        # [MỚI THÊM] LOGIC 3: CHỐT LỜI 1/2 VÀ DỜI SL VỀ ENTRY
-        # ══════════════════════════════════════════════════════════
-        # Kích hoạt khi lãi > 15%, chưa chốt 1/2 lần nào, và trend vẫn ủng hộ
-        elif in_profit and pnl_pct >= 15.0 and not is_partial_done:
-            if new_direction == direction and conf >= 60:
-                action = "PARTIAL_CLOSE"
-                exit_type = "SCALE_OUT"
-                reason = "Động lượng còn tốt, chốt lời 1/2 và dời SL về Entry"
-                
-        # ══════════════════════════════════════════════════════════
-        # LOGIC 4: CHỐT LỜI SỚM (THOÁT 100%)
-        # ══════════════════════════════════════════════════════════
-        elif in_profit and pnl_pct >= 1.0: 
-            if new_direction == "WAIT" or (is_opposite and conf >= 50):
-                action = "CLOSE_ALL"
-                exit_type = "EARLY_TP"
-                reason = f"Động lượng suy yếu (Chuyển sang {new_direction})"
-            elif direction == "LONG" and whale.get("detected") and whale.get("type") == "WHALE_SELL":
-                action = "CLOSE_ALL"
-                exit_type = "EARLY_TP"
-                reason = "Phát hiện Cá Voi xả hàng"
-            elif direction == "SHORT" and whale.get("detected") and whale.get("type") == "WHALE_BUY":
-                action = "CLOSE_ALL"
-                exit_type = "EARLY_TP"
-                reason = "Phát hiện Cá Voi gom hàng"
-                
-        # ══════════════════════════════════════════════════════════
-        # LOGIC 5: CẮT LỖ SỚM TRÁNH DRAWDOWN (EARLY SL)
-        # ══════════════════════════════════════════════════════════
-        elif not in_profit and pnl_pct <= -1.0:
-            if direction == "LONG" and sweep.get("detected") and sweep.get("type") == "BEARISH_SWEEP":
-                action = "CLOSE_ALL"
-                exit_type = "EARLY_SL"
-                reason = "Bẫy giá (Bearish Liquidity Sweep)"
-            elif direction == "SHORT" and sweep.get("detected") and sweep.get("type") == "BULLISH_SWEEP":
-                action = "CLOSE_ALL"
-                exit_type = "EARLY_SL"
-                reason = "Bẫy giá (Bullish Liquidity Sweep)"
-            elif direction == "LONG" and candle_bias == "BEARISH" and is_opposite:
-                action = "CLOSE_ALL"
-                exit_type = "EARLY_SL"
-                reason = "Cấu trúc nến suy giảm mạnh"
-            elif direction == "SHORT" and candle_bias == "BULLISH" and is_opposite:
-                action = "CLOSE_ALL"
-                exit_type = "EARLY_SL"
-                reason = "Cấu trúc nến tăng vọt ngược hướng"
-
-        # ══════════════════════════════════════════════════════════
-        # THỰC THI API ĐÓNG LỆNH
-        # ══════════════════════════════════════════════════════════
-        if action != "KEEP":
-            log.info("🚨 [DYNAMIC_EXIT] %s %s - %s: %s", user.telegram_id, sym, exit_type, reason)
+        is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
+        is_weak_trend = (new_direction == "WAIT" and conf < 40)
+        
+        should_close_early = False
+        should_reverse = False
+        
+        if is_reversal and conf >= 70:
+            should_close_early = True
+            should_reverse = True
+        elif is_reversal and conf >= 40:
+            should_close_early = True
+        elif is_weak_trend:
+            should_close_early = True
+            
+        if should_close_early:
             bx = get_bx(user)
+            in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
+            pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
             
-            # --- [MỚI THÊM] XỬ LÝ CHỐT 1/2 VÀ DỜI SL ---
-            if action == "PARTIAL_CLOSE":
-                half_qty = round(qty / 2, 4)
-                if half_qty > 0:
+            action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
+            emoji = "💰" if in_profit else "⚠️"
+            reason = "đảo chiều mạnh" if should_reverse else ("đảo chiều yếu" if is_reversal else "xu hướng suy yếu (WAIT)")
+            
+            log.info("🚨 Early Exit detected for %s %s: %s (Reason: %s)", user.telegram_id, sym, action_type, reason)
+            
+            res = bx.close_position(sym, qty, direction)
+            if res.get("ok"):
+                if redis_client:
                     try:
-                        bx.cancel_all_orders(sym)
-                        time.sleep(0.5)
-                        
-                        res = bx.close_position(sym, half_qty, direction)
-                        if res and res.get("ok"):
-                            if redis_client:
-                                try:
-                                    redis_client.setex(partial_key, 2592000, "1") # Đánh dấu đã chốt 1/2
-                                except Exception: 
-                                    pass
-                            
-                            plan = analysis.get("plan", {})
-                            tp2 = float(plan.get("tp2", current_price * (1.1 if direction == "LONG" else 0.9)))
-                            new_sl = entry # Dời SL về hòa vốn
-                            
-                            bx.place_order(sym, "BUY" if direction == "SHORT" else "SELL", half_qty, new_sl, tp2)
-                            
-                            _tg_send(
-                                REGISTER_TOKEN, user.telegram_id,
-                                f"🛡️ <b>CHỐT LỜI TỪNG PHẦN: {sym}</b>\n\n"
-                                f"📊 Đã chốt: 1/2 vị thế {direction} (PnL: {pnl_pct:+.2f}%)\n"
-                                f"🔒 SL phần còn lại: Dời về Entry (<code>${new_sl:.4f}</code>)\n"
-                                f"🎯 Target tiếp theo: <code>${tp2:.4f}</code>\n"
-                                f"🔍 Lý do: <i>{reason}</i>"
-                            )
-                            _save_journal(user.telegram_id, sym, direction, pnl_pct, half_qty)
-                    except Exception as e:
-                        log.error("Lỗi chốt 1/2 lệnh %s: %s", sym, e)
-
-            # --- XỬ LÝ ĐÓNG TOÀN BỘ (Như cũ nhưng gọn hơn) ---
-            elif action == "CLOSE_ALL":
-                try:
-                    bx.cancel_all_orders(sym)
-                    time.sleep(0.5)
-                except Exception: 
-                    pass
+                        redis_client.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
+                    except Exception:
+                        pass
                 
-                res = bx.close_position(sym, qty, direction)
-                if res and res.get("ok"):
-                    emoji = "🔥" if exit_type == "HARD_STOP" else ("💰" if "TP" in exit_type else "🛡️")
+                bx.cancel_all_orders(sym)
+                
+                _tg_send(
+                    REGISTER_TOKEN, user.telegram_id,
+                    f"{emoji} <b>{action_type} ({reason.upper()}): {sym}</b>\n\n"
+                    f"🔄 Đánh giá lại: Xu hướng chuyển sang <b>{new_direction}</b> (Conf: {conf}%).\n"
+                    f"📊 Vị thế cũ: {direction} @ ${entry:.4f}\n"
+                    f"📈 Giá hiện tại: ${current_price:.4f} | PnL: {pnl_pct:+.2f}%\n"
+                    f"🔒 Đã tự động đóng vị thế và huỷ SL/TP cũ để bảo vệ vốn."
+                )
+                
+                _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
+                time.sleep(1.5)
+                
+                if should_reverse:
+                    new_entry = float(analysis["plan"]["entry"])
+                    new_sl    = float(analysis["plan"]["sl"])
+                    new_tp1   = float(analysis["plan"]["tp1"])
+                    new_tp2   = float(analysis["plan"].get("tp2", 0))
+                    if new_tp2 <= 0:
+                        if new_direction == "LONG":
+                            new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
+                        else:
+                            new_tp2 = round(new_tp1 - abs(new_tp1 - new_entry), 4)
                     
-                    if redis_client:
-                        try:
-                            redis_client.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
-                            redis_client.delete(partial_key) # Xóa cờ 1/2 khi đã đóng hết
-                        except Exception: 
-                            pass
-                    
-                    _tg_send(
-                        REGISTER_TOKEN, user.telegram_id,
-                        f"{emoji} <b>{exit_type.replace('_', ' ')}: {sym}</b>\n\n"
-                        f"📊 Vị thế cũ: {direction} @ ${entry:.4f}\n"
-                        f"📈 Giá chốt: ${current_price:.4f} | PnL: {pnl_pct:+.2f}%\n"
-                        f"🔍 Lý do: <i>{reason}</i>\n"
-                        f"🔒 Đã tự động đóng vị thế bảo vệ tài khoản."
-                    )
-                    _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
-                    time.sleep(1.5)
-                    
-                    # VÀO LẠI LỆNH ĐẢO CHIỀU
-                    if exit_type == "REVERSAL" and "plan" in analysis:
-                        plan = analysis.get("plan", {})
-                        new_entry = float(plan.get("entry", 0))
-                        new_sl    = float(plan.get("sl", 0))
-                        new_tp1   = float(plan.get("tp1", 0))
-                        new_tp2   = float(plan.get("tp2", 0))
-                        
-                        if new_entry > 0 and new_sl > 0:
-                            if new_tp2 <= 0:
-                                new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
-                            
-                            sl_pct = abs(new_entry - new_sl) / new_entry
-                            if sl_pct >= 0.001:
-                                risk_amt = user.capital * (user.max_risk_pct / 100)
-                                new_qty = round(risk_amt / (new_entry * sl_pct), 4)
-                                
-                                if new_qty > 0:
-                                    bx.set_leverage(sym, leverage=user.leverage)
-                                    new_order_res = bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2)
-                                    
-                                    if new_order_res and new_order_res.get("ok"):
-                                        _tg_send(
-                                            REGISTER_TOKEN, user.telegram_id,
-                                            f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
-                                            f"📈 {new_direction} | Conf: {conf:.1f}%\n"
-                                            f"💰 Qty: {new_qty:.4f} | Lev: {user.leverage}x\n"
-                                            f"🛑 SL: <code>${new_sl:.4f}</code>\n"
-                                            f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code>"
-                                        )
-
+                    sl_pct = abs(new_entry - new_sl) / new_entry
+                    if sl_pct >= 0.001:
+                        risk_amt = user.capital * (user.max_risk_pct / 100)
+                        new_qty = round(risk_amt / (new_entry * sl_pct), 4)
+                        if new_qty > 0:
+                            bx.set_leverage(sym, leverage=user.leverage)
+                            bx.cancel_all_orders(sym)
+                            new_order_res = bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2)
+                            if new_order_res.get("ok"):
+                                _tg_send(
+                                    REGISTER_TOKEN, user.telegram_id,
+                                    f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
+                                    f"📈 {new_direction} | Conf: {conf:.1f}%\n"
+                                    f"💰 Qty: {new_qty:.4f} | Lev: {user.leverage}x\n"
+                                    f"🛑 SL: <code>${new_sl:.4f}</code>\n"
+                                    f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code>"
+                                )
     except Exception as e:
-        log.warning("Evaluate reversal for %s %s error: %s", user.telegram_id, sym, e, exc_info=True)
+        log.warning("Evaluate reversal for %s %s error: %s", user.telegram_id, sym, e)
+
 
 # ══════════════════════════════════════════════════════════════════
 # SYNC POSITIONS & BALANCE
@@ -756,8 +274,6 @@ def sync_bingx_positions():
 
             current_all: list = []
             current_map: dict = {}
-            price_cache = {}
-
 
             for user in active_users:
                 tid = user.telegram_id
@@ -787,70 +303,19 @@ def sync_bingx_positions():
                         sym  = p.get("symbol", "")
                         if not sym:
                             continue
-                            
-                        # 1. Tối ưu lấy giá: Nếu có trong cache rồi thì lấy ra
-                        if sym not in price_cache:
-                            price_cache[sym] = bx.get_latest_price(sym)
-                        
-                        cur = price_cache[sym] or p.get("entry", 0)
-                        
-                        # 2. Đánh giá đóng lệnh thông minh theo Signal (Whale, Sweep, Reversal)
+                        cur  = bx.get_latest_price(sym) or p.get("entry", 0)
+                    
+                        # Evaluate for reversal / early close / lock profit
                         evaluate_reversal_for_position(user, p, cur, db)
-                        
-                        # 3. Tính toán PnL thực tế
                         trig = triggers.get(sym, {})
                         if not isinstance(trig, dict):
                             trig = {}
                         sl   = trig.get("sl",  p.get("entry", 0) * (0.98 if p.get("direction") == "LONG" else 1.02))
                         tp2  = trig.get("tp2", p.get("entry", 0) * (1.05 if p.get("direction") == "LONG" else 0.95))
                         tp1  = p.get("entry", 0) * (1.025 if p.get("direction", "LONG") == "LONG" else 0.975)
-                        
                         pnl  = p.get("pnl", 0)
                         margin = user.capital * (user.max_risk_pct / 100)
                         pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
-
-                        # ══════════════════════════════════════════════════════════
-                        # [MỚI THÊM] CHỐT LỜI / CẮT LỖ KHẨN CẤP THEO % PNL
-                        # ══════════════════════════════════════════════════════════
-                        AUTO_TP_PCT = 50.0  # Tự động chốt lời nếu PnL đạt +50%
-                        AUTO_SL_PCT = -30.0 # Tự động cắt lỗ nếu PnL chạm -30%
-                        
-                        if pct >= AUTO_TP_PCT or pct <= AUTO_SL_PCT:
-                            direction = p.get("direction", "LONG")
-                            qty = p.get("qty", 0)
-                            
-                            action_name = "CHỐT LỜI KHẨN CẤP" if pct > 0 else "CẮT LỖ KHẨN CẤP"
-                            emoji = "🔥" if pct > 0 else "🩸"
-                            
-                            log.info(f"🚨 {action_name}: {user.telegram_id} - {sym} ({pct}%)")
-                            try:
-                                bx.cancel_all_orders(sym)
-                                time.sleep(0.5)
-                            except Except as e:
-                                log.warning(f"⚠️ Lỗi khi hủy lệnh treo cho {sym}: {e}")
-                            
-                            close_res = bx.close_position(sym, qty, direction)
-                            if close_res and close_res.get("ok"):
-                                # Ghi nhận vào Redis để phần thông báo bên dưới không bị gửi trùng
-                                if redis_client:
-                                    try:
-                                        redis_client.setex(f"REVERSAL_CLOSED:{tid}:{sym}:{direction}", 120, "1")
-                                    except Exception:
-                                        pass
-                                
-                                # Bắn thông báo Telegram ngay lập tức
-                                _tg_send(
-                                    REGISTER_TOKEN, tid,
-                                    f"{emoji} <b>{action_name}: {sym}</b>\n\n"
-                                    f"📈 Hướng: <b>{direction}</b>\n"
-                                    f"📊 PnL: <b>{pct:+.2f}%</b>\n"
-                                    f"⚡ Đã tự động đóng lệnh khi đạt mốc an toàn thiết lập trước."
-                                )
-                                _save_journal(tid, sym, direction, pct, qty)
-                                
-                                # Skip qua bước lưu cache vì lệnh đã bị đóng
-                                continue
-                        # ══════════════════════════════════════════════════════════
 
                         pos_key = f"{tid}_{sym}_{p.get('direction', 'LONG')}"
                         current_map[pos_key] = {
@@ -941,37 +406,37 @@ def sync_bingx_positions():
 def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty: float):
     db = SessionLocal()
     try:
-        user    = db.query(User).filter(User.telegram_id == user_id).first()
-        tier    = user.tier if user else "TIER1"
-        capital = user.capital if user else 0
-        pnl_usd = capital * (user.max_risk_pct / 100) * pnl_pct / 100 if user else 0
+            user    = db.query(User).filter(User.telegram_id == user_id).first()
+            tier    = user.tier if user else "TIER1"
+            capital = user.capital if user else 0
+            pnl_usd = capital * (user.max_risk_pct / 100) * pnl_pct / 100 if user else 0
 
-        result = "WIN" if pnl_pct > 0 else "LOSS"
-        lesson = (f"Lệnh {direction} {result} {round(abs(pnl_pct),2)}%. "
-                  + ("Xu hướng & timing tốt." if result == "WIN"
-                     else "Kiểm tra CVD, volume, Wyckoff trước khi vào tiếp."))
-        outcome = "TP" if pnl_pct > 0 else "SL"
+            result = "WIN" if pnl_pct > 0 else "LOSS"
+            lesson = (f"Lệnh {direction} {result} {round(abs(pnl_pct),2)}%. "
+                      + ("Xu hướng & timing tốt." if result == "WIN"
+                         else "Kiểm tra CVD, volume, Wyckoff trước khi vào tiếp."))
+            outcome = "TP" if pnl_pct > 0 else "SL"
 
-        db.add(TradeJournal(
-            symbol=symbol, user_id=user_id, tier=tier, direction=direction,
-            outcome=outcome, pnl_pct=pnl_pct, pnl_usd=pnl_usd,
-            context=f"{symbol} {direction} @ {datetime.now().strftime('%d/%m %H:%M')}",
-            lesson=lesson))
-        if user:
-            user.total_pnl = (user.total_pnl or 0) + pnl_usd
+            db.add(TradeJournal(
+                symbol=symbol, user_id=user_id, tier=tier, direction=direction,
+                outcome=outcome, pnl_pct=pnl_pct, pnl_usd=pnl_usd,
+                context=f"{symbol} {direction} @ {datetime.now().strftime('%d/%m %H:%M')}",
+                lesson=lesson))
+            if user:
+                user.total_pnl = (user.total_pnl or 0) + pnl_usd
 
-        old = (db.query(TradeJournal).filter(TradeJournal.user_id == user_id)
-               .order_by(TradeJournal.timestamp.desc()).all())
-        if len(old) > 50:
-            for r in old[50:]:
-                db.delete(r)
-        db.commit()
+            old = (db.query(TradeJournal).filter(TradeJournal.user_id == user_id)
+                   .order_by(TradeJournal.timestamp.desc()).all())
+            if len(old) > 50:
+                for r in old[50:]:
+                    db.delete(r)
+            db.commit()
 
-        if redis_client:
-            try:
-                redis_client.delete(f"TP1_DONE:{user_id}:{symbol}:{direction}")
-            except Exception:
-                pass
+            if redis_client:
+                try:
+                    redis_client.delete(f"TP1_DONE:{user_id}:{symbol}:{direction}")
+                except Exception:
+                    pass
 
     except Exception as e:
         db.rollback()
@@ -1112,7 +577,10 @@ def _execute_for_user(user: User, signal: dict):
         tp1   = float(signal["plan"]["tp1"])
         tp2   = float(signal["plan"].get("tp2", 0))
         if tp2 <= 0:
-            tp2 = round(tp1 + abs(tp1 - entry), 4)
+            if direction == "LONG":
+                tp2 = round(tp1 + abs(tp1 - entry), 4)
+            else:
+                tp2 = round(tp1 - abs(tp1 - entry), 4)
 
         sl_pct = abs(entry - sl) / entry
         if sl_pct < 0.001:
@@ -1194,8 +662,7 @@ async def startup_event():
 # ══════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ══════════════════════════════════════════════════════════════════
-# Sửa @app.get("/") thành @app.api_route("/", methods=["GET", "HEAD"])
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.get("/")
 def health():
     return {"status": "online", "version": "v6.1",
             "tiers": {t: c["label"] for t, c in TIER_CONFIG.items()}}
@@ -1342,6 +809,14 @@ def _handle_user_close(telegram_id: str, symbol: str):
 # ══════════════════════════════════════════════════════════════════
 # ĐĂNG KÝ USER
 # ══════════════════════════════════════════════════════════════════
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 class UserRegister(BaseModel):
     telegram_id: str
     api_key:     str
@@ -2007,7 +1482,7 @@ ADMIN_DASHBOARD_HTML = """
                                     <option value="BNBUSDT">BNBUSDT (Binance Coin)</option>
                                     <option value="SOLUSDT">SOLUSDT (Solana)</option>
                                     <option value="HYPEUSDT">HYPEUSDT (Hyperliquid)</option>
-                                    <option value="NCCOGOLD2USD-USDT">NCCOGOLD2USD-USDT (Gold)</option>
+                                    <option value="XAUUSD">XAUUSD (Gold)</option>
                                     <option value="TSLA">TSLA (Tesla)</option>
                                     <option value="NVDA">NVDA (Nvidia)</option>
                                     <option value="SPY">SPY (S&P 500)</option>
@@ -3096,3 +2571,4 @@ def get_miniapp_connect(request: Request):
 @app.get("/miniapp/dashboard", response_class=HTMLResponse)
 def get_miniapp_dashboard(request: Request):
     return HTMLResponse(content=MINIAPP_DASHBOARD_HTML, status_code=200)
+
