@@ -609,90 +609,61 @@ async def _trade_worker_async():
 
 def _execute_for_user(user: User, signal: dict):
     try:
-        sym       = signal.get("symbol", "")
+        sym = signal.get("symbol", "").strip().upper()
         direction = signal.get("final", "WAIT")
-        if not sym or direction == "WAIT":
-            return
+        
+        # 1. Validate tín hiệu
+        if not sym or direction == "WAIT": return
 
+        # 2. Kiểm tra Cooldown & Vị thế (Giữ nguyên)
         pending_key = f"PENDING:{user.telegram_id}:{sym}"
-        if redis_client:
-            try:
-                if redis_client.get(pending_key):
-                    log.info("Cooldown %s %s - skip", user.telegram_id, sym)
-                    return
-            except Exception:
-                pass
-
+        if redis_client and redis_client.get(pending_key): return
+        
         with _POS_LOCK:
-            already = [p for p in LIVE_POSITIONS
-                       if str(p.get("user_id")) == user.telegram_id and p.get("symbol") == sym]
-        if already:
-            log.info("Da co vi the %s (user %s) - bo qua", sym, user.telegram_id)
-            return
+            already = [p for p in LIVE_POSITIONS if str(p.get("user_id")) == user.telegram_id and p.get("symbol") == sym]
+        if already: return
 
-        try:
-            bx_live = get_bx(user)
-            live    = bx_live.get_open_positions()
-            if any(p.get("symbol") == sym for p in live):
-                log.info("BingX xac nhan da co vi the %s - bo qua", sym)
-                return
-        except Exception as e:
-            log.warning("BingX realtime check: %s - tiep tuc", e)
-
-        with _POS_LOCK:
-            total_pos = sum(1 for p in LIVE_POSITIONS if str(p.get("user_id")) == user.telegram_id)
-        if total_pos >= (user.max_positions or 2):
-            log.info("Max positions %d da dat (user %s)", user.max_positions, user.telegram_id)
-            return
-
-        entry = float(signal["plan"]["entry"])
-        sl    = float(signal["plan"]["sl"])
-        tp1   = float(signal["plan"]["tp1"])
-        tp2   = float(signal["plan"].get("tp2", 0))
-        if tp2 <= 0:
-            if direction == "LONG":
-                tp2 = round(tp1 + abs(tp1 - entry), 4)
-            else:
-                tp2 = round(tp1 - abs(tp1 - entry), 4)
-
+        # 3. Tính toán khối lượng (Safety First)
+        plan = signal.get("plan", {})
+        entry = float(plan.get("entry", 0))
+        sl    = float(plan.get("sl", 0))
+        tp1   = float(plan.get("tp1", 0))
+        tp2   = float(plan.get("tp2", 0) or (tp1 + abs(tp1 - entry) if direction == "LONG" else tp1 - abs(tp1 - entry)))
+        
         sl_pct = abs(entry - sl) / entry
-        if sl_pct < 0.001:
-            log.warning("SL qua gan entry (%.4f%%) - bo qua", sl_pct * 100)
-            return
+        if sl_pct < 0.001 or entry <= 0: return
 
         risk_amt = user.capital * (user.max_risk_pct / 100)
-        qty      = round(risk_amt / (entry * sl_pct), 4)
-        if qty <= 0:
-            return
+        qty = round(risk_amt / (entry * sl_pct), 4)
 
-        bx   = get_bx(user)
+        # 4. THỰC HIỆN ĐẶT LỆNH
+        bx = get_bx(user)
         side = "BUY" if direction == "LONG" else "SELL"
+        
+        # Thiết lập leverage và cancel các lệnh cũ
         bx.set_leverage(sym, leverage=user.leverage)
         bx.cancel_all_orders(sym)
+        
+        # ĐẶT LỆNH MARKET
         res = bx.place_order(sym, side, qty, sl, tp2)
 
-        if res.get("ok"):
-            if redis_client:
-                try:
-                    redis_client.setex(pending_key, 60, "1")
-                except Exception:
-                    pass
-
-            log.info("OK %s: %s %s qty=%.4f lev=%dx", user.telegram_id, direction, sym, qty, user.leverage)
-            _tg_send(
-                REGISTER_TOKEN, user.telegram_id,
-                f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
-                f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
-                f"💰 Qty: {qty:.4f} | Lev: {user.leverage}x\n"
-                f"🛑 SL: <code>${sl:.4f}</code> | Risk: ${risk_amt:.2f}\n"
-                f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
-                f"🏆 TP2: <code>${tp2:.4f}</code> → đích 50% còn lại")
+        # 5. BÁO CÁO TELEGRAM ĐỘC LẬP
+        # Dù kết quả res có thể là partial success (lệnh khớp nhưng SL/TP lỗi), vẫn phải báo cho user
+        if res and res.get("ok"):
+            if redis_client: redis_client.setex(pending_key, 60, "1")
+            log.info("OK %s: %s %s qty=%.4f", user.telegram_id, direction, sym, qty)
+            _tg_send(REGISTER_TOKEN, user.telegram_id,
+                f"✅ <b>ĐÃ VÀO LỆNH: {sym}</b>\n"
+                f"📈 {direction} | Qty: {qty:.4f}\n"
+                f"🛑 SL: <code>${sl:.4f}</code> | 🎯 TP: <code>${tp2:.4f}</code>")
         else:
-            log.error("BingX loi %s: %s", user.telegram_id, res.get("msg"))
+            # Gửi lỗi chi tiết để bạn biết tại sao
+            error_msg = res.get("msg", "Unknown Error")
+            log.error("BingX đặt lệnh lỗi cho %s: %s", user.telegram_id, error_msg)
+            _tg_send(REGISTER_TOKEN, user.telegram_id, f"❌ <b>LỖI VÀO LỆNH {sym}</b>\n<code>{error_msg}</code>")
 
     except Exception as e:
-        log.error("_execute_for_user %s: %s", user.telegram_id, e)
-
+        log.error("_execute_for_user %s: %s", user.telegram_id, str(e))
 
 def run_trade_worker():
     asyncio.run(_trade_worker_async())
