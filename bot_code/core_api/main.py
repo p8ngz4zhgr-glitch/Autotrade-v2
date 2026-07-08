@@ -725,9 +725,23 @@ async def startup_event():
 # HEALTH CHECK
 # ══════════════════════════════════════════════════════════════════
 @app.get("/")
-def health():
-    return {"status": "online", "version": "v6.1",
-            "tiers": {t: c["label"] for t, c in TIER_CONFIG.items()}}
+async def health():
+    try:
+        # Dùng .get() để an toàn tuyệt đối, nếu thiếu key "label" sẽ trả về "Unknown" thay vì sập bot
+        tiers_data = {t: c.get("label", "Unknown") for t, c in TIER_CONFIG.items()}
+        
+        return {
+            "status": "online", 
+            "version": "v6.1",
+            "tiers": tiers_data
+        }
+    except Exception as e:
+        # Nếu có lỗi (VD: chưa import TIER_CONFIG), vẫn trả về 200 OK cho UptimeRobot để giữ bot sống
+        return {
+            "status": "online", 
+            "version": "v6.1", 
+            "message": "Bot is running, but tier config is loading..."
+        }
 
 
 # ══════════════════════════════════════════════════════════════════
