@@ -3899,7 +3899,16 @@ def _tp1_monitor():
                 positions = LIVE_POSITIONS.copy()
             
             db = SessionLocal()
-            for user_id, user_positions in positions.items():
+            user_positions_map = {}
+            for p in positions:
+                if not isinstance(p, dict): continue
+                uid = p.get("user_id")
+                if uid:
+                    if uid not in user_positions_map:
+                        user_positions_map[uid] = []
+                    user_positions_map[uid].append(p)
+                    
+            for user_id, user_positions in user_positions_map.items():
                 if not user_positions: continue
                 user = db.query(User).filter_by(telegram_id=user_id).first()
                 if not user or not user.api_key: continue
