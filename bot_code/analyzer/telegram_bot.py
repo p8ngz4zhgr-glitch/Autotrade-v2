@@ -305,8 +305,19 @@ class TelegramBot:
         
         lines.extend(ob_section)
         
+
+        bayes_ev = data.get("bayes_ev")
+        if bayes_ev:
+            lines.extend([
+                "",
+                "🎲 <b>XÁC SUẤT (BAYES) & EV</b>",
+                "  ├ P(Win)    : <b>" + str(bayes_ev.get("p_win")) + "%</b>",
+                "  ├ Likelihood: " + str(bayes_ev.get("likelihood")),
+                "  └ Kỳ vọng EV: <b>" + str(bayes_ev.get("ev_ratio")) + " R</b>" + (" ✅" if bayes_ev.get("ev_ratio", 0) > 0.15 else " ⚠️"),
+            ])
         lines.extend([
             "",
+
             "📌 <b>KẾ HOẠCH LỆNH</b>",
             "  ├ Vào lệnh  : <code>$" + str(plan["entry"]) + "</code>",
             "  ├ 🛑 Cắt lỗ: <code>$" + str(plan["sl"]) + "</code> (-" + str(data.get("sl_pct","1.5")) + "%)",
