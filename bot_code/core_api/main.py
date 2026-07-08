@@ -32,7 +32,7 @@ log = logging.getLogger("MainAPI")
 
 app = FastAPI(title="SignalBot v6.1")
 
-REGISTER_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+REGISTER_TOKEN = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 try:
