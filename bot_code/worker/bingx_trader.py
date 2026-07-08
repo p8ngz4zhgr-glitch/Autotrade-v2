@@ -40,13 +40,11 @@ class BingXExchange:
             if sym.startswith("NCCO"):
                 sym = sym.replace("NCCO", "")
                 
-            # Xóa gạch ngang cũ để chuẩn hóa
+            # Xóa gạch ngang cũ để chuẩn hóa về chuỗi liền (VD: GOLD2USDUSDT)
             sym = sym.replace("-", "")
             
-            # Gắn lại gạch ngang theo quy tắc của BingX
-            if "GOLD" in sym:  # Bắt các trường hợp như GOLD2USDUSDT
-                params["symbol"] = "GOLD-USDT"
-            elif sym.endswith("USDT"):
+            # Gắn lại gạch ngang chuẩn xác cho API BingX
+            if sym.endswith("USDT"):
                 params["symbol"] = sym[:-4] + "-USDT"
             elif sym.endswith("USDC"):
                 params["symbol"] = sym[:-4] + "-USDC"
