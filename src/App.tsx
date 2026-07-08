@@ -1478,7 +1478,592 @@ class SignalEngine:
             "bayes_ev": ev_data,
         }
 `,
+  "fetcher.py": `# ═══════════════════════════════════════════════════════════
+# 1. CRYPTO FETCHER — v6.1 (Session Pool + Retry + Safe Fallback)
+# ═══════════════════════════════════════════════════════════
+from datetime import datetime
+import logging
+import time
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+log = logging.getLogger("analyzer.fetcher")
+
+
+def _make_session(retries=2, backoff=0.3, timeout=None):
+    """
+    Tạo requests.Session với connection pooling và retry tự động.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=4,
+        pool_maxsize=10,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+class CryptoFetcher:
+    """
+    Crypto data — Ưu tiên Bybit, Fallback sang BingX.
+    """
+    BGX = "https://open-api.bingx.com/openApi"
+    BBT = "https://api.bybit.com"
+    HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    BGX_IV = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+    BBT_IV = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+
+    def __init__(self):
+        self._session = _make_session(retries=2, backoff=0.3)
+
+    def _bgx(self, s):
+        s = str(s).strip().upper()
+        if '-' in s: return s
+        if s.endswith('USDT'):
+            return s[:-4] + '-USDT'
+        return s
+
+    def _bbt(self, s):
+        s = str(s).strip().upper()
+        return s.replace('-', '')
+
+    def _tbvol_ratio(self, closes):
+        """
+        Tính ratio taker buy volume động thay vì hardcode 52%.
+        """
+        if len(closes) < 6:
+            return 0.52
+        recent = closes[-1]
+        prev   = closes[-6]
+        if prev <= 0:
+            return 0.52
+        pct_change = (recent - prev) / prev
+        ratio = 0.51 + pct_change * 3.5
+        return round(max(0.40, min(0.62, ratio)), 3)
+
+    def price(self, symbol):
+        """Lấy giá Last Price"""
+        if not symbol:
+            return 0.0
+
+        bbt_sym = self._bbt(symbol)
+        bgx_sym = self._bgx(symbol)
+
+        # Bybit
+        try:
+            r = self._session.get(
+                self.BBT + "/v5/market/tickers",
+                params={"category": "linear", "symbol": bbt_sym},
+                headers=self.HDR, timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("retCode") == 0:
+                    lst = d.get("result", {}).get("list", [])
+                    if lst and lst[0].get("symbol") == bbt_sym:
+                        p = float(lst[0].get("lastPrice", 0))
+                        if p > 0:
+                            return round(p, 4)
+                    else:
+                        log.warning("Bybit sai symbol cho %s", bbt_sym)
+        except Exception as e:
+            log.debug("Bybit ticker err %s: %s", bbt_sym, e)
+
+        # BingX Fallback
+        try:
+            r = self._session.get(
+                self.BGX + "/swap/v2/quote/ticker",
+                params={"symbol": bgx_sym},
+                headers=self.HDR, timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("code") == 0 and d.get("data"):
+                    data = d["data"]
+                    if isinstance(data, dict) and data.get("symbol") == bgx_sym:
+                        p = float(data.get("lastPrice") or data.get("markPrice") or 0)
+                        if p > 0:
+                            return round(p, 4)
+                    elif isinstance(data, list):
+                        for item in data:
+                            if item.get("symbol") == bgx_sym:
+                                p = float(item.get("lastPrice", 0))
+                                if p > 0:
+                                    return round(p, 4)
+        except Exception as e:
+            log.debug("BingX ticker err %s: %s", bgx_sym, e)
+
+        log.error("KHÔNG THỂ LẤY GIÁ CHO %s", symbol)
+        return 0.0
+
+    def klines(self, symbol, interval, limit=150):
+        """Lấy Klines — Bybit trước, BingX fallback"""
+        if not symbol:
+            return None
+
+        bbt_sym = self._bbt(symbol)
+        bgx_sym = self._bgx(symbol)
+        bbt_iv  = self.BBT_IV.get(interval, "60")
+        bgx_iv  = self.BGX_IV.get(interval, "1h")
+
+        # Bybit Klines
+        try:
+            r = self._session.get(
+                self.BBT + "/v5/market/kline",
+                params={"category": "linear", "symbol": bbt_sym,
+                        "interval": bbt_iv, "limit": limit},
+                headers=self.HDR, timeout=10)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("retCode") == 0:
+                    raw = list(reversed(d["result"]["list"]))
+                    if len(raw) >= 20:
+                        closes = [float(c[4]) for c in raw]
+                        vols   = [max(float(c[5]), 0.001) for c in raw]
+                        tbv_ratio = self._tbvol_ratio(closes)
+                        return {
+                            "open":          [float(c[1]) for c in raw],
+                            "high":          [float(c[2]) for c in raw],
+                            "low":           [float(c[3]) for c in raw],
+                            "close":         closes,
+                            "volume":        vols,
+                            "taker_buy_vol": [v * tbv_ratio for v in vols],
+                        }
+        except Exception as e:
+            log.debug("Bybit klines err %s %s: %s", bbt_sym, interval, e)
+
+        # BingX Klines Fallback
+        try:
+            r = self._session.get(
+                self.BGX + "/swap/v3/quote/klines",
+                params={"symbol": bgx_sym, "interval": bgx_iv, "limit": limit},
+                headers=self.HDR, timeout=10)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("code") == 0:
+                    data = d.get("data", [])
+                    if len(data) >= 20:
+                        closes = [float(c.get("close", 0)) for c in data]
+                        vols   = [max(float(c.get("volume", 0)), 0.001) for c in data]
+                        tbv_ratio = self._tbvol_ratio(closes)
+                        tbvols = []
+                        for i, c in enumerate(data):
+                            tbv = c.get("takerBuyVolume") or c.get("taker_buy_volume")
+                            if tbv and float(tbv) > 0:
+                                tbvols.append(float(tbv))
+                            else:
+                                tbvols.append(vols[i] * tbv_ratio)
+                        return {
+                            "open":          [float(c.get("open", closes[i])) for i, c in enumerate(data)],
+                            "high":          [float(c.get("high", closes[i])) for i, c in enumerate(data)],
+                            "low":           [float(c.get("low",  closes[i])) for i, c in enumerate(data)],
+                            "close":         closes,
+                            "volume":        vols,
+                            "taker_buy_vol": tbvols,
+                        }
+        except Exception as e:
+            log.debug("BingX klines err %s %s: %s", bgx_sym, interval, e)
+
+        log.error("Không lấy được klines cho %s [%s]", symbol, interval)
+        return None
+
+    def funding_rate(self, symbol):
+        if not symbol:
+            return 0.0
+        try:
+            r = self._session.get(
+                self.BBT + "/v5/market/tickers",
+                params={"category": "linear", "symbol": self._bbt(symbol)},
+                headers=self.HDR, timeout=5)
+            d = r.json()
+            if d.get("retCode") == 0:
+                lst = d.get("result", {}).get("list", [])
+                if lst and lst[0].get("symbol") == self._bbt(symbol):
+                    return float(lst[0].get("fundingRate", 0)) * 100
+        except Exception:
+            pass
+        return 0.0
+
+    def open_interest(self, symbol):
+        if not symbol:
+            return 0.0, 0.0
+        try:
+            r = self._session.get(
+                self.BBT + "/v5/market/open-interest",
+                params={"category": "linear", "symbol": self._bbt(symbol),
+                        "intervalTime": "1h", "limit": 3},
+                headers=self.HDR, timeout=5)
+            d = r.json()
+            if d.get("retCode") == 0:
+                lst = d.get("result", {}).get("list", [])
+                if len(lst) >= 2:
+                    a = float(lst[0].get("openInterest", 0))
+                    b = float(lst[1].get("openInterest", 0))
+                    return a, round((a - b) / b * 100, 3) if b else 0
+        except Exception:
+            pass
+        return 0.0, 0.0
+
+    def order_book(self, symbol: str, depth: int = 50) -> dict:
+        """
+        Lấy Order Book (Depth) từ Bybit → BingX fallback.
+        """
+        EMPTY = {
+            "bids": [], "asks": [],
+            "bid_total": 0.0, "ask_total": 0.0,
+            "ratio": 1.0, "imbalance": 0.0,
+            "spread_pct": 0.0, "best_bid": 0.0, "best_ask": 0.0,
+            "bid_walls": [], "ask_walls": [],
+            "mid_price": 0.0, "ok": False,
+        }
+        if not symbol:
+            return EMPTY
+
+        bbt_sym = self._bbt(symbol)
+        bgx_sym = self._bgx(symbol)
+
+        # Bybit Order Book
+        try:
+            r = self._session.get(
+                self.BBT + "/v5/market/orderbook",
+                params={"category": "linear", "symbol": bbt_sym, "limit": depth},
+                headers=self.HDR, timeout=8)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("retCode") == 0:
+                    raw_bids = [[float(p), float(q)] for p, q in d["result"].get("b", [])]
+                    raw_asks = [[float(p), float(q)] for p, q in d["result"].get("a", [])]
+                    return self._parse_orderbook(raw_bids, raw_asks)
+        except Exception as e:
+            log.debug("Bybit orderbook %s: %s", bbt_sym, e)
+
+        # BingX Fallback
+        try:
+            r = self._session.get(
+                self.BGX + "/swap/v2/quote/depth",
+                params={"symbol": bgx_sym, "limit": depth},
+                headers=self.HDR, timeout=8)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("code") == 0:
+                    data = d.get("data", {})
+                    raw_bids = [[float(p), float(q)] for p, q in data.get("bids", [])]
+                    raw_asks = [[float(p), float(q)] for p, q in data.get("asks", [])]
+                    return self._parse_orderbook(raw_bids, raw_asks)
+        except Exception as e:
+            log.debug("BingX orderbook %s: %s", bgx_sym, e)
+
+        return EMPTY
+
+    @staticmethod
+    def _parse_orderbook(raw_bids: list, raw_asks: list) -> dict:
+        if not raw_bids or not raw_asks:
+            return {"bids":[], "asks":[], "bid_total":0, "ask_total":0,
+                    "ratio":1.0, "imbalance":0.0, "spread_pct":0.0,
+                    "best_bid":0.0, "best_ask":0.0, "bid_walls":[], "ask_walls":[],
+                    "mid_price":0.0, "ok":False}
+
+        bids = sorted(raw_bids, key=lambda x: x[0], reverse=True)
+        asks = sorted(raw_asks, key=lambda x: x[0])
+
+        best_bid = bids[0][0] if bids else 0.0
+        best_ask = asks[0][0] if asks else 0.0
+        mid      = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.0
+        spread   = round((best_ask - best_bid) / mid * 100, 4) if mid else 0.0
+
+        bid_total = sum(p * q for p, q in bids)
+        ask_total = sum(p * q for p, q in asks)
+        total     = bid_total + ask_total
+        ratio     = round(bid_total / ask_total, 3) if ask_total > 0 else 1.0
+        imbalance = round((bid_total - ask_total) / total * 100, 1) if total > 0 else 0.0
+
+        def find_walls(orders, threshold_mult=2.5):
+            if len(orders) < 3:
+                return []
+            sizes  = [q for _, q in orders]
+            avg_q  = sum(sizes) / len(sizes)
+            cutoff = avg_q * threshold_mult
+            walls  = []
+            for price, qty in orders:
+                if qty >= cutoff:
+                    walls.append({"price": round(price, 2),
+                                  "qty": round(qty, 4),
+                                  "usd": round(price * qty, 0),
+                                  "mult": round(qty / avg_q, 1)})
+            return sorted(walls, key=lambda x: x["usd"], reverse=True)[:5]
+
+        bid_walls = find_walls(bids)
+        ask_walls = find_walls(asks)
+
+        return {
+            "bids":      bids[:20],
+            "asks":      asks[:20],
+            "best_bid":  round(best_bid, 4),
+            "best_ask":  round(best_ask, 4),
+            "mid_price": round(mid, 4),
+            "spread_pct": spread,
+            "bid_total": round(bid_total, 0),
+            "ask_total": round(ask_total, 0),
+            "ratio":     ratio,
+            "imbalance": imbalance,
+            "bid_walls": bid_walls,
+            "ask_walls": ask_walls,
+            "ok":        True,
+        }
+
+    def liquidation_levels(self, symbol: str, current_price: float) -> dict:
+        """
+        Tính các ngưỡng thanh lý theo đòn bẩy.
+        """
+        EMPTY = {"long_liq_levels": [], "short_liq_levels": [],
+                 "dominant_side": "NEUTRAL", "cascade_risk": False,
+                 "long_ratio": 0.5, "short_ratio": 0.5, "ok": False}
+
+        if not symbol or not current_price:
+            return EMPTY
+
+        try:
+            r = self._session.get(
+                self.BBT + "/v5/market/account-ratio",
+                params={"category": "linear", "symbol": self._bbt(symbol),
+                        "period": "5min", "limit": 1},
+                headers=self.HDR, timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("retCode") == 0:
+                    lst = d.get("result", {}).get("list", [])
+                    if lst:
+                        buy_ratio  = float(lst[0].get("buyRatio",  0.5))
+                        sell_ratio = float(lst[0].get("sellRatio", 0.5))
+                    else:
+                        buy_ratio = sell_ratio = 0.5
+                else:
+                    buy_ratio = sell_ratio = 0.5
+            else:
+                buy_ratio = sell_ratio = 0.5
+        except Exception:
+            buy_ratio = sell_ratio = 0.5
+
+        dominant = "LONG" if buy_ratio > sell_ratio else "SHORT"
+
+        leverages = [5, 10, 20, 50, 100]
+        p = current_price
+
+        long_liqs  = []
+        short_liqs = []
+        for lev in leverages:
+            liq_long  = round(p * (1 - 0.9 / lev), 2)
+            liq_short = round(p * (1 + 0.9 / lev), 2)
+            long_liqs.append({"leverage": lev, "price": liq_long,
+                               "distance_pct": round((p - liq_long) / p * 100, 2)})
+            short_liqs.append({"leverage": lev, "price": liq_short,
+                                "distance_pct": round((liq_short - p) / p * 100, 2)})
+
+        cascade_levels = [l["price"] for l in long_liqs if l["leverage"] in (20, 50)]
+        cascade_risk   = any(abs(p - liq) / p < 0.02 for liq in cascade_levels)
+
+        return {
+            "long_liq_levels":  long_liqs,
+            "short_liq_levels": short_liqs,
+            "dominant_side":    dominant,
+            "cascade_risk":     cascade_risk,
+            "long_ratio":       round(buy_ratio, 3),
+            "short_ratio":      round(sell_ratio, 3),
+            "ok":               True,
+        }
+
+
+# ═══════════════════════════════════════════════════════════
+# 2. STOCK / GOLD FETCHER — v6.1
+# ═══════════════════════════════════════════════════════════
+
+class StockFetcher:
+    HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+           "Accept": "application/json",
+           "Referer": "https://finance.yahoo.com/"}
+    CGK    = "https://api.coingecko.com/api/v3"
+    # Sửa GC%3DF thành GC=F để API requests không bị lỗi encode
+    YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC=F"}
+    YH_IV  = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
+    YH_RNG = {"15m": "5d", "1h": "30d", "4h": "30d", "1d": "6mo"}
+    PLIM   = {"TSLA": (10, 5000), "NVDA": (10, 5000),
+               "SPY": (100, 1500), "QQQ": (100, 1500), "NCCOGOLD2USD-USDT": (1500, 6000)}
+
+    _SYNTHETIC_PRICES = {"NCCOGOLD2USD-USDT": 2350.0, "SPY": 540.0, "TSLA": 220.0, "NVDA": 120.0}
+
+    def __init__(self):
+        self._session = _make_session(retries=2, backoff=0.5)
+
+    def price(self, symbol):
+        lo, hi = self.PLIM.get(symbol, (0, 1e9))
+
+        # GOLD
+        if symbol == "NCCOGOLD2USD-USDT":
+            try:
+                r = self._session.get(
+                    self.CGK + "/simple/price",
+                    params={"ids": "pax-gold,tether-gold", "vs_currencies": "usd"},
+                    headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+                r.raise_for_status()
+                d = r.json()
+                for tok in ["pax-gold", "tether-gold"]:
+                    p = float(d.get(tok, {}).get("usd", 0))
+                    if lo < p < hi:
+                        log.info("Gold CoinGecko %s: \$%.2f", tok, p)
+                        return round(p, 2)
+            except Exception as e:
+                log.warning("CoinGecko gold: %s", e)
+
+            for base in ["query1", "query2"]:
+                try:
+                    r = self._session.get(
+                        f"https://{base}.finance.yahoo.com/v8/finance/chart/GC=F"
+                        "?interval=1m&range=1d",
+                        headers=self.HDR, timeout=10)
+                    if r.ok:
+                        j = r.json()
+                        # Kiểm tra an toàn xem có "result" không
+                        if j.get("chart", {}).get("result"):
+                            data = j["chart"]["result"][0]
+                            meta = data.get("meta", {})
+                            for key in ["regularMarketPrice", "chartPreviousClose"]:
+                                p = float(meta.get(key, 0))
+                                if lo < p < hi:
+                                    log.info("Gold Yahoo %s [%s]: \$%.2f", base, key, p)
+                                    return round(p, 2)
+                            closes = [c for c in data["indicators"]["quote"][0].get("close", [])
+                                      if c and lo < float(c) < hi]
+                            if closes:
+                                return round(closes[-1], 2)
+                except Exception as e:
+                    log.warning("Yahoo GC=F %s: %s", base, e)
+
+            return 0.0
+
+        # STOCKS
+        ticker = self.YAHOO.get(symbol, symbol)
+        for base in ["query1", "query2"]:
+            try:
+                r = self._session.get(
+                    f"https://{base}.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d",
+                    headers=self.HDR, timeout=10)
+                if r.ok:
+                    j = r.json()
+                    # Kiểm tra an toàn xem có "result" không
+                    if j.get("chart", {}).get("result"):
+                        data = j["chart"]["result"][0]
+                        meta = data.get("meta", {})
+                        p = float(meta.get("regularMarketPrice", 0))
+                        if lo < p < hi:
+                            return round(p, 2)
+                        closes = [c for c in data["indicators"]["quote"][0].get("close", [])
+                                  if c and lo < float(c) < hi]
+                        if closes:
+                            return round(closes[-1], 2)
+            except Exception as e:
+                log.warning("Yahoo price %s %s: %s", symbol, base, e)
+
+        return 0.0
+
+    def klines(self, symbol, interval, limit=100):
+        lo, hi  = self.PLIM.get(symbol, (0, 1e9))
+        ticker  = self.YAHOO.get(symbol, symbol)
+        yh_iv   = self.YH_IV.get(interval, "1h")
+        yh_rng  = self.YH_RNG.get(interval, "30d")
+
+        for base in ["query1", "query2"]:
+            try:
+                r = self._session.get(
+                    f"https://{base}.finance.yahoo.com/v8/finance/chart/{ticker}"
+                    f"?interval={yh_iv}&range={yh_rng}",
+                    headers=self.HDR, timeout=15)
+                if r.status_code != 200:
+                    continue
+                    
+                j = r.json()
+                # Kiểm tra an toàn để fix lỗi sập NoneType
+                if not j.get("chart", {}).get("result"):
+                    continue
+                    
+                q = j["chart"]["result"][0]["indicators"]["quote"][0]
+
+                def clean(lst):
+                    return [float(x) for x in lst if x is not None and lo < float(x) < hi]
+
+                closes  = clean(q.get("close",  []))
+                highs   = clean(q.get("high",   []))
+                lows    = clean(q.get("low",    []))
+                opens   = clean(q.get("open",   []))
+                volumes = [float(x) if x else 1.0 for x in q.get("volume", [])]
+
+                if len(closes) < 20:
+                    continue
+
+                n = min(len(closes), len(highs), len(lows), len(opens), len(volumes), limit)
+                c = closes[-n:]
+                h = highs[-n:]   if len(highs)   >= n else c
+                l = lows[-n:]
+                o = opens[-n:]   if len(opens)   >= n else c
+                v = volumes[-n:] if len(volumes) >= n else [1.0] * n
+
+                return {"open": o, "high": h, "low": l, "close": c,
+                        "volume": v, "taker_buy_vol": [x * 0.52 for x in v]}
+            except Exception as e:
+                log.warning("Yahoo klines %s %s %s: %s", symbol, interval, base, e)
+
+        # Fallback synthetic klines
+        is_open, _ = self.market_open() if symbol != "NCCOGOLD2USD-USDT" else self.is_gold_open()
+        if is_open:
+            log.error("🚫 Yahoo FAIL khi thị trường đang MỞ cho %s [%s] — bỏ qua TF này", symbol, interval)
+            return None
+
+        import random
+        p = self.price(symbol)
+        if p <= 0:
+            p = self._SYNTHETIC_PRICES.get(symbol, 100.0)
+        c = [p * (1 + random.uniform(-0.003, 0.003)) for _ in range(limit)]
+        c[-1] = p
+        v = [random.uniform(1000, 5000) for _ in range(limit)]
+        return {"open": c[:], "high": [x * 1.005 for x in c],
+                "low": [x * 0.995 for x in c], "close": c,
+                "volume": v, "taker_buy_vol": [x * 0.52 for x in v]}
+
+    def market_open(self):
+        from datetime import timezone, timedelta
+        et  = timezone(timedelta(hours=-4))
+        now = datetime.now(et)
+        wd, h, m = now.weekday(), now.hour, now.minute
+        if wd >= 5:
+            return False, "📴 Cuối tuần — thị trường đóng"
+        if h < 9 or (h == 9 and m < 30):
+            return False, "⏰ Pre-market (mở lúc 9:30 ET)"
+        if h >= 16:
+            return False, "📴 After-hours (đóng lúc 16:00 ET)"
+        return True, "🟢 NYSE/NASDAQ đang mở"
+
+    def is_gold_open(self):
+        from datetime import timezone, timedelta
+        et  = timezone(timedelta(hours=-4))
+        now = datetime.now(et)
+        wd, h = now.weekday(), now.hour
+        if wd == 5:
+            return False, "📴 Gold đóng cửa (Thứ 7)"
+        if wd == 6 and h < 18:
+            return False, "📴 Gold mở lại CN 18:00 ET"
+        if wd == 4 and h >= 17:
+            return False, "📴 Gold đóng từ T6 17:00 ET"
+        if h == 17:
+            return False, "⏸️ Gold break 17:00–18:00 ET"
+        return True, "🟡 Gold Futures đang giao dịch"`,
   "llm_agents.py": `from analyzer.config import Config
 from datetime import datetime, timedelta
 import logging
@@ -2520,594 +3105,6 @@ class MultiAgentPipeline:
 
         return [msg1, msg2, msg3, msg4]
 `,
-
-  "fetcher.py": `# ═══════════════════════════════════════════════════════════
-# 1. CRYPTO FETCHER — v6.1 (Session Pool + Retry + Safe Fallback)
-# ═══════════════════════════════════════════════════════════
-from datetime import datetime
-import logging
-import time
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
-log = logging.getLogger("analyzer.fetcher")
-
-
-def _make_session(retries=2, backoff=0.3, timeout=None):
-    """
-    Tạo requests.Session với connection pooling và retry tự động.
-    """
-    session = requests.Session()
-    retry = Retry(
-        total=retries,
-        backoff_factor=backoff,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(
-        max_retries=retry,
-        pool_connections=4,
-        pool_maxsize=10,
-    )
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
-
-
-class CryptoFetcher:
-    """
-    Crypto data — Ưu tiên Bybit, Fallback sang BingX.
-    """
-    BGX = "https://open-api.bingx.com/openApi"
-    BBT = "https://api.bybit.com"
-    HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
-    BGX_IV = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-    BBT_IV = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
-
-    def __init__(self):
-        self._session = _make_session(retries=2, backoff=0.3)
-
-    def _bgx(self, s):
-        s = str(s).strip().upper()
-        if '-' in s: return s
-        if s.endswith('USDT'):
-            return s[:-4] + '-USDT'
-        return s
-
-    def _bbt(self, s):
-        s = str(s).strip().upper()
-        return s.replace('-', '')
-
-    def _tbvol_ratio(self, closes):
-        """
-        Tính ratio taker buy volume động thay vì hardcode 52%.
-        """
-        if len(closes) < 6:
-            return 0.52
-        recent = closes[-1]
-        prev   = closes[-6]
-        if prev <= 0:
-            return 0.52
-        pct_change = (recent - prev) / prev
-        ratio = 0.51 + pct_change * 3.5
-        return round(max(0.40, min(0.62, ratio)), 3)
-
-    def price(self, symbol):
-        """Lấy giá Last Price"""
-        if not symbol:
-            return 0.0
-
-        bbt_sym = self._bbt(symbol)
-        bgx_sym = self._bgx(symbol)
-
-        # Bybit
-        try:
-            r = self._session.get(
-                self.BBT + "/v5/market/tickers",
-                params={"category": "linear", "symbol": bbt_sym},
-                headers=self.HDR, timeout=6)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("retCode") == 0:
-                    lst = d.get("result", {}).get("list", [])
-                    if lst and lst[0].get("symbol") == bbt_sym:
-                        p = float(lst[0].get("lastPrice", 0))
-                        if p > 0:
-                            return round(p, 4)
-                    else:
-                        log.warning("Bybit sai symbol cho %s", bbt_sym)
-        except Exception as e:
-            log.debug("Bybit ticker err %s: %s", bbt_sym, e)
-
-        # BingX Fallback
-        try:
-            r = self._session.get(
-                self.BGX + "/swap/v2/quote/ticker",
-                params={"symbol": bgx_sym},
-                headers=self.HDR, timeout=6)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("code") == 0 and d.get("data"):
-                    data = d["data"]
-                    if isinstance(data, dict) and data.get("symbol") == bgx_sym:
-                        p = float(data.get("lastPrice") or data.get("markPrice") or 0)
-                        if p > 0:
-                            return round(p, 4)
-                    elif isinstance(data, list):
-                        for item in data:
-                            if item.get("symbol") == bgx_sym:
-                                p = float(item.get("lastPrice", 0))
-                                if p > 0:
-                                    return round(p, 4)
-        except Exception as e:
-            log.debug("BingX ticker err %s: %s", bgx_sym, e)
-
-        log.error("KHÔNG THỂ LẤY GIÁ CHO %s", symbol)
-        return 0.0
-
-    def klines(self, symbol, interval, limit=150):
-        """Lấy Klines — Bybit trước, BingX fallback"""
-        if not symbol:
-            return None
-
-        bbt_sym = self._bbt(symbol)
-        bgx_sym = self._bgx(symbol)
-        bbt_iv  = self.BBT_IV.get(interval, "60")
-        bgx_iv  = self.BGX_IV.get(interval, "1h")
-
-        # Bybit Klines
-        try:
-            r = self._session.get(
-                self.BBT + "/v5/market/kline",
-                params={"category": "linear", "symbol": bbt_sym,
-                        "interval": bbt_iv, "limit": limit},
-                headers=self.HDR, timeout=10)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("retCode") == 0:
-                    raw = list(reversed(d["result"]["list"]))
-                    if len(raw) >= 20:
-                        closes = [float(c[4]) for c in raw]
-                        vols   = [max(float(c[5]), 0.001) for c in raw]
-                        tbv_ratio = self._tbvol_ratio(closes)
-                        return {
-                            "open":          [float(c[1]) for c in raw],
-                            "high":          [float(c[2]) for c in raw],
-                            "low":           [float(c[3]) for c in raw],
-                            "close":         closes,
-                            "volume":        vols,
-                            "taker_buy_vol": [v * tbv_ratio for v in vols],
-                        }
-        except Exception as e:
-            log.debug("Bybit klines err %s %s: %s", bbt_sym, interval, e)
-
-        # BingX Klines Fallback
-        try:
-            r = self._session.get(
-                self.BGX + "/swap/v3/quote/klines",
-                params={"symbol": bgx_sym, "interval": bgx_iv, "limit": limit},
-                headers=self.HDR, timeout=10)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("code") == 0:
-                    data = d.get("data", [])
-                    if len(data) >= 20:
-                        closes = [float(c.get("close", 0)) for c in data]
-                        vols   = [max(float(c.get("volume", 0)), 0.001) for c in data]
-                        tbv_ratio = self._tbvol_ratio(closes)
-                        tbvols = []
-                        for i, c in enumerate(data):
-                            tbv = c.get("takerBuyVolume") or c.get("taker_buy_volume")
-                            if tbv and float(tbv) > 0:
-                                tbvols.append(float(tbv))
-                            else:
-                                tbvols.append(vols[i] * tbv_ratio)
-                        return {
-                            "open":          [float(c.get("open", closes[i])) for i, c in enumerate(data)],
-                            "high":          [float(c.get("high", closes[i])) for i, c in enumerate(data)],
-                            "low":           [float(c.get("low",  closes[i])) for i, c in enumerate(data)],
-                            "close":         closes,
-                            "volume":        vols,
-                            "taker_buy_vol": tbvols,
-                        }
-        except Exception as e:
-            log.debug("BingX klines err %s %s: %s", bgx_sym, interval, e)
-
-        log.error("Không lấy được klines cho %s [%s]", symbol, interval)
-        return None
-
-    def funding_rate(self, symbol):
-        if not symbol:
-            return 0.0
-        try:
-            r = self._session.get(
-                self.BBT + "/v5/market/tickers",
-                params={"category": "linear", "symbol": self._bbt(symbol)},
-                headers=self.HDR, timeout=5)
-            d = r.json()
-            if d.get("retCode") == 0:
-                lst = d.get("result", {}).get("list", [])
-                if lst and lst[0].get("symbol") == self._bbt(symbol):
-                    return float(lst[0].get("fundingRate", 0)) * 100
-        except Exception:
-            pass
-        return 0.0
-
-    def open_interest(self, symbol):
-        if not symbol:
-            return 0.0, 0.0
-        try:
-            r = self._session.get(
-                self.BBT + "/v5/market/open-interest",
-                params={"category": "linear", "symbol": self._bbt(symbol),
-                        "intervalTime": "1h", "limit": 3},
-                headers=self.HDR, timeout=5)
-            d = r.json()
-            if d.get("retCode") == 0:
-                lst = d.get("result", {}).get("list", [])
-                if len(lst) >= 2:
-                    a = float(lst[0].get("openInterest", 0))
-                    b = float(lst[1].get("openInterest", 0))
-                    return a, round((a - b) / b * 100, 3) if b else 0
-        except Exception:
-            pass
-        return 0.0, 0.0
-
-    def order_book(self, symbol: str, depth: int = 50) -> dict:
-        """
-        Lấy Order Book (Depth) từ Bybit → BingX fallback.
-        """
-        EMPTY = {
-            "bids": [], "asks": [],
-            "bid_total": 0.0, "ask_total": 0.0,
-            "ratio": 1.0, "imbalance": 0.0,
-            "spread_pct": 0.0, "best_bid": 0.0, "best_ask": 0.0,
-            "bid_walls": [], "ask_walls": [],
-            "mid_price": 0.0, "ok": False,
-        }
-        if not symbol:
-            return EMPTY
-
-        bbt_sym = self._bbt(symbol)
-        bgx_sym = self._bgx(symbol)
-
-        # Bybit Order Book
-        try:
-            r = self._session.get(
-                self.BBT + "/v5/market/orderbook",
-                params={"category": "linear", "symbol": bbt_sym, "limit": depth},
-                headers=self.HDR, timeout=8)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("retCode") == 0:
-                    raw_bids = [[float(p), float(q)] for p, q in d["result"].get("b", [])]
-                    raw_asks = [[float(p), float(q)] for p, q in d["result"].get("a", [])]
-                    return self._parse_orderbook(raw_bids, raw_asks)
-        except Exception as e:
-            log.debug("Bybit orderbook %s: %s", bbt_sym, e)
-
-        # BingX Fallback
-        try:
-            r = self._session.get(
-                self.BGX + "/swap/v2/quote/depth",
-                params={"symbol": bgx_sym, "limit": depth},
-                headers=self.HDR, timeout=8)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("code") == 0:
-                    data = d.get("data", {})
-                    raw_bids = [[float(p), float(q)] for p, q in data.get("bids", [])]
-                    raw_asks = [[float(p), float(q)] for p, q in data.get("asks", [])]
-                    return self._parse_orderbook(raw_bids, raw_asks)
-        except Exception as e:
-            log.debug("BingX orderbook %s: %s", bgx_sym, e)
-
-        return EMPTY
-
-    @staticmethod
-    def _parse_orderbook(raw_bids: list, raw_asks: list) -> dict:
-        if not raw_bids or not raw_asks:
-            return {"bids":[], "asks":[], "bid_total":0, "ask_total":0,
-                    "ratio":1.0, "imbalance":0.0, "spread_pct":0.0,
-                    "best_bid":0.0, "best_ask":0.0, "bid_walls":[], "ask_walls":[],
-                    "mid_price":0.0, "ok":False}
-
-        bids = sorted(raw_bids, key=lambda x: x[0], reverse=True)
-        asks = sorted(raw_asks, key=lambda x: x[0])
-
-        best_bid = bids[0][0] if bids else 0.0
-        best_ask = asks[0][0] if asks else 0.0
-        mid      = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.0
-        spread   = round((best_ask - best_bid) / mid * 100, 4) if mid else 0.0
-
-        bid_total = sum(p * q for p, q in bids)
-        ask_total = sum(p * q for p, q in asks)
-        total     = bid_total + ask_total
-        ratio     = round(bid_total / ask_total, 3) if ask_total > 0 else 1.0
-        imbalance = round((bid_total - ask_total) / total * 100, 1) if total > 0 else 0.0
-
-        def find_walls(orders, threshold_mult=2.5):
-            if len(orders) < 3:
-                return []
-            sizes  = [q for _, q in orders]
-            avg_q  = sum(sizes) / len(sizes)
-            cutoff = avg_q * threshold_mult
-            walls  = []
-            for price, qty in orders:
-                if qty >= cutoff:
-                    walls.append({"price": round(price, 2),
-                                  "qty": round(qty, 4),
-                                  "usd": round(price * qty, 0),
-                                  "mult": round(qty / avg_q, 1)})
-            return sorted(walls, key=lambda x: x["usd"], reverse=True)[:5]
-
-        bid_walls = find_walls(bids)
-        ask_walls = find_walls(asks)
-
-        return {
-            "bids":      bids[:20],
-            "asks":      asks[:20],
-            "best_bid":  round(best_bid, 4),
-            "best_ask":  round(best_ask, 4),
-            "mid_price": round(mid, 4),
-            "spread_pct": spread,
-            "bid_total": round(bid_total, 0),
-            "ask_total": round(ask_total, 0),
-            "ratio":     ratio,
-            "imbalance": imbalance,
-            "bid_walls": bid_walls,
-            "ask_walls": ask_walls,
-            "ok":        True,
-        }
-
-    def liquidation_levels(self, symbol: str, current_price: float) -> dict:
-        """
-        Tính các ngưỡng thanh lý theo đòn bẩy.
-        """
-        EMPTY = {"long_liq_levels": [], "short_liq_levels": [],
-                 "dominant_side": "NEUTRAL", "cascade_risk": False,
-                 "long_ratio": 0.5, "short_ratio": 0.5, "ok": False}
-
-        if not symbol or not current_price:
-            return EMPTY
-
-        try:
-            r = self._session.get(
-                self.BBT + "/v5/market/account-ratio",
-                params={"category": "linear", "symbol": self._bbt(symbol),
-                        "period": "5min", "limit": 1},
-                headers=self.HDR, timeout=6)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("retCode") == 0:
-                    lst = d.get("result", {}).get("list", [])
-                    if lst:
-                        buy_ratio  = float(lst[0].get("buyRatio",  0.5))
-                        sell_ratio = float(lst[0].get("sellRatio", 0.5))
-                    else:
-                        buy_ratio = sell_ratio = 0.5
-                else:
-                    buy_ratio = sell_ratio = 0.5
-            else:
-                buy_ratio = sell_ratio = 0.5
-        except Exception:
-            buy_ratio = sell_ratio = 0.5
-
-        dominant = "LONG" if buy_ratio > sell_ratio else "SHORT"
-
-        leverages = [5, 10, 20, 50, 100]
-        p = current_price
-
-        long_liqs  = []
-        short_liqs = []
-        for lev in leverages:
-            liq_long  = round(p * (1 - 0.9 / lev), 2)
-            liq_short = round(p * (1 + 0.9 / lev), 2)
-            long_liqs.append({"leverage": lev, "price": liq_long,
-                               "distance_pct": round((p - liq_long) / p * 100, 2)})
-            short_liqs.append({"leverage": lev, "price": liq_short,
-                                "distance_pct": round((liq_short - p) / p * 100, 2)})
-
-        cascade_levels = [l["price"] for l in long_liqs if l["leverage"] in (20, 50)]
-        cascade_risk   = any(abs(p - liq) / p < 0.02 for liq in cascade_levels)
-
-        return {
-            "long_liq_levels":  long_liqs,
-            "short_liq_levels": short_liqs,
-            "dominant_side":    dominant,
-            "cascade_risk":     cascade_risk,
-            "long_ratio":       round(buy_ratio, 3),
-            "short_ratio":      round(sell_ratio, 3),
-            "ok":               True,
-        }
-
-
-# ═══════════════════════════════════════════════════════════
-# 2. STOCK / GOLD FETCHER — v6.1
-# ═══════════════════════════════════════════════════════════
-
-class StockFetcher:
-    HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-           "Accept": "application/json",
-           "Referer": "https://finance.yahoo.com/"}
-    CGK    = "https://api.coingecko.com/api/v3"
-    # Sửa GC%3DF thành GC=F để API requests không bị lỗi encode
-    YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC=F"}
-    YH_IV  = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
-    YH_RNG = {"15m": "5d", "1h": "30d", "4h": "30d", "1d": "6mo"}
-    PLIM   = {"TSLA": (10, 5000), "NVDA": (10, 5000),
-               "SPY": (100, 1500), "QQQ": (100, 1500), "NCCOGOLD2USD-USDT": (1500, 6000)}
-
-    _SYNTHETIC_PRICES = {"NCCOGOLD2USD-USDT": 2350.0, "SPY": 540.0, "TSLA": 220.0, "NVDA": 120.0}
-
-    def __init__(self):
-        self._session = _make_session(retries=2, backoff=0.5)
-
-    def price(self, symbol):
-        lo, hi = self.PLIM.get(symbol, (0, 1e9))
-
-        # GOLD
-        if symbol == "NCCOGOLD2USD-USDT":
-            try:
-                r = self._session.get(
-                    self.CGK + "/simple/price",
-                    params={"ids": "pax-gold,tether-gold", "vs_currencies": "usd"},
-                    headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
-                r.raise_for_status()
-                d = r.json()
-                for tok in ["pax-gold", "tether-gold"]:
-                    p = float(d.get(tok, {}).get("usd", 0))
-                    if lo < p < hi:
-                        log.info("Gold CoinGecko %s: \$%.2f", tok, p)
-                        return round(p, 2)
-            except Exception as e:
-                log.warning("CoinGecko gold: %s", e)
-
-            for base in ["query1", "query2"]:
-                try:
-                    r = self._session.get(
-                        f"https://{base}.finance.yahoo.com/v8/finance/chart/GC=F"
-                        "?interval=1m&range=1d",
-                        headers=self.HDR, timeout=10)
-                    if r.ok:
-                        j = r.json()
-                        # Kiểm tra an toàn xem có "result" không
-                        if j.get("chart", {}).get("result"):
-                            data = j["chart"]["result"][0]
-                            meta = data.get("meta", {})
-                            for key in ["regularMarketPrice", "chartPreviousClose"]:
-                                p = float(meta.get(key, 0))
-                                if lo < p < hi:
-                                    log.info("Gold Yahoo %s [%s]: \$%.2f", base, key, p)
-                                    return round(p, 2)
-                            closes = [c for c in data["indicators"]["quote"][0].get("close", [])
-                                      if c and lo < float(c) < hi]
-                            if closes:
-                                return round(closes[-1], 2)
-                except Exception as e:
-                    log.warning("Yahoo GC=F %s: %s", base, e)
-
-            return 0.0
-
-        # STOCKS
-        ticker = self.YAHOO.get(symbol, symbol)
-        for base in ["query1", "query2"]:
-            try:
-                r = self._session.get(
-                    f"https://{base}.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1m&range=1d",
-                    headers=self.HDR, timeout=10)
-                if r.ok:
-                    j = r.json()
-                    # Kiểm tra an toàn xem có "result" không
-                    if j.get("chart", {}).get("result"):
-                        data = j["chart"]["result"][0]
-                        meta = data.get("meta", {})
-                        p = float(meta.get("regularMarketPrice", 0))
-                        if lo < p < hi:
-                            return round(p, 2)
-                        closes = [c for c in data["indicators"]["quote"][0].get("close", [])
-                                  if c and lo < float(c) < hi]
-                        if closes:
-                            return round(closes[-1], 2)
-            except Exception as e:
-                log.warning("Yahoo price %s %s: %s", symbol, base, e)
-
-        return 0.0
-
-    def klines(self, symbol, interval, limit=100):
-        lo, hi  = self.PLIM.get(symbol, (0, 1e9))
-        ticker  = self.YAHOO.get(symbol, symbol)
-        yh_iv   = self.YH_IV.get(interval, "1h")
-        yh_rng  = self.YH_RNG.get(interval, "30d")
-
-        for base in ["query1", "query2"]:
-            try:
-                r = self._session.get(
-                    f"https://{base}.finance.yahoo.com/v8/finance/chart/{ticker}"
-                    f"?interval={yh_iv}&range={yh_rng}",
-                    headers=self.HDR, timeout=15)
-                if r.status_code != 200:
-                    continue
-                    
-                j = r.json()
-                # Kiểm tra an toàn để fix lỗi sập NoneType
-                if not j.get("chart", {}).get("result"):
-                    continue
-                    
-                q = j["chart"]["result"][0]["indicators"]["quote"][0]
-
-                def clean(lst):
-                    return [float(x) for x in lst if x is not None and lo < float(x) < hi]
-
-                closes  = clean(q.get("close",  []))
-                highs   = clean(q.get("high",   []))
-                lows    = clean(q.get("low",    []))
-                opens   = clean(q.get("open",   []))
-                volumes = [float(x) if x else 1.0 for x in q.get("volume", [])]
-
-                if len(closes) < 20:
-                    continue
-
-                n = min(len(closes), len(highs), len(lows), len(opens), len(volumes), limit)
-                c = closes[-n:]
-                h = highs[-n:]   if len(highs)   >= n else c
-                l = lows[-n:]
-                o = opens[-n:]   if len(opens)   >= n else c
-                v = volumes[-n:] if len(volumes) >= n else [1.0] * n
-
-                return {"open": o, "high": h, "low": l, "close": c,
-                        "volume": v, "taker_buy_vol": [x * 0.52 for x in v]}
-            except Exception as e:
-                log.warning("Yahoo klines %s %s %s: %s", symbol, interval, base, e)
-
-        # Fallback synthetic klines
-        is_open, _ = self.market_open() if symbol != "NCCOGOLD2USD-USDT" else self.is_gold_open()
-        if is_open:
-            log.error("🚫 Yahoo FAIL khi thị trường đang MỞ cho %s [%s] — bỏ qua TF này", symbol, interval)
-            return None
-
-        import random
-        p = self.price(symbol)
-        if p <= 0:
-            p = self._SYNTHETIC_PRICES.get(symbol, 100.0)
-        c = [p * (1 + random.uniform(-0.003, 0.003)) for _ in range(limit)]
-        c[-1] = p
-        v = [random.uniform(1000, 5000) for _ in range(limit)]
-        return {"open": c[:], "high": [x * 1.005 for x in c],
-                "low": [x * 0.995 for x in c], "close": c,
-                "volume": v, "taker_buy_vol": [x * 0.52 for x in v]}
-
-    def market_open(self):
-        from datetime import timezone, timedelta
-        et  = timezone(timedelta(hours=-4))
-        now = datetime.now(et)
-        wd, h, m = now.weekday(), now.hour, now.minute
-        if wd >= 5:
-            return False, "📴 Cuối tuần — thị trường đóng"
-        if h < 9 or (h == 9 and m < 30):
-            return False, "⏰ Pre-market (mở lúc 9:30 ET)"
-        if h >= 16:
-            return False, "📴 After-hours (đóng lúc 16:00 ET)"
-        return True, "🟢 NYSE/NASDAQ đang mở"
-
-    def is_gold_open(self):
-        from datetime import timezone, timedelta
-        et  = timezone(timedelta(hours=-4))
-        now = datetime.now(et)
-        wd, h = now.weekday(), now.hour
-        if wd == 5:
-            return False, "📴 Gold đóng cửa (Thứ 7)"
-        if wd == 6 and h < 18:
-            return False, "📴 Gold mở lại CN 18:00 ET"
-        if wd == 4 and h >= 17:
-            return False, "📴 Gold đóng từ T6 17:00 ET"
-        if h == 17:
-            return False, "⏸️ Gold break 17:00–18:00 ET"
-        return True, "🟡 Gold Futures đang giao dịch"`,
-
   "telegram_bot.py": `# ═══════════════════════════════════════════════════════════
 # 2. TELEGRAM BOT — v6.1 (Channel + MiniApp integration)
 # ═══════════════════════════════════════════════════════════
@@ -3444,7 +3441,316 @@ class TelegramBot:
         ])
         return "\n".join(lines)
 `,
+  "main_scanner.py": `# ═══════════════════════════════════════════════════════════
+# MAIN SCANNER — SignalBot v6.1 (Analyzer Core)
+# ═══════════════════════════════════════════════════════════
+import os, time, json, logging, schedule, gc, requests, threading
+from datetime import datetime as dt_module
+import redis
 
+from analyzer.engine import SignalEngine
+from analyzer.llm_agents import LLMChain, MultiAgentPipeline
+from analyzer.telegram_bot import TelegramBot
+from analyzer.config import Config
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+cfg = Config()
+
+
+def get_memory_for_ai(symbol: str) -> str:
+    try:
+        from core_api.main import SessionLocal, TradeJournal
+        db = SessionLocal()
+        lessons = db.query(TradeJournal).filter(
+            TradeJournal.symbol == symbol,
+            TradeJournal.pnl_pct < 0
+        ).order_by(TradeJournal.timestamp.desc()).limit(3).all()
+        db.close()
+        if not lessons:
+            return "Chưa có cảnh báo nào từ dữ liệu quá khứ."
+        mem = "⚠️ CẢNH BÁO TỪ QUÁ KHỨ (CÁC LỆNH BỊ CẮT LỖ GẦN NHẤT):\n"
+        for l in lessons:
+            mem += f"- Lần trước đánh {l.direction}: {l.lesson}\n"
+        return mem
+    except Exception as e:
+        logging.getLogger("SignalBot").warning(f"Không thể lấy trí nhớ AI: {e}")
+        return ""
+
+
+class SignalBot:
+    CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
+    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]
+
+    _PIPELINE_SEMAPHORE = threading.Semaphore(4)  # Tăng lên 4 luồng song song
+
+    def __init__(self):
+        self.log = logging.getLogger("SignalBot")
+        self.dt  = dt_module
+
+        self.engine       = SignalEngine()
+        self.llm          = LLMChain()
+        self.tg           = TelegramBot()
+        self.pipeline     = MultiAgentPipeline(self.llm)
+        self.last_signals = {}
+        self._scan_count  = 0
+        self._closed_notified = set()
+
+        self._pushed_signals: dict[str, float] = {}
+        self._push_cooldown = 90
+
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        try:
+            self.redis_client = redis.from_url(redis_url, socket_connect_timeout=5)
+            self.redis_client.ping()
+            self.log.info("🟢 Redis Queue kết nối OK")
+        except Exception as e:
+            self.log.error("❌ Lỗi kết nối Redis: %s", e)
+            self.redis_client = None
+
+    def _cleanup(self):
+        keys = self.CRYPTO_SYMBOLS + self.STOCK_SYMBOLS
+        self.last_signals    = {k: v for k, v in self.last_signals.items() if k in keys}
+        self._pushed_signals = {k: v for k, v in self._pushed_signals.items() if k in keys}
+        gc.collect()
+        self.log.info("🧹 RAM đã dọn dẹp")
+
+    def should_send(self, symbol, new):
+        sweep = new.get("liquidity_sweep", {})
+        if sweep.get("detected"):
+            return True, f"🔥 LIQUIDITY SWEEP ({sweep.get('type')})"
+        prev = self.last_signals.get(symbol)
+        if not prev or not prev.get("final"):
+            return True, "lần đầu"
+        if prev["final"] != new["final"]:
+            return True, "signal đổi " + prev["final"] + "→" + new["final"]
+        if prev.get("wyckoff", {}).get("phase") != new.get("wyckoff", {}).get("phase"):
+            return True, "Wyckoff đổi pha"
+        bo = new.get("breakout", {})
+        if bo.get("type", "NONE") != "NONE" and bo.get("strength", 0) >= 60:
+            return True, "Breakout " + bo["type"]
+        if new.get("whale", {}).get("detected"):
+            return True, "Whale detected"
+        if new["confidence"] >= 80 and new["final"] != "WAIT":
+            return True, "confidence cao"
+        return False, "không đổi"
+
+    def push_to_queue(self, symbol, data):
+        if not self.redis_client:
+            self.log.warning("⚠️ Không có Redis. Không thể đẩy lệnh.")
+            return
+
+        now = time.time()
+        last_push = self._pushed_signals.get(symbol, 0)
+        if now - last_push < self._push_cooldown:
+            remaining = int(self._push_cooldown - (now - last_push))
+            self.log.info("  ⏭️ Bỏ qua push %s — cooldown còn %ds", symbol, remaining)
+            return
+
+        payload = {
+            "signal_id": f"sig_{int(now)}_{symbol}",
+            "symbol":    symbol,
+            "asset_type": data.get("asset_type", "CRYPTO"),
+            "final":     data["final"],
+            "confidence": data["confidence"],
+            "plan":      data["plan"],
+            "timestamp": data.get("timestamp", now),
+        }
+        try:
+            self.redis_client.lpush("TRADE_SIGNALS", json.dumps(payload))
+            self.redis_client.ltrim("TRADE_SIGNALS", 0, 99)
+            self._pushed_signals[symbol] = now
+            self.log.info(f"📤 Đã đẩy lệnh {data['final']} {symbol} vào Hàng đợi.")
+        except Exception as e:
+            self.log.error(f"❌ Lỗi đẩy Redis: {e}")
+
+    def _run_pipeline_sync(self, sym, data):
+        final_sig = data.get("final", "WAIT")
+        conf = data.get("confidence", 0)
+        ev_ratio = data.get("bayes_ev", {}).get("ev_ratio", 0)
+        if final_sig == "WAIT" and conf < 70 and ev_ratio < 0.3:
+            return
+        with self._PIPELINE_SEMAPHORE:
+            try:
+                result = self.pipeline.run(data)
+                msgs   = MultiAgentPipeline.format_telegram(result, sym)
+                for i, msg in enumerate(msgs):
+                    self.tg.send(msg)
+                    if i < len(msgs) - 1:
+                        time.sleep(1)
+                self.log.info("🤖 Pipeline %s hoàn thành (%d msgs)", sym, len(msgs))
+            except Exception as e:
+                self.log.error("❌ Pipeline %s: %s", sym, e)
+
+    def _run_pipeline(self, sym, data):
+        t = threading.Thread(
+            target=self._run_pipeline_sync,
+            args=(sym, data),
+            name=f"pipeline-{sym}",
+            daemon=True,
+        )
+        t.start()
+        self.log.info("  🔀 Pipeline %s → background thread [%s]", sym, t.name)
+
+    def _scan(self, symbols, label):
+        self.log.info("─── %s ───", label)
+        for sym in symbols:
+            try:
+                tradeable, note = self.engine.is_tradeable(sym)
+
+                if tradeable and sym in self._closed_notified:
+                    self._closed_notified.discard(sym)
+                    self.log.info("  🔔 %s: Thị trường mở lại", sym)
+
+                if not tradeable:
+                    self.log.info("  ⏸️  %s: %s", sym, note)
+                    if sym not in self._closed_notified:
+                        self.tg.send("⏸️ <b>" + sym + "</b> — " + note + "\nBot tự phân tích khi mở lại.")
+                        self._closed_notified.add(sym)
+                    continue
+
+                data = self.engine.full_analysis(sym)
+                data["ai_memory"] = get_memory_for_ai(sym)
+
+                final_sig = data.get("final", "WAIT")
+                conf = data.get("confidence", 0)
+                ev_ratio = data.get("bayes_ev", {}).get("ev_ratio", 0)
+                
+                # [LỌC SỚM TÀI NGUYÊN] Bỏ qua AI cho lệnh WAIT có toán học quá yếu
+                if final_sig == "WAIT" and ev_ratio < 0.2 and conf < 65:
+                    self.log.info("  ⏭️ [Early Filter] Bỏ qua AI cho %s (EV: %.2f, Conf: %.1f%%) để tiết kiệm server", sym, ev_ratio, conf)
+                    time.sleep(1.0)
+                    continue
+
+                llm_text, llm = self.llm.analyze(data)
+                v1h = data.get("volume_1h", {})
+
+                self.log.info("  %s: %s %.1f%% | CVD:%s | Vol:%s(%.1fx) | Press:%s | LLM:%s",
+                              sym, data["final"], data["confidence"],
+                              data.get("cvd", {}).get("trend", "?"),
+                              v1h.get("vol_trend", "?"), v1h.get("vol_ratio", 1),
+                              v1h.get("pressure", "?"), llm)
+
+                should, reason = self.should_send(sym, data)
+                if should:
+                    msg = self.tg.format_signal(data, llm_text, llm)
+                    self.tg.send(msg)
+                    self.last_signals[sym] = data
+                    self.log.info("  📱 Đã gửi [%s]: %s", reason, sym)
+
+                    if data["final"] != "WAIT":
+                        self.push_to_queue(sym, data)
+
+                    self._run_pipeline(sym, data)
+                else:
+                    self.log.info("  ⏭️  Bỏ qua [%s]: %s %s %.1f%%",
+                                  reason, sym, data["final"], data["confidence"])
+
+            except Exception as e:
+                self.log.error("  ❌ Lỗi xử lý %s: %s", sym, e)
+
+            time.sleep(1.5)
+
+    def run_crypto(self):
+        self._scan_count += 1
+        self.log.info("═" * 45)
+        self.log.info("🔄 Scan #%d — %s", self._scan_count, self.dt.now().strftime("%H:%M:%S"))
+        try:
+            self._scan(self.CRYPTO_SYMBOLS, "CRYPTO BTC·ETH·BNB")
+        except Exception as e:
+            self.log.error("❌ run_crypto: %s", e)
+        if self._scan_count % 8 == 0:
+            self._cleanup()
+
+    def run_stocks(self):
+        try:
+            self.log.info("═" * 45)
+            self.log.info("📈 Stock+Gold — %s", self.dt.now().strftime("%H:%M:%S"))
+            self._scan(self.STOCK_SYMBOLS, "STOCK+GOLD")
+        except Exception as e:
+            self.log.error("❌ run_stocks: %s", e)
+
+    def _hourly_report(self):
+        try:
+            if not self.last_signals:
+                return
+            now = self.dt.now().strftime("%d/%m/%Y %H:%M")
+            SIG = {"LONG": "🚀", "SHORT": "📉", "WAIT": "⏳"}
+            WY  = {"ACCUMULATION": "🔵", "MARKUP": "🟢", "RE-ACCUMULATION": "🟩",
+                   "DISTRIBUTION": "🔴", "MARKDOWN": "⛔", "TRANSITION": "⚪"}
+            rows = ["📋 <b>BÁO CÁO ĐỊNH KỲ</b>", "🕐 " + now, "━━━━━━━━━━━━━━━━━━━━━━━━━", "🪙 <b>CRYPTO</b>"]
+            for sym in self.CRYPTO_SYMBOLS:
+                d = self.last_signals.get(sym)
+                if not d or not d.get("final"): continue
+                wy  = d.get("wyckoff", {}).get("phase", "?")
+                bar = "█" * int(d["confidence"] / 10) + "░" * (10 - int(d["confidence"] / 10))
+                rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym[:3] + "</b> <code>\$" +
+                             str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
+                             str(d["confidence"]) + "% [" + bar + "] " + WY.get(wy, "⚪") + wy)
+            rows.append("\n📈 <b>CỔ PHIẾU MỸ</b>")
+            for sym in ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]:
+                d = self.last_signals.get(sym)
+                if not d or not d.get("final"): continue
+                wy = d.get("wyckoff", {}).get("phase", "?")
+                rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym + "</b> <code>\$" +
+                             str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
+                             str(d["confidence"]) + "% " + WY.get(wy, "⚪") + wy)
+            rows += ["\n━━━━━━━━━━━━━━━━━━━━━━━━━", "✅ SignalBot v6.1 Core đang chạy bình thường"]
+            self.tg.send("\n".join(rows))
+            self.log.info("📋 Báo cáo định kỳ đã gửi")
+        except Exception as e:
+            self.log.error("❌ Hourly report: %s", e)
+
+    def _self_ping(self):
+        try:
+            url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+            if not url: return
+            for attempt in range(3):
+                try:
+                    r = requests.get(url, timeout=10)
+                    self.log.info("🏓 Self-ping OK (%d)", r.status_code)
+                    return
+                except Exception:
+                    if attempt < 2: time.sleep(3)
+        except Exception as e:
+            self.log.error("❌ Ping: %s", e)
+
+    def _build_schedule(self):
+        schedule.clear()
+        schedule.every(15).minutes.do(self.run_crypto)
+        schedule.every(30).minutes.do(self.run_stocks)
+        schedule.every().hour.at(":30").do(self._hourly_report)
+        schedule.every(4).minutes.do(self._self_ping)
+
+    def start(self):
+        self.log.info("━" * 45)
+        self.log.info("🚀 SignalBot v6.1 (Analyzer Core) khởi động!")
+        self.log.info("━" * 45)
+
+        self._self_ping()
+        self.run_crypto()
+        self.run_stocks()
+
+        self._build_schedule()
+        self.log.info("📅 Schedule: Crypto/15p · Stock+Gold/30p · Ping/4p · Report/giờ")
+
+        consecutive_errors = 0
+        while True:
+            try:
+                schedule.run_pending()
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                self.log.error("❌ Schedule #%d: %s", consecutive_errors, e)
+                if consecutive_errors >= 10:
+                    self.log.warning("⚠️  Rebuild schedule...")
+                    try:
+                        self._build_schedule()
+                        consecutive_errors = 0
+                    except Exception as e2:
+                        self.log.error("❌ Rebuild: %s", e2)
+
+            time.sleep(10)
+`,
   "main.py": `""" API"""
 import os
 import sys
@@ -3487,6 +3793,9 @@ try:
 except Exception:
     redis_client = None
 
+BOT_GLOBAL_AUTO = False
+BOT_KILL_SWITCH = False
+_POS_LOCK = threading.Lock()
 LIVE_POSITIONS = {}
 LAST_SIGNALS = []
 _LAST_REVERSAL_EVAL = {}
@@ -3664,15 +3973,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 
                 _tg_send(
                     REGISTER_TOKEN, user.telegram_id,
-                    f"{emoji} <b>{action_type} ({reason.upper()}): {sym}</b>
-
-"
-                    f"🔄 Đánh giá lại: Xu hướng chuyển sang <b>{new_direction}</b> (Conf: {conf}%).
-"
-                    f"📊 Vị thế cũ: {direction} @ \${entry:.4f}
-"
-                    f"📈 Giá hiện tại: \${current_price:.4f} | PnL: {pnl_pct:+.2f}%
-"
+                    f"{emoji} <b>{action_type} ({reason.upper()}): {sym}</b>\n\n"
+                    f"🔄 Đánh giá lại: Xu hướng chuyển sang <b>{new_direction}</b> (Conf: {conf}%).\n"
+                    f"📊 Vị thế cũ: {direction} @ \${entry:.4f}\n"
+                    f"📈 Giá hiện tại: \${current_price:.4f} | PnL: {pnl_pct:+.2f}%\n"
                     f"🔒 Đã tự động đóng vị thế và huỷ SL/TP cũ để bảo vệ vốn."
                 )
                 
@@ -3701,14 +4005,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             if new_order_res.get("ok"):
                                 _tg_send(
                                     REGISTER_TOKEN, user.telegram_id,
-                                    f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>
-"
-                                    f"📈 {new_direction} | Conf: {conf:.1f}%
-"
-                                    f"💰 Qty: {new_qty:.4f} | Lev: {user.leverage}x
-"
-                                    f"🛑 SL: <code>\${new_sl:.4f}</code>
-"
+                                    f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
+                                    f"📈 {new_direction} | Conf: {conf:.1f}%\n"
+                                    f"💰 Qty: {new_qty:.4f} | Lev: {user.leverage}x\n"
+                                    f"🛑 SL: <code>\${new_sl:.4f}</code>\n"
                                     f"🎯 TP1: <code>\${new_tp1:.4f}</code> | TP2: <code>\${new_tp2:.4f}</code>"
                                 )
     except Exception as e:
@@ -3833,17 +4133,11 @@ def sync_bingx_positions():
 
                             _tg_send(
                                 REGISTER_TOKEN, user_id,
-                                f"{outcome_emoji} <b>VỊ THẾ ĐÃ ĐÓNG: {symbol}</b>
-
-"
-                                f"📈 Hướng: <b>{direction}</b>
-"
-                                f"💰 Khối lượng: {qty:.4f} {symbol}
-"
-                                f"📊 PnL: <b>{pnl_pct:+.2f}% ({'+' if pnl_usd >= 0 else ''}\${pnl_usd:.2f})</b>
-"
-                                f"🛑 SL cũ: <code>\${sl:.4f}</code> | 🏆 Target: <code>\${tp2:.4f}</code>
-"
+                                f"{outcome_emoji} <b>VỊ THẾ ĐÃ ĐÓNG: {symbol}</b>\n\n"
+                                f"📈 Hướng: <b>{direction}</b>\n"
+                                f"💰 Khối lượng: {qty:.4f} {symbol}\n"
+                                f"📊 PnL: <b>{pnl_pct:+.2f}% ({'+' if pnl_usd >= 0 else ''}\${pnl_usd:.2f})</b>\n"
+                                f"🛑 SL cũ: <code>\${sl:.4f}</code> | 🏆 Target: <code>\${tp2:.4f}</code>\n"
                                 f"🎯 Kết quả: <b>{outcome_text}</b>"
                             )
 
@@ -4070,16 +4364,11 @@ def _execute_for_user(user: User, signal: dict):
             log.info("OK %s: %s %s qty=%.4f lev=%dx", user.telegram_id, direction, sym, qty, user.leverage)
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
-                f"🚨 <b>LỆNH MỚI: {sym}</b>
-"
-                f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%
-"
-                f"💰 Qty: {qty:.4f} | Lev: {user.leverage}x
-"
-                f"🛑 SL: <code>\${sl:.4f}</code> | Risk: \${risk_amt:.2f}
-"
-                f"🎯 TP1: <code>\${tp1:.4f}</code> → chốt 50% + SL → Entry
-"
+                f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
+                f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
+                f"💰 Qty: {qty:.4f} | Lev: {user.leverage}x\n"
+                f"🛑 SL: <code>\${sl:.4f}</code> | Risk: \${risk_amt:.2f}\n"
+                f"🎯 TP1: <code>\${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
                 f"🏆 TP2: <code>\${tp2:.4f}</code> → đích 50% còn lại")
         else:
             log.error("BingX loi %s: %s", user.telegram_id, res.get("msg"))
@@ -4152,11 +4441,8 @@ async def tg_webhook_bot2(request: Request):
             miniapp_url = (RENDER_URL or "https://auto-trade-v6.onrender.com") + "/miniapp/connect"
             _tg_send_inline(
                 REGISTER_TOKEN, chat_id,
-                "👋 <b>Chào mừng đến với SignalBot v6.1!</b>
-
-"
-                "Để bắt đầu copy trade tự động, kết nối BingX API của bạn.
-"
+                "👋 <b>Chào mừng đến với SignalBot v6.1!</b>\n\n"
+                "Để bắt đầu copy trade tự động, kết nối BingX API của bạn.\n"
                 "⚠️ Không cấp quyền <b>Rút Tiền</b> cho API Key!",
                 {"inline_keyboard": [[{"text": "🔗 Kết Nối BingX API",
                                        "web_app": {"url": miniapp_url}}]]})
@@ -4171,21 +4457,13 @@ async def tg_webhook_bot2(request: Request):
                 cfg = TIER_CONFIG.get(u.tier, TIER_CONFIG["TIER1"])
                 _tg_send(
                     REGISTER_TOKEN, chat_id,
-                    f"📊 <b>Tài Khoản Của Bạn</b>
-
-"
-                    f"💰 Vốn: <b>\${u.capital:.2f}</b>
-"
-                    f"🏷 Tier: <b>{cfg['label']}</b>
-"
-                    f"🎯 Min Confidence: <b>{u.min_confidence}%</b>
-"
-                    f"⚡ Leverage: <b>{u.leverage}x</b>
-"
-                    f"📈 Risk/Lệnh: <b>{u.max_risk_pct}%</b>
-"
-                    f"🔄 Auto-trade: <b>{'BẬT' if u.auto_trade else 'TẮT'}</b>
-"
+                    f"📊 <b>Tài Khoản Của Bạn</b>\n\n"
+                    f"💰 Vốn: <b>\${u.capital:.2f}</b>\n"
+                    f"🏷 Tier: <b>{cfg['label']}</b>\n"
+                    f"🎯 Min Confidence: <b>{u.min_confidence}%</b>\n"
+                    f"⚡ Leverage: <b>{u.leverage}x</b>\n"
+                    f"📈 Risk/Lệnh: <b>{u.max_risk_pct}%</b>\n"
+                    f"🔄 Auto-trade: <b>{'BẬT' if u.auto_trade else 'TẮT'}</b>\n"
                     f"📊 Total PnL: <b>\${u.total_pnl:+.2f}</b>")
 
         elif text == "/dashboard":
@@ -4262,10 +4540,8 @@ def _handle_user_close(telegram_id: str, symbol: str):
             pct     = float(p.get("pnl_pct", 0))
             sign    = "+" if pnl >= 0 else ""
             _tg_send(REGISTER_TOKEN, telegram_id,
-                     f"✅ <b>Đã đóng lệnh {symbol}!</b>
-"
-                     f"📈 {direction} | Qty: {qty:.4f}
-"
+                     f"✅ <b>Đã đóng lệnh {symbol}!</b>\n"
+                     f"📈 {direction} | Qty: {qty:.4f}\n"
                      f"💰 PnL: <b>{sign}\${pnl:.2f} ({sign}{pct:.2f}%)</b>")
             if redis_client:
                 try:
@@ -4276,8 +4552,7 @@ def _handle_user_close(telegram_id: str, symbol: str):
         else:
             err_msg = res.get("msg", "Unknown error")
             _tg_send(REGISTER_TOKEN, telegram_id,
-                     f"❌ Lỗi đóng lệnh {symbol}:
-<code>{err_msg}</code>")
+                     f"❌ Lỗi đóng lệnh {symbol}:\n<code>{err_msg}</code>")
             log.error("_handle_user_close %s %s: %s", telegram_id, symbol, err_msg)
 
     except Exception as e:
@@ -4349,12 +4624,9 @@ def register_user(data: UserRegister, db: Session = Depends(get_db)):
 
     cfg = TIER_CONFIG[tier]
     notify_admin(
-        f"🆕 <b>User mới đăng ký!</b>
-"
-        f"👤 UID: <code>{data.telegram_id}</code>
-"
-        f"💰 Vốn: \${capital:.2f} | {cfg['label']}
-"
+        f"🆕 <b>User mới đăng ký!</b>\n"
+        f"👤 UID: <code>{data.telegram_id}</code>\n"
+        f"💰 Vốn: \${capital:.2f} | {cfg['label']}\n"
         f"🎯 Conf: {cfg['min_confidence']}% | Risk: {cfg['max_risk_pct']}%")
 
     return {"status": "success", "tier": tier, "label": cfg["label"],
@@ -6056,5 +6328,5 @@ def get_miniapp_connect(request: Request):
 def get_miniapp_dashboard(request: Request):
     return HTMLResponse(content=MINIAPP_DASHBOARD_HTML, status_code=200)
 
-`
+`,
 };
