@@ -87,6 +87,48 @@ def apply_tier(user: User, tier: str):
     user.max_risk_pct   = cfg["max_risk_pct"]
     user.max_positions  = cfg["max_positions"]
     user.leverage       = cfg["leverage"]
+    
+══════════════════════════════════════════════════════════════════
+# ENV & REDIS
+# ══════════════════════════════════════════════════════════════════
+REDIS_URL       = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "admin123")
+RENDER_URL      = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
+ADMIN_CHAT_ID   = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
+REPORT_TOKEN    = os.getenv("TELEGRAM_REPORT_TOKEN", "")
+REGISTER_TOKEN  = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+TG_BASE         = "https://api.telegram.org"
+
+try:
+    _rc_kwargs = {"decode_responses": True}
+    if REDIS_URL.startswith("rediss://"):
+        _rc_kwargs["ssl_cert_reqs"] = "none"
+    redis_client = redis.from_url(REDIS_URL, **_rc_kwargs)
+    redis_client.ping()
+    log.info("Redis OK")
+except Exception as e:
+    redis_client = None
+    log.error("Redis error: %s", e)
+
+
+def _redis_get(key, default=None):
+    if not redis_client:
+        return default
+    try:
+        v = redis_client.get(key)
+        return json.loads(v) if v else default
+    except Exception:
+        return default
+
+
+def _redis_set(key, value, ex=86400 * 30):
+    if not redis_client:
+        return
+    try:
+        redis_client.set(key, json.dumps(value), ex=ex)
+    except Exception as e:
+        log.error("Redis set %s: %s", key, e)
+
 
 def get_bx(user: User) -> BingXExchange:
     secret = decrypt_api_secret(user.api_secret_encrypted) if user.api_secret_encrypted else ""
