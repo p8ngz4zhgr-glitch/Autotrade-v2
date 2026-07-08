@@ -734,7 +734,7 @@ def _execute_for_user(user: User, signal: dict):
             log.error("BingX loi %s: %s", user.telegram_id, res.get("msg"))
 
     except Exception as e:
-        log.error("_execute_for_user %s: %s", user.telegram_id, 
+        log.error("_execute_for_user %s: %s", user.telegram_id, e)
 def run_trade_worker():
     asyncio.run(_trade_worker_async())
 
