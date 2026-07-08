@@ -3787,13 +3787,14 @@ app = FastAPI(title="SignalBot v6.1")
 
 REGISTER_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 try:
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
     redis_client.ping()
 except Exception:
     redis_client = None
 
-BOT_GLOBAL_AUTO = False
+BOT_GLOBAL_AUTO = True
 BOT_KILL_SWITCH = False
 _POS_LOCK = threading.Lock()
 LIVE_POSITIONS = {}
@@ -4309,6 +4310,7 @@ async def _trade_worker_async():
                 await r.ltrim("WEB_SIGNALS_RECORD", 0, 99)
 
                 if not BOT_GLOBAL_AUTO or BOT_KILL_SWITCH:
+                    log.info(f"Skip trade: GLOBAL_AUTO={BOT_GLOBAL_AUTO}, KILL_SWITCH={BOT_KILL_SWITCH}")
                     continue
 
                 final = signal.get("final", "WAIT")
@@ -4318,6 +4320,7 @@ async def _trade_worker_async():
 
                 db = SessionLocal()
                 try:
+                    log.info(f"Processing signal {signal.get('symbol')} for users...")
                     users = (db.query(User)
                              .filter(User.is_active == True, User.auto_trade == True,
                                      User.capital >= MIN_CAPITAL_TO_TRADE).all())
