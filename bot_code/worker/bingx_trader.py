@@ -73,8 +73,11 @@ class BingXExchange:
         }
 
         try:
+            # FIX LỖI 1: Thêm nhánh xử lý cho method DELETE
             if method.upper() == "GET":
                 r = requests.get(full_url, headers=headers, timeout=10)
+            elif method.upper() == "DELETE":
+                r = requests.delete(full_url, headers=headers, timeout=10)
             else:
                 r = requests.post(full_url, headers=headers, timeout=10)
             
@@ -175,6 +178,11 @@ class BingXExchange:
 
 
     def _safe_order(self, params: dict) -> dict:
+        # FIX LỖI 2: Ép các giá trị số về chuỗi trước khi gửi lệnh để không bị lỗi 109400
+        for k, v in list(params.items()):
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                params[k] = str(v)
+
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         if res.get("code") == 109400: # One-Way mode error
             params["positionSide"] = "BOTH"
@@ -203,6 +211,7 @@ class BingXExchange:
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
+        
         if sl_price > 0:
             self._safe_order({
                 "symbol": symbol,
@@ -211,8 +220,9 @@ class BingXExchange:
                 "stopPrice": sl_price,
                 "quantity": qty,
                 "positionSide": position_side,
-                "reduceOnly": True
+                "reduceOnly": "true" # Đổi True thành chuỗi "true" cho an toàn
             })
+            
         if tp_price > 0:
             self._safe_order({
                 "symbol": symbol,
@@ -221,7 +231,7 @@ class BingXExchange:
                 "stopPrice": tp_price,
                 "quantity": qty,
                 "positionSide": position_side,
-                "reduceOnly": True
+                "reduceOnly": "true" # Đổi True thành chuỗi "true" cho an toàn
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
@@ -239,7 +249,7 @@ class BingXExchange:
             "type": "MARKET",
             "quantity": qty,
             "positionSide": direction,
-            "reduceOnly": True
+            "reduceOnly": "true" # Đổi True thành chuỗi "true" cho an toàn
         }
         res = self._safe_order(params)
         if res.get("code") in (0, 101205):
