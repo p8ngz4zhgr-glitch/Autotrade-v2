@@ -15,7 +15,7 @@ log = logging.getLogger("analyzer.engine")
 class SignalEngine:
     TIMEFRAMES = ["15m", "1h", "4h", "1d"]
 
-    # Dùng chung 1 ThreadPoolExecutor thay vì tạo mới mỗi lần full_analysis
+    # [FIX] Dùng chung 1 ThreadPoolExecutor thay vì tạo mới mỗi lần full_analysis
     # max_workers=4 khớp với số TF để tất cả chạy song song
     _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tf-worker")
 
@@ -30,7 +30,6 @@ class SignalEngine:
             return self.crypto, "CRYPTO"
         if symbol in ("TSLA", "NVDA", "SPY", "QQQ"):
             return self.stock, "STOCK"
-        # Đã cập nhật mã Gold BingX
         if symbol == "NCCOGOLD2USD-USDT":
             return self.stock, "GOLD"
         return self.crypto, "CRYPTO"
@@ -40,7 +39,6 @@ class SignalEngine:
             return True, "Crypto 24/7"
         if symbol in ("TSLA", "NVDA", "SPY", "QQQ"):
             return self.stock.market_open()
-        # Đã cập nhật mã Gold BingX
         if symbol == "NCCOGOLD2USD-USDT":
             return self.stock.is_gold_open()
         return True, "OK"
@@ -182,6 +180,7 @@ class SignalEngine:
                 score += stoch_adj * 0.4
 
         # 10. Candlestick Patterns (weight 12)
+        # Mô hình nến kinh điển — bổ sung tín hiệu kỹ thuật vi mô
         candle_adj  = candle.get("score_adj", 0)
         candle_str  = candle.get("strength", 0)
         if candle_str >= 30:
@@ -200,6 +199,7 @@ class SignalEngine:
 
         # 12. Elliott Wave (weight 12)
         score += elliott.get("score_adj", 0)
+        score += fvg.get("score_adj", 0)
         score = max(5, min(95, score))
 
         # ══════════════════════════════════════════════════════
@@ -540,6 +540,78 @@ class SignalEngine:
         elif final == "SHORT" and candle_summary["confirm_short"]:
             conf = round(min(95, conf * 1.05), 1)
 
+
+        # ─── XÁC SUẤT (BAYES) & KỲ VỌNG TOÁN HỌC (EV) ───
+        base_odds = 0.818 # Base win rate ~ 45%
+        likelihood = 1.0
+        p_win = 0.45
+        ev_ratio = 0.0
+
+        if final == "LONG":
+            if cvd_tr == "BULLISH": likelihood *= 1.3
+            elif cvd_tr == "BULLISH_DIV": likelihood *= 1.5
+            elif cvd_tr in ("BEARISH", "BEARISH_DIV"): likelihood *= 0.6
+            
+            if wy_4h.get("bias") == "BULLISH": likelihood *= 1.2
+            elif wy_4h.get("bias") == "BEARISH": likelihood *= 0.7
+            
+            if wh_1h.get("detected") and wh_1h.get("type") == "WHALE_BUY": likelihood *= 1.4
+            elif wh_1h.get("detected") and wh_1h.get("type") == "WHALE_SELL": likelihood *= 0.6
+            
+            if bo_1h.get("type") == "BREAKOUT_UP": likelihood *= 1.3
+            
+            if ob_data.get("detected") and ob_data.get("imbalance", 0) > 1.5: likelihood *= 1.15
+            elif ob_data.get("detected") and ob_data.get("imbalance", 0) < -1.5: likelihood *= 0.85
+            
+            if sweep_data.get("detected") and sweep_data.get("type") == "BULLISH_SWEEP": likelihood *= 1.3
+            
+            if candle_summary["confirm_long"]: likelihood *= 1.2
+            
+        elif final == "SHORT":
+            if cvd_tr == "BEARISH": likelihood *= 1.3
+            elif cvd_tr == "BEARISH_DIV": likelihood *= 1.5
+            elif cvd_tr in ("BULLISH", "BULLISH_DIV"): likelihood *= 0.6
+            
+            if wy_4h.get("bias") == "BEARISH": likelihood *= 1.2
+            elif wy_4h.get("bias") == "BULLISH": likelihood *= 0.7
+            
+            if wh_1h.get("detected") and wh_1h.get("type") == "WHALE_SELL": likelihood *= 1.4
+            elif wh_1h.get("detected") and wh_1h.get("type") == "WHALE_BUY": likelihood *= 0.6
+            
+            if bo_1h.get("type") == "BREAKOUT_DOWN": likelihood *= 1.3
+            
+            if ob_data.get("detected") and ob_data.get("imbalance", 0) < -1.5: likelihood *= 1.15
+            elif ob_data.get("detected") and ob_data.get("imbalance", 0) > 1.5: likelihood *= 0.85
+            
+            if sweep_data.get("detected") and sweep_data.get("type") == "BEARISH_SWEEP": likelihood *= 1.3
+            
+            if candle_summary["confirm_short"]: likelihood *= 1.2
+
+        if final in ("LONG", "SHORT"):
+            bayes_odds = base_odds * likelihood
+            p_win = bayes_odds / (1 + bayes_odds)
+            
+            reward_tp1_ratio = (abs(tp1 - price) / price) / (sl_atr_pct / 100) if sl_atr_pct > 0 else 2.0
+            reward_tp2_ratio = (abs(tp2 - price) / price) / (sl_atr_pct / 100) if sl_atr_pct > 0 else 3.5
+            avg_reward_ratio = (reward_tp1_ratio + reward_tp2_ratio) / 2
+            
+            ev_ratio = (p_win * avg_reward_ratio) - ((1 - p_win) * 1.0)
+            
+            log.info("  [Bayes EV] %s %s: P(win)=%.1f%%, EV_Ratio=%.2f (Likelihood=%.2f)",
+                     final, symbol, p_win * 100, ev_ratio, likelihood)
+            
+            if ev_ratio < 0.15:
+                log.warning("  ⚠️ EV(%.2f) quá thấp, hạ cấp thành WAIT", ev_ratio)
+                final = "WAIT"
+                conf = round(conf * 0.8, 1)
+            elif ev_ratio > 0.5:
+                conf = round(min(95, conf + (ev_ratio * 5)), 1)
+                
+        ev_data = {
+            "p_win": round(p_win * 100, 1),
+            "ev_ratio": round(ev_ratio, 2),
+            "likelihood": round(likelihood, 2)
+        }
         return {
             "symbol": symbol, "asset_type": atype,
             "price": price, "final": final, "confidence": conf,
@@ -560,4 +632,5 @@ class SignalEngine:
             "orderbook": ob_data,
             "liquidity_sweep": sweep_data,
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
+            "bayes_ev": ev_data,
         }
