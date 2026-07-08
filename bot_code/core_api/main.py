@@ -88,8 +88,8 @@ def apply_tier(user: User, tier: str):
     user.max_positions  = cfg["max_positions"]
     user.leverage       = cfg["leverage"]
 
-#    
-══════════════════════════════════════════════════════════════════
+
+#══════════════════════════════════════════════════════════════════
 # ENV & REDIS
 # ══════════════════════════════════════════════════════════════════
 REDIS_URL       = os.getenv("REDIS_URL", "redis://localhost:6379/0")
