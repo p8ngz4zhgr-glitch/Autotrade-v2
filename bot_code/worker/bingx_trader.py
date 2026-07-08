@@ -27,7 +27,6 @@ class BingXExchange:
         if params is None:
             params = {}
         
-        # Convert boolean to lowercase string "true"/"false"
         for k, v in list(params.items()):
             if isinstance(v, bool):
                 params[k] = "true" if v else "false"
@@ -35,20 +34,14 @@ class BingXExchange:
         # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
-            
-            # Xóa các tiền tố lạ từ webhook/signal nội bộ (nếu có)
             if sym.startswith("NCCO"):
                 sym = sym.replace("NCCO", "")
-                
-            # Xóa gạch ngang cũ để chuẩn hóa
             sym = sym.replace("-", "")
-            
-            # Gắn lại gạch ngang theo quy tắc của BingX
             if sym.endswith("USDT"):
                 params["symbol"] = sym[:-4] + "-USDT"
             elif sym.endswith("USDC"):
                 params["symbol"] = sym[:-4] + "-USDC"
-            elif "GOLD" in sym:  # Bắt các trường hợp như GOLD2USDUSDT
+            elif "GOLD" in sym:
                 params["symbol"] = "GOLD-USDT"
             else:
                 params["symbol"] = sym
@@ -56,14 +49,6 @@ class BingXExchange:
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
         
-        api_key_lower = self.api_key.lower()
-        api_secret_lower = self.api_secret.lower()
-        if (api_key_lower.startswith("mock") or 
-            api_secret_lower.startswith("mock") or 
-            "your_" in api_key_lower or 
-            "your_" in api_secret_lower):
-            return {"code": -1, "msg": "Mock API key/secret detected", "data": {}}
-
         params["timestamp"] = int(time.time() * 1000)
         
         sorted_items = sorted(params.items())
@@ -71,9 +56,9 @@ class BingXExchange:
         signature = self._sign(params)
         full_url = f"{self.BASE_URL}{path}?{query_string}&signature={signature}"
 
+        # Đã xóa "Content-Type: application/json" để tránh lỗi Unmarshal của sàn
         headers = {
-            "X-BX-APIKEY": self.api_key,
-            "Content-Type": "application/json"
+            "X-BX-APIKEY": self.api_key
         }
 
         try:
@@ -176,10 +161,8 @@ class BingXExchange:
 
 
     def _safe_order(self, params: dict) -> dict:
-        # Xử lý an toàn float để tránh lỗi tràn thập phân hoặc dính Scientific Notation (1e-05)
         for k, v in list(params.items()):
             if isinstance(v, float):
-                # Format tối đa 8 số thập phân, tự cắt bỏ số 0 vô nghĩa ở cuối
                 formatted_v = format(v, '.8f').rstrip('0').rstrip('.')
                 params[k] = formatted_v if formatted_v else "0"
             elif isinstance(v, int) and not isinstance(v, bool):
@@ -187,7 +170,6 @@ class BingXExchange:
 
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         if res.get("code") == 109400 and "positionSide" in params: 
-            # Đề phòng User cài One-Way Mode, thử fallback về BOTH
             params["positionSide"] = "BOTH"
             res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         return res
@@ -213,7 +195,6 @@ class BingXExchange:
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
         
-        # LƯU Ý: Tuyệt đối KHÔNG gán "reduceOnly": "true" vì nó báo lỗi xung đột với Hedge Mode
         if sl_price > 0:
             self._safe_order({
                 "symbol": symbol,
@@ -221,7 +202,8 @@ class BingXExchange:
                 "type": "STOP_MARKET",
                 "stopPrice": sl_price,
                 "quantity": qty,
-                "positionSide": position_side
+                "positionSide": position_side,
+                "workingType": "MARK_PRICE" # Đã bổ sung param bắt buộc cho Trigger Order
             })
             
         if tp_price > 0:
@@ -231,7 +213,8 @@ class BingXExchange:
                 "type": "TAKE_PROFIT_MARKET",
                 "stopPrice": tp_price,
                 "quantity": qty,
-                "positionSide": position_side
+                "positionSide": position_side,
+                "workingType": "MARK_PRICE" # Đã bổ sung param bắt buộc cho Trigger Order
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
@@ -247,7 +230,6 @@ class BingXExchange:
             "type": "MARKET",
             "quantity": qty,
             "positionSide": direction
-            # Đã xóa reduceOnly để không lỗi 109400
         }
         res = self._safe_order(params)
         if res.get("code") in (0, 101205):
