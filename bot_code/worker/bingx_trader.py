@@ -35,14 +35,14 @@ class BingXExchange:
         # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
-                
+            
             # Xóa các tiền tố lạ từ webhook/signal nội bộ (nếu có)
             if sym.startswith("NCCO"):
                 sym = sym.replace("NCCO", "")
-                    
+                
             # Xóa gạch ngang cũ để chuẩn hóa
             sym = sym.replace("-", "")
-                
+            
             # Gắn lại gạch ngang theo quy tắc của BingX
             if "GOLD" in sym:  # Bắt các trường hợp như GOLD2USDUSDT
                 params["symbol"] = "GOLD-USDT"
@@ -65,13 +65,13 @@ class BingXExchange:
             return {"code": -1, "msg": "Mock API key/secret detected", "data": {}}
 
         params["timestamp"] = int(time.time() * 1000)
-            
+        
         sorted_items = sorted(params.items())
         query_string = urllib.parse.urlencode(sorted_items)
         signature = self._sign(params)
         full_url = f"{self.BASE_URL}{path}?{query_string}&signature={signature}"
-        
-        headers = { "Content-Type": "application/x-www-form-urlencoded",
+
+        headers = {
             "X-BX-APIKEY": self.api_key,
         }
 
@@ -79,12 +79,10 @@ class BingXExchange:
             if method.upper() == "GET":
                 r = requests.get(full_url, headers=headers, timeout=10)
             elif method.upper() == "DELETE":
-                r = requests.delete(full_url, headers=headers, data=query_string, timeout=10)
+                r = requests.delete(full_url, headers=headers, timeout=10)
             else:
-                # BingX Swap v2 for POST expects application/x-www-form-urlencoded and parameters in body as well
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
-                r = requests.post(full_url, headers=headers, data=query_string, timeout=10)
-                
+                r = requests.post(full_url, headers=headers, timeout=10)
+            
             r.raise_for_status()
             res = r.json()
             if not isinstance(res, dict):
@@ -263,6 +261,7 @@ class BingXExchange:
         res = self.close_position(symbol, half_qty, direction)
         if not res.get("ok"):
             return res
+
         self.cancel_all_orders(symbol)
         self._place_sl_tp(
             symbol=symbol,
