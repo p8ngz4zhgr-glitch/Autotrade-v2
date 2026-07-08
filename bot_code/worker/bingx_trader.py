@@ -26,36 +26,36 @@ class BingXExchange:
     def _request(self, method: str, path: str, params: dict = None) -> dict:
         if params is None:
             params = {}
-        
+            
         # Convert boolean to lowercase string "true"/"false"
         for k, v in list(params.items()):
             if isinstance(v, bool):
                 params[k] = "true" if v else "false"
-        
+            
         # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
-            
+                
             # Xóa các tiền tố lạ từ webhook/signal nội bộ (nếu có)
             if sym.startswith("NCCO"):
                 sym = sym.replace("NCCO", "")
-                
+                    
             # Xóa gạch ngang cũ để chuẩn hóa
             sym = sym.replace("-", "")
-            
+                
             # Gắn lại gạch ngang theo quy tắc của BingX
-            if sym.endswith("USDT"):
+            if "GOLD" in sym:  # Bắt các trường hợp như GOLD2USDUSDT
+                params["symbol"] = "GOLD-USDT"
+            elif sym.endswith("USDT"):
                 params["symbol"] = sym[:-4] + "-USDT"
             elif sym.endswith("USDC"):
                 params["symbol"] = sym[:-4] + "-USDC"
-            elif "GOLD" in sym:  # Bắt các trường hợp như GOLD2USDUSDT
-                params["symbol"] = "GOLD-USDT"
             else:
                 params["symbol"] = sym
 
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
-        
+            
         api_key_lower = self.api_key.lower()
         api_secret_lower = self.api_secret.lower()
         if (api_key_lower.startswith("mock") or 
@@ -65,25 +65,26 @@ class BingXExchange:
             return {"code": -1, "msg": "Mock API key/secret detected", "data": {}}
 
         params["timestamp"] = int(time.time() * 1000)
-        
+            
         sorted_items = sorted(params.items())
         query_string = urllib.parse.urlencode(sorted_items)
         signature = self._sign(params)
         full_url = f"{self.BASE_URL}{path}?{query_string}&signature={signature}"
-
-        headers = {
+        
+        headers = { "Content-Type": "application/x-www-form-urlencoded",
             "X-BX-APIKEY": self.api_key,
-            "Content-Type": "application/json"
         }
 
         try:
             if method.upper() == "GET":
                 r = requests.get(full_url, headers=headers, timeout=10)
             elif method.upper() == "DELETE":
-                r = requests.delete(full_url, headers=headers, timeout=10)
+                r = requests.delete(full_url, headers=headers, data=query_string, timeout=10)
             else:
-                r = requests.post(full_url, headers=headers, timeout=10)
-            
+                # BingX Swap v2 for POST expects application/x-www-form-urlencoded and parameters in body as well
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+                r = requests.post(full_url, headers=headers, data=query_string, timeout=10)
+                
             r.raise_for_status()
             res = r.json()
             if not isinstance(res, dict):
@@ -199,7 +200,7 @@ class BingXExchange:
             "side": side,
             "type": "MARKET",
             "quantity": qty,
-            "positionSide": position_side,
+            "positionSide": position_side
         }
         res = self._safe_order(params)
         if res.get("code") == 0:
@@ -262,7 +263,6 @@ class BingXExchange:
         res = self.close_position(symbol, half_qty, direction)
         if not res.get("ok"):
             return res
-
         self.cancel_all_orders(symbol)
         self._place_sl_tp(
             symbol=symbol,
