@@ -34,13 +34,14 @@ app = FastAPI(title="SignalBot v6.1")
 
 REGISTER_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 try:
     redis_client = redis.from_url(REDIS_URL, decode_responses=True)
     redis_client.ping()
 except Exception:
     redis_client = None
 
-BOT_GLOBAL_AUTO = False
+BOT_GLOBAL_AUTO = True
 BOT_KILL_SWITCH = False
 _POS_LOCK = threading.Lock()
 LIVE_POSITIONS = {}
@@ -53,8 +54,8 @@ _LAST_REVERSAL_EVAL = {}
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 74, "max_risk_pct": 2.0,
-        "max_positions": 3, "leverage": 5, "target_monthly": "5-8%",
+        "min_confidence": 68.0, "max_risk_pct": 2.0,
+        "max_positions": 2, "leverage": 5, "target_monthly": "5-8%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
@@ -556,6 +557,7 @@ async def _trade_worker_async():
                 await r.ltrim("WEB_SIGNALS_RECORD", 0, 99)
 
                 if not BOT_GLOBAL_AUTO or BOT_KILL_SWITCH:
+                    log.info(f"Skip trade: GLOBAL_AUTO={BOT_GLOBAL_AUTO}, KILL_SWITCH={BOT_KILL_SWITCH}")
                     continue
 
                 final = signal.get("final", "WAIT")
@@ -565,6 +567,7 @@ async def _trade_worker_async():
 
                 db = SessionLocal()
                 try:
+                    log.info(f"Processing signal {signal.get('symbol')} for users...")
                     users = (db.query(User)
                              .filter(User.is_active == True, User.auto_trade == True,
                                      User.capital >= MIN_CAPITAL_TO_TRADE).all())
@@ -725,23 +728,9 @@ async def startup_event():
 # HEALTH CHECK
 # ══════════════════════════════════════════════════════════════════
 @app.get("/")
-async def health():
-    try:
-        # Dùng .get() để an toàn tuyệt đối, nếu thiếu key "label" sẽ trả về "Unknown" thay vì sập bot
-        tiers_data = {t: c.get("label", "Unknown") for t, c in TIER_CONFIG.items()}
-        
-        return {
-            "status": "online", 
-            "version": "v6.1",
-            "tiers": tiers_data
-        }
-    except Exception as e:
-        # Nếu có lỗi (VD: chưa import TIER_CONFIG), vẫn trả về 200 OK cho UptimeRobot để giữ bot sống
-        return {
-            "status": "online", 
-            "version": "v6.1", 
-            "message": "Bot is running, but tier config is loading..."
-        }
+def health():
+    return {"status": "online", "version": "v6.1",
+            "tiers": {t: c["label"] for t, c in TIER_CONFIG.items()}}
 
 
 # ══════════════════════════════════════════════════════════════════
