@@ -264,6 +264,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
     qty = float(pos.get("qty", 0))
     entry = float(pos.get("entry", 0))
     
+    if qty <= 0:
+        return
+        
     now = time.time()
     
     try:
@@ -285,37 +288,66 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 "conf": conf,
                 "analysis": analysis
             }
+
+        # 1. TÍNH TOÁN LÃI/LỖ TRƯỚC (Để làm cơ sở ngắt lệnh bảo vệ)
+        if entry > 0:
+            in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
+            pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
+        else:
+            in_profit = False
+            pnl_pct = 0.0
             
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
         is_weak_trend = (new_direction == "WAIT" and conf < 40)
         
         should_close_early = False
         should_reverse = False
+        action_type = ""
+        emoji = ""
+        reason = ""
         
-        if is_reversal and conf >= 70:
+        # ══════════════════════════════════════════════════════════
+        # 2. XÉT ĐIỀU KIỆN ĐÓNG LỆNH (Ưu tiên từ trên xuống)
+        # ══════════════════════════════════════════════════════════
+        
+        # Ưu tiên 1: Chạm mốc bảo vệ vốn tuyệt đối (Virtual TP 50% / Virtual SL 30%)
+        if pnl_pct >= 50.0:
+            should_close_early = True
+            action_type = "CHỐT LỜI TỰ ĐỘNG"
+            emoji = "🎯"
+            reason = f"đạt mốc lợi nhuận mục tiêu ({pnl_pct:.2f}%)"
+            
+        elif pnl_pct <= -30.0:
+            should_close_early = True
+            action_type = "CẮT LỖ TỰ ĐỘNG"
+            emoji = "🛑"
+            reason = f"chạm mốc cắt lỗ an toàn ({pnl_pct:.2f}%)"
+            
+        # Ưu tiên 2: Tín hiệu đảo chiều từ AI (Chốt/cắt sớm tối ưu vốn)
+        elif is_reversal and conf >= 70:
             should_close_early = True
             should_reverse = True
-        elif is_reversal and conf >= 40:
-            should_close_early = True
-        elif is_weak_trend:
-            should_close_early = True
-            
-        if should_close_early:
-            bx = get_bx(user)
-            #in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
-            #pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
-            # Kiểm tra an toàn trước khi tính toán
-            if entry > 0:
-               in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
-               pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
-            else:
-     # Gán giá trị mặc định an toàn nếu entry = 0
-               in_profit = False
-               pnl_pct = 0.0
-
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
             emoji = "💰" if in_profit else "⚠️"
-            reason = "đảo chiều mạnh" if should_reverse else ("đảo chiều yếu" if is_reversal else "xu hướng suy yếu (WAIT)")
+            reason = "đảo chiều mạnh"
+            
+        elif is_reversal and conf >= 40:
+            should_close_early = True
+            action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
+            emoji = "💰" if in_profit else "⚠️"
+            reason = "đảo chiều yếu"
+            
+        elif is_weak_trend:
+            should_close_early = True
+            action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
+            emoji = "💰" if in_profit else "⚠️"
+            reason = "xu hướng suy yếu (WAIT)"
+            
+        # ══════════════════════════════════════════════════════════
+        # 3. THỰC THI LỆNH ĐÓNG (VÀ ĐẢO CHIỀU NẾU CẦN)
+        # ══════════════════════════════════════════════════════════
+        if should_close_early:
+            bx = get_bx(user)
             
             log.info("🚨 Early Exit detected for %s %s: %s (Reason: %s)", user.telegram_id, sym, action_type, reason)
             
@@ -341,6 +373,8 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
                 time.sleep(1.5)
                 
+                # Việc vào lệnh mới CHỈ xảy ra nếu bot nhận định "đảo chiều mạnh" 
+                # (Sẽ không tự động vào lệnh nếu lệnh vừa bị đóng do chạm mức 50% hoặc -30%)
                 if should_reverse:
                     new_entry = float(analysis["plan"]["entry"])
                     new_sl    = float(analysis["plan"]["sl"])
@@ -371,7 +405,6 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                 )
     except Exception as e:
         log.warning("Evaluate reversal for %s %s error: %s", user.telegram_id, sym, e)
-
 
 # ══════════════════════════════════════════════════════════════════
 # SYNC POSITIONS & BALANCE
