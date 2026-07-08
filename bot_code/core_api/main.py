@@ -40,6 +40,9 @@ try:
 except Exception:
     redis_client = None
 
+BOT_GLOBAL_AUTO = False
+BOT_KILL_SWITCH = False
+_POS_LOCK = threading.Lock()
 LIVE_POSITIONS = {}
 LAST_SIGNALS = []
 _LAST_REVERSAL_EVAL = {}
