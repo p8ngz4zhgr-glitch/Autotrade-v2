@@ -185,6 +185,25 @@ class BingXExchange:
             clean_params["positionSide"] = "BOTH"
             res = self._request("POST", "/openApi/swap/v2/trade/order", clean_params)
         return res
+    
+    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
+        """FIX"""
+        position_side = "LONG" if side == "BUY" else "SHORT"
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "type": "MARKET",
+            "quantity": qty,
+            "positionSide": position_side,
+        }
+        res = self._request("POST", "/openApi/swap/v2/trade/order", params)
+        if res.get("code") == 0:
+            # ThÃ nh cÃ´ng -> Tiáº¿p tá»¥c Äáº·t lá»nh TP/SL náº¿u cÃ³
+            order_id = res.get("data", {}).get("orderId")
+            log.info("Placed Market Order %s OK: %s", order_id, side)
+            self._place_sl_tp(symbol, side, qty, sl_price, tp_price)
+            return {"ok": True, "order_id": order_id}
+        return {"ok": False, "msg": res.get("msg", "Error placing order")}
 
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
         # THÊM BƯỚC KIỂM TRA GIÁ TRƯỚC KHI GỌI ĐẶT LỆNH
