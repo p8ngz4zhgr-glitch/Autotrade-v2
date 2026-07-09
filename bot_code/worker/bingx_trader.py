@@ -92,8 +92,13 @@ class BingXExchange:
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
             if isinstance(data, dict):
-                balances = data.get("balance", [])
-                if isinstance(balances, list):
+                balances = data.get("balance")
+                # Hỗ trợ định dạng mới (Dictionary)
+                if isinstance(balances, dict):
+                    if balances.get("asset") == "USDT":
+                        return float(balances.get("balance", 0))
+                # Hỗ trợ định dạng cũ (List)
+                elif isinstance(balances, list):
                     for item in balances:
                         if isinstance(item, dict) and item.get("asset") == "USDT":
                             return float(item.get("balance", 0))
