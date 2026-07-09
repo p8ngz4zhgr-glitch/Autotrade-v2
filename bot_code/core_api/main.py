@@ -335,38 +335,38 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             reason = "Xu hướng có dấu hiệu quay đầu -> Ngắt lệnh bảo toàn vốn."
             
         elif new_direction == "WAIT":
-            # 1. Tính toán % Lãi/Lỗ hiện tại (ROE) theo đòn bẩy 5x
+            # 1. Tính toán % Lãi/Lỗ hiện tại (ROE) theo đòn bẩy
+            # Có thể dùng user.leverage thay vì fix cứng 5 nếu muốn linh hoạt
             leverage = 5
-            if current_direction == "LONG":
-                pnl_pct = ((current_price - entry_price) / entry_price) * 100 * leverage
+            
+            # Đã sửa: current_direction -> direction và entry_price -> entry
+            if direction == "LONG":
+                pnl_pct = ((current_price - entry) / entry) * 100 * leverage
             else:
-                pnl_pct = ((entry_price - current_price) / entry_price) * 100 * leverage
+                pnl_pct = ((entry - current_price) / entry) * 100 * leverage
 
-            # 2. Cài đặt ngưỡng biến động (Ví dụ: 12% - bạn có thể đổi thành 10 hoặc 15)
+            # 2. Cài đặt ngưỡng biến động 
             THRESHOLD = 12.0 
 
             # 3. Phân nhánh quyết định dựa trên độ lệch PnL
             if pnl_pct >= THRESHOLD:
-                # Đang LÃI vượt ngưỡng -> Chốt lời sớm bảo toàn lợi nhuận
                 action = "CLOSE_ALL"
                 action_type = "CHỐT LỜI SỚM"
                 emoji = "✅"
                 reason = f"Thị trường mất xu hướng (WAIT). Đã lãi +{pnl_pct:.2f}% (Đạt ngưỡng) -> Bỏ tiền vào túi."
                 
             elif pnl_pct <= -THRESHOLD:
-                # Đang LỖ vượt ngưỡng -> Cắt lỗ khẩn cấp chống gồng lỗ sâu
                 action = "CLOSE_ALL"
                 action_type = "CẮT LỖ SỚM"
                 emoji = "🚨"
                 reason = f"Thị trường gãy sóng (WAIT). Đang âm {pnl_pct:.2f}% (Vượt ngưỡng) -> Cắt máu bảo vệ vốn."
                 
             else:
-                # 4. Nằm trong vùng dao động an toàn (-12% đến +12%) -> Bỏ qua tín hiệu WAIT, tiếp tục HOLD
-                action = "HOLD" # Hoặc không làm gì cả, để bot chạy tiếp xuống dưới
-                log.info(f"Tín hiệu WAIT nhưng PnL ({pnl_pct:.2f}%) chưa chạm mốc {THRESHOLD}%. Tiếp tục HOLD lệnh {symbol}.")
+                action = "HOLD" 
+                # Đã sửa: symbol -> sym
+                log.info(f"Tín hiệu WAIT nhưng PnL ({pnl_pct:.2f}%) chưa chạm mốc {THRESHOLD}%. Tiếp tục HOLD lệnh {sym}.")
 
         # ĐIỀU KIỆN 2: XU HƯỚNG VẪN TỐT & ĐẠT MỤC TIÊU TP1 (CƠ CHẾ GỒNG LÃI)
-        # Chỉ chạy vào đây nếu KHÔNG có tín hiệu quay đầu ở trên
         elif not is_scaled_out and tp1 > 0:
             reached_tp1 = (direction == "LONG" and current_price >= tp1) or (direction == "SHORT" and current_price <= tp1)
             
@@ -379,7 +379,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH
         # ══════════════════════════════════════════════════════════
-        if action != "KEEP":
+        if action != "KEEP" and action != "HOLD": # Bỏ qua nếu lệnh được gán HOLD ở trên
             bx = get_bx(user)
             
             # --- CƠ CHẾ GỒNG: CHỐT 1/2 & DỜI SL ---
