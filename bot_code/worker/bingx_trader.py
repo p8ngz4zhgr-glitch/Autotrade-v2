@@ -184,12 +184,27 @@ class BingXExchange:
             elif isinstance(v, int) and not isinstance(v, bool):
                 params[k] = str(v)
 
+        # Gửi request lần 1 (Mặc định kỳ vọng tài khoản đang dùng Hedge Mode)
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
+        
+        # Xử lý Fallback nếu user đang dùng One-Way Mode (lỗi 109400)
         if res.get("code") == 109400 and "positionSide" in params: 
-            # Đề phòng User cài One-Way Mode, thử fallback về BOTH
+            log.warning("Lỗi Hedge Mode 109400. Kích hoạt Fallback One-Way (BOTH) cho mã: %s", params.get("symbol"))
+            
             params["positionSide"] = "BOTH"
+            
+            # --- CHỐT CHẶN AN TOÀN TRÁNH MỞ LỆNH NGƯỢC ---
+            # Nếu đây là các lệnh dạng Stop Loss hoặc Take Profit, BẮT BUỘC phải bật reduceOnly
+            order_type = params.get("type", "").upper()
+            if order_type in ["STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"]:
+                params["reduceOnly"] = "true"
+                log.info("Đã chèn thêm reduceOnly=true cho lệnh %s để chống mở vị thế ngược.", order_type)
+            
+            # Thực hiện gửi lại request sau khi đã sửa tham số
             res = self._request("POST", "/openApi/swap/v2/trade/order", params)
+            
         return res
+
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
         position_side = "LONG" if side == "BUY" else "SHORT"
