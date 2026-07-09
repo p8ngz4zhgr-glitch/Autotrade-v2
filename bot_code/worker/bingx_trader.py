@@ -38,7 +38,7 @@ class BingXExchange:
             sym = str(params["symbol"]).strip().upper()
             
             # CHỈNH SỬA: Map mọi tín hiệu Vàng sang XAU-USDT
-           if "GOLD" in sym or "XAU" in sym:
+            if "GOLD" in sym or "XAU" in sym:
                 params["symbol"] = "XAU-USDT"
             
             # Xóa tiền tố NCCO và chuẩn hóa các mã khác
