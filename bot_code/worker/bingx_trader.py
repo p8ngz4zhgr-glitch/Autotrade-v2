@@ -34,28 +34,23 @@ class BingXExchange:
             
         # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
                 # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
+                # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
             
-            # CHỈNH SỬA: Map mọi tín hiệu Vàng sang XAU-USDT
-            if "GOLD" in sym or "XAU" in sym:
-                params["symbol"] = "XAU-USDT"
+            # GIỮ NGUYÊN mã đặc biệt nếu nó khớp đúng chuẩn từ hệ thống của bạn
+            if "NCCOGOLD2USD" in sym:
+                params["symbol"] = "NCCOGOLD2USD-USDT"
             
-            # Xóa tiền tố NCCO và chuẩn hóa các mã khác
-            elif sym.startswith("NCCO"):
-                sym = sym.replace("NCCO", "")
-                sym = sym.replace("-", "")
-                params["symbol"] = sym + "-USDT"
-            
-            # Xử lý chuẩn cho các cặp Crypto (HYPE-USDT, BTC-USDT)
+            # Với các mã Crypto thông thường
             elif sym.endswith("USDT"):
-                # Đảm bảo có dấu gạch ngang trước USDT
                 if "-" not in sym:
                     params["symbol"] = sym[:-4] + "-USDT"
                 else:
                     params["symbol"] = sym
             else:
                 params["symbol"] = sym
+
 
 
         if not self.api_key or not self.api_secret:
