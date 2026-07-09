@@ -5,6 +5,15 @@ import requests
 import urllib.parse
 import logging
 
+# Thử import QuantRiskManager, nếu bạn để cùng thư mục hoặc thư mục cha
+try:
+    from .quant_math import QuantRiskManager
+except ImportError:
+    try:
+        from quant_math import QuantRiskManager
+    except ImportError:
+        QuantRiskManager = None
+
 log = logging.getLogger("BingXExchange")
 
 class BingXExchange:
@@ -26,12 +35,10 @@ class BingXExchange:
         if params is None:
             params = {}
             
-        # Convert boolean to lowercase string "true"/"false"
         for k, v in list(params.items()):
             if isinstance(v, bool):
                 params[k] = "true" if v else "false"
             
-        # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
             
@@ -78,10 +85,7 @@ class BingXExchange:
             r.raise_for_status()
             res = r.json()
             if not isinstance(res, dict):
-                log.warning("BingX API returned non-dict response: %s", res)
                 return {"code": -1, "msg": str(res), "data": {}}
-            if res.get("code") != 0 and res.get("code") != 101205:
-                log.warning("BingX API returned non-zero code: %s", res)
             return res
         except Exception as e:
             log.error("BingX request error %s %s: %s", method, path, e)
@@ -93,11 +97,9 @@ class BingXExchange:
             data = res.get("data")
             if isinstance(data, dict):
                 balances = data.get("balance")
-                # Hỗ trợ định dạng mới (Dictionary)
                 if isinstance(balances, dict):
                     if balances.get("asset") == "USDT":
                         return float(balances.get("balance", 0))
-                # Hỗ trợ định dạng cũ (List)
                 elif isinstance(balances, list):
                     for item in balances:
                         if isinstance(item, dict) and item.get("asset") == "USDT":
@@ -113,13 +115,11 @@ class BingXExchange:
         return 0.0
 
     def set_leverage(self, symbol: str, leverage: int, side: str = "ALL") -> dict:
-        # Bắt buộc mặc định side="ALL" để tương thích tuyệt đối Hedge Mode
         res = self._request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": symbol,
             "leverage": leverage,
             "side": side
         })
-        # Fallback nếu sàn đang ở One-Way mode (Lỗi 109400)
         if isinstance(res, dict) and res.get("code") == 109400:
             res = self._request("POST", "/openApi/swap/v2/trade/leverage", {
                 "symbol": symbol,
@@ -144,7 +144,6 @@ class BingXExchange:
                             continue
                         
                         sym = p.get("symbol", "")
-                        # Bỏ dấu gạch ngang để tương thích Database / Miniapp
                         normalized_sym = sym.replace("-", "") if sym else ""
                         
                         pos_side = p.get("positionSide")
@@ -153,7 +152,6 @@ class BingXExchange:
                         else:
                             direction = "LONG" if qty > 0 else "SHORT"
                             
-                        # FIX LỖI 0.0000 ENTRY BUG: Ưu tiên dùng avgPrice từ API
                         entry_val = p.get("avgPrice", p.get("entryPrice", 0))
                         
                         positions.append({
@@ -185,7 +183,6 @@ class BingXExchange:
         return triggers
 
     def _safe_order(self, params: dict) -> dict:
-        # Xử lý an toàn float tránh tràn thập phân hoặc dính Scientific Notation
         for k, v in list(params.items()):
             if isinstance(v, float):
                 formatted_v = format(v, '.8f').rstrip('0').rstrip('.')
@@ -195,95 +192,74 @@ class BingXExchange:
 
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         
-        # Xử lý Fallback nếu user đang dùng One-Way Mode (lỗi 109400)
         if res.get("code") == 109400 and "positionSide" in params: 
             params["positionSide"] = "BOTH"
             order_type = params.get("type", "").upper()
-            
-            # VAN AN TOÀN: Bắt buộc chèn reduceOnly nếu là lệnh cắt lỗ / chốt lời ở mode One-Way
             if order_type in ["STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"]:
                 params["reduceOnly"] = "true"
-                
             res = self._request("POST", "/openApi/swap/v2/trade/order", params)
             
         return res
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5, p_win: float = 0.5, rr_ratio: float = 1.5) -> dict:
-        # 1. KIỂM TRA VỊ THẾ (CHỐNG NHỒI LỆNH)
+        # 1. KIỂM TRA VỊ THẾ 
         open_positions = self.get_open_positions(symbol)
         if len(open_positions) > 0:
             current_direction = open_positions[0].get("direction")
             current_qty = open_positions[0].get("qty")
-            log.info("⛔ BỎ QUA: Đã có sẵn vị thế %s cho mã %s (qty=%s). Không nhồi thêm lệnh.", current_direction, symbol, current_qty)
+            log.info("⛔ BỎ QUA: Đã có sẵn vị thế %s cho mã %s (qty=%s).", current_direction, symbol, current_qty)
             return {"ok": False, "msg": "Position already exists"}
 
-        # 2. CÀI ĐẶT ĐÒN BẨY TRƯỚC KHI VÀO LỆNH (Tránh thiếu margin)
+        # 2. CÀI ĐẶT ĐÒN BẨY
         try:
-            log.info(f"Cài đặt đòn bẩy {leverage}x cho {symbol} trước khi đặt lệnh...")
             self.set_leverage(symbol, leverage, side="ALL")
         except Exception as e:
             log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
 
-        # 3. TỰ ĐỘNG LẤY SỐ DƯ VÀ TÍNH TOÁN THEO % QUẢN LÝ VỐN
-                # Gọi Quant Manager (Đã import từ file quant_math)
-        quant = QuantRiskManager()
-        
-        # --- BƯỚC 3: TỰ ĐỘNG LẤY SỐ DƯ VÀ TÍNH TOÁN (QUANT MODEL) ---
+        # 3. TÍNH TOÁN QUẢN LÝ VỐN 
         available_balance = self.get_balance()
         current_price = self.get_latest_price(symbol)
         
-        # 1. Tính toán rủi ro danh mục (Markowitz Diversification)
-        all_open_pos = self.get_open_positions() # Lấy toàn bộ lệnh trên sàn
-        markowitz_multiplier = quant.get_markowitz_penalty(symbol, all_open_pos)
-        
-        # 2. Tính toán % Vốn theo Kelly (Giả sử bạn truyền p_win và rr_ratio từ luồng AI vào hàm này)
-        # Nếu chưa truyền được, tạm gán p_win=0.55, rr_ratio=1.5 làm ví dụ.
-        p_win = 0.55 # Truyền giá trị thật từ AI Bayes
-        rr_ratio = 1.5 # Truyền tỷ lệ TP/SL thật
-        
-        kelly_percent = quant.calculate_kelly_fraction(p_win, rr_ratio, fraction=0.5)
-        
-        # Tổng hợp Risk Percent
-        risk_percent = kelly_percent * markowitz_multiplier
-        
-        # Chặn nếu mô hình toán học nói "KHÔNG ĐÁNH"
-        if risk_percent <= 0:
-            log.warning(f"Mô hình Quant chặn lệnh {symbol} (Kelly Âm hoặc Rủi ro danh mục quá cao).")
-            return {"ok": False, "msg": "Quant Risk Block"}
-            
-        # Tính vốn thực tế (Có chặn min 2.5$)
-        capital = available_balance * risk_percent
-        if capital < 2.5: capital = 2.5
-        if capital > available_balance: capital = available_balance
-
-        calculated_qty = (capital * leverage) / current_price
-        safe_qty = float(int(calculated_qty * 10000) / 10000)
-
-        
-        # CHỐT CHẶN AN TOÀN NẾU VÍ TRỐNG:
         if available_balance <= 0:
-            log.error(f"⛔ Ví Swap trống (hoặc lỗi API)! Hủy lệnh {symbol}.")
+            log.error(f"⛔ Ví Swap trống! Hủy lệnh {symbol}.")
             return {"ok": False, "msg": "Ví Swap trống."}
             
         if current_price <= 0:
-            log.error(f"⛔ LỖI: Không lấy được giá thị trường cho {symbol}. Bot hủy lệnh.")
+            log.error(f"⛔ LỖI API giá cho {symbol}. Bot hủy lệnh.")
             return {"ok": False, "msg": "Lỗi API giá."}
 
-        # Tính toán vốn
+        # Áp dụng Quant Model
+        risk_percent = 0.10 # Giá trị mặc định an toàn
+        
+        if QuantRiskManager:
+            try:
+                quant = QuantRiskManager()
+                all_open_pos = self.get_open_positions() 
+                markowitz_multiplier = quant.get_markowitz_penalty(symbol, all_open_pos)
+                kelly_percent = quant.calculate_kelly_fraction(p_win, rr_ratio, fraction=0.5)
+                risk_percent = kelly_percent * markowitz_multiplier
+                log.info(f"🧠 [QUANT] Markowitz={markowitz_multiplier:.2f}, Kelly={kelly_percent:.3f} -> Risk={risk_percent:.3f}")
+            except Exception as e:
+                log.warning(f"Lỗi module Quant, quay về mức Risk mặc định 10%. Lỗi: {e}")
+        
+        if risk_percent <= 0:
+            log.warning(f"⛔ Mô hình Quant chặn lệnh {symbol} (Kèo EV âm hoặc Rủi ro danh mục quá cao).")
+            return {"ok": False, "msg": "Quant Risk Block"}
+            
+        # Tính vốn thực tế với chốt chặn an toàn
         capital = available_balance * risk_percent
-        if capital < 2.5: # Bảo vệ lệnh tối thiểu của sàn
+        if capital < 2.5: 
             capital = 2.5
-        if capital > available_balance:
+        if capital > available_balance: 
             capital = available_balance
 
-        # Tính toán Qty và gọt số thập phân (max 4 số)
         calculated_qty = (capital * leverage) / current_price
         safe_qty = float(int(calculated_qty * 10000) / 10000)
+        
         log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital:.2f} USDT (Lev {leverage}x) -> Tự động tính Qty: {safe_qty}")
 
-        position_side = "LONG" if side == "BUY" else "SHORT"
-
         # 4. THỰC THI ĐẶT LỆNH
+        position_side = "LONG" if side == "BUY" else "SHORT"
         params = {
             "symbol": symbol,
             "side": side,
@@ -297,10 +273,7 @@ class BingXExchange:
         if res.get("code") == 0:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty an toàn: %s)", order_id, side, safe_qty)
-            
-            # Đặt luôn Stoploss và Take Profit (đã tích hợp WICK PROTECT)
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
-            
             return {"ok": True, "order_id": order_id}
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
@@ -309,7 +282,6 @@ class BingXExchange:
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
         
-        # TÍCH HỢP CHỐNG GIẬT RÂU (Wick Management)
         if sl_price > 0:
             self._safe_order({
                 "symbol": symbol,
@@ -318,7 +290,7 @@ class BingXExchange:
                 "stopPrice": sl_price,
                 "quantity": qty,
                 "positionSide": position_side,
-                "workingType": "MARK_PRICE"  # NÉ QUÉT RÂU ẢO
+                "workingType": "MARK_PRICE"  
             })
             
         if tp_price > 0:
@@ -329,7 +301,7 @@ class BingXExchange:
                 "stopPrice": tp_price,
                 "quantity": qty,
                 "positionSide": position_side,
-                "workingType": "CONTRACT_PRICE" # BẮT RÂU CHỐT LỜI SỚM
+                "workingType": "CONTRACT_PRICE" 
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
@@ -352,36 +324,26 @@ class BingXExchange:
         return {"ok": False, "msg": res.get("msg", "Error closing")}
 
     def handle_tp1_hit(self, symbol: str, direction: str, total_qty: float, entry_price: float, tp2_price: float) -> dict:
-        # 1. Hủy ngay mọi lệnh chờ (TP/SL cũ)
         log.info(f"Đang xóa lệnh SL/TP cũ của {symbol}...")
         self.cancel_all_orders(symbol)
         
-        # 2. Gọt số thập phân và chốt lời 50%
         half_qty = float(int((total_qty * 0.5) * 10000) / 10000)
-        log.info(f"Đang chốt 50% vị thế {direction} của {symbol} (Qty: {half_qty})...")
-        
         close_res = self.close_position(symbol, half_qty, direction)
         if not close_res.get("ok"):
             log.error(f"Lỗi khi chốt 50% vị thế: {close_res.get('msg')}")
             return close_res
 
-        # Hủy lại lần 2 đảm bảo an toàn tuyệt đối
         self.cancel_all_orders(symbol)
-        
-        # 3. Tính toán 50% khối lượng còn lại
         remaining_qty = float(int((total_qty - half_qty) * 10000) / 10000)
         
-        # Dự phòng khẩn cấp: Tự fetch lại Entry nếu tín hiệu truyền vào bị sai
         if entry_price <= 0:
             open_pos = self.get_open_positions(symbol)
             if open_pos:
                 entry_price = open_pos[0].get("entry", 0)
         
-        # 4. Kéo SL về chuẩn giá Entry và thả TP2
-        log.info(f"Cài đặt SL mới tại Entry ({entry_price}) và TP2 ({tp2_price}) cho {remaining_qty} {symbol}...")
         self._place_sl_tp(
             symbol=symbol,
-            side="BUY" if direction == "LONG" else "SELL", # Trả lại hướng mua/bán gốc
+            side="BUY" if direction == "LONG" else "SELL", 
             qty=remaining_qty,
             sl_price=entry_price,
             tp_price=tp2_price
