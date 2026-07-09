@@ -225,10 +225,40 @@ class BingXExchange:
             log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
 
         # 3. TỰ ĐỘNG LẤY SỐ DƯ VÀ TÍNH TOÁN THEO % QUẢN LÝ VỐN
+                # Gọi Quant Manager (Đã import từ file quant_math)
+        quant = QuantRiskManager()
+        
+        # --- BƯỚC 3: TỰ ĐỘNG LẤY SỐ DƯ VÀ TÍNH TOÁN (QUANT MODEL) ---
         available_balance = self.get_balance()
         current_price = self.get_latest_price(symbol)
         
-        risk_percent = 0.20  # Dùng 20% vốn
+        # 1. Tính toán rủi ro danh mục (Markowitz Diversification)
+        all_open_pos = self.get_open_positions() # Lấy toàn bộ lệnh trên sàn
+        markowitz_multiplier = quant.get_markowitz_penalty(symbol, all_open_pos)
+        
+        # 2. Tính toán % Vốn theo Kelly (Giả sử bạn truyền p_win và rr_ratio từ luồng AI vào hàm này)
+        # Nếu chưa truyền được, tạm gán p_win=0.55, rr_ratio=1.5 làm ví dụ.
+        p_win = 0.55 # Truyền giá trị thật từ AI Bayes
+        rr_ratio = 1.5 # Truyền tỷ lệ TP/SL thật
+        
+        kelly_percent = quant.calculate_kelly_fraction(p_win, rr_ratio, fraction=0.5)
+        
+        # Tổng hợp Risk Percent
+        risk_percent = kelly_percent * markowitz_multiplier
+        
+        # Chặn nếu mô hình toán học nói "KHÔNG ĐÁNH"
+        if risk_percent <= 0:
+            log.warning(f"Mô hình Quant chặn lệnh {symbol} (Kelly Âm hoặc Rủi ro danh mục quá cao).")
+            return {"ok": False, "msg": "Quant Risk Block"}
+            
+        # Tính vốn thực tế (Có chặn min 2.5$)
+        capital = available_balance * risk_percent
+        if capital < 2.5: capital = 2.5
+        if capital > available_balance: capital = available_balance
+
+        calculated_qty = (capital * leverage) / current_price
+        safe_qty = float(int(calculated_qty * 10000) / 10000)
+
         
         # CHỐT CHẶN AN TOÀN NẾU VÍ TRỐNG:
         if available_balance <= 0:
