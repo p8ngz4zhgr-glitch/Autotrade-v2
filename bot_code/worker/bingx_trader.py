@@ -33,8 +33,6 @@ class BingXExchange:
                 params[k] = "true" if v else "false"
             
         # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
-                # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
-                # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
             
@@ -50,8 +48,6 @@ class BingXExchange:
                     params["symbol"] = sym
             else:
                 params["symbol"] = sym
-
-
 
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
@@ -173,7 +169,6 @@ class BingXExchange:
                             triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
         return triggers
 
-
     def _safe_order(self, params: dict) -> dict:
         # Xử lý an toàn float để tránh lỗi tràn thập phân hoặc dính Scientific Notation (1e-05)
         for k, v in list(params.items()):
@@ -194,7 +189,6 @@ class BingXExchange:
             params["positionSide"] = "BOTH"
             
             # --- CHỐT CHẶN AN TOÀN TRÁNH MỞ LỆNH NGƯỢC ---
-            # Nếu đây là các lệnh dạng Stop Loss hoặc Take Profit, BẮT BUỘC phải bật reduceOnly
             order_type = params.get("type", "").upper()
             if order_type in ["STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"]:
                 params["reduceOnly"] = "true"
@@ -205,17 +199,8 @@ class BingXExchange:
             
         return res
 
-
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5) -> dict:
-        """
-        Hàm đặt lệnh đã được nâng cấp:
-        1. Chống nhồi lệnh.
-        2. Tự động set đòn bẩy (Fix lỗi Insufficient Margin).
-        3. Làm tròn khối lượng (Fix lỗi Quantity Precision).
-        """
-        # ---------------------------------------------------------
-        # CHỐT CHẶN 1: KIỂM TRA VỊ THẾ (CHỐNG NHỒI LỆNH)
-        # ---------------------------------------------------------
+        # 1. KIỂM TRA VỊ THẾ (CHỐNG NHỒI LỆNH)
         open_positions = self.get_open_positions(symbol)
         if len(open_positions) > 0:
             current_direction = open_positions[0].get("direction")
@@ -223,27 +208,20 @@ class BingXExchange:
             log.info("⛔ BỎ QUA: Đã có sẵn vị thế %s cho mã %s (qty=%s). Không nhồi thêm lệnh.", current_direction, symbol, current_qty)
             return {"ok": False, "msg": "Position already exists"}
 
-        # ---------------------------------------------------------
-        # CHỐT CHẶN 2: ÉP ĐÒN BẨY LÊN SÀN TRƯỚC KHI ĐẶT LỆNH
-        # (Fix triệt để lỗi sàn hiểu nhầm đòn bẩy 1x dẫn đến thiếu tiền)
-        # ---------------------------------------------------------
+        position_side = "LONG" if side == "BUY" else "SHORT"
+
+        # 2. CÀI ĐẶT ĐÒN BẨY TRƯỚC KHI VÀO LỆNH (Tránh thiếu margin)
         try:
-            log.info(f"Cài đặt đòn bẩy {leverage}x cho {symbol} trước khi đặt lệnh...")
-            self.set_leverage(symbol, leverage)
+            log.info(f"Cài đặt đòn bẩy {leverage}x cho {symbol} ({position_side}) trước khi đặt lệnh...")
+            # Truyền đích danh hướng (position_side) thay vì "BOTH" để tương thích chuẩn Hedge Mode
+            self.set_leverage(symbol, leverage, side=position_side)
         except Exception as e:
             log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
 
-        # ---------------------------------------------------------
-        # CHỐT CHẶN 3: LÀM TRÒN KHỐI LƯỢNG (QUANTITY)
-        # Sàn yêu cầu tối đa 4 chữ số thập phân cho Vàng và Crypto
-        # Cắt đuôi để không làm tròn lên (tránh lố số dư)
-        # ---------------------------------------------------------
+        # 3. GỌT SỐ THẬP PHÂN KHỐI LƯỢNG (Tránh lỗi size precision)
         safe_qty = float(int(qty * 10000) / 10000)
 
-        # ---------------------------------------------------------
-        # THỰC THI LỆNH
-        # ---------------------------------------------------------
-        position_side = "LONG" if side == "BUY" else "SHORT"
+        # 4. THỰC THI ĐẶT LỆNH
         params = {
             "symbol": symbol,
             "side": side,
@@ -265,12 +243,12 @@ class BingXExchange:
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
 
-
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
         
-        # LƯU Ý: Tuyệt đối KHÔNG gán "reduceOnly": "true" vì nó báo lỗi xung đột với Hedge Mode
+        # LƯU Ý: Tuyệt đối KHÔNG gán "reduceOnly": "true" vì nó báo lỗi xung đột với Hedge Mode ban đầu
+        # Trách nhiệm xử lý reduceOnly đã được đẩy sang hàm _safe_order khi cần thiết
         if sl_price > 0:
             self._safe_order({
                 "symbol": symbol,
@@ -313,7 +291,10 @@ class BingXExchange:
         return {"ok": False, "msg": res.get("msg", "Error closing")}
 
     def handle_tp1_hit(self, symbol: str, direction: str, total_qty: float, entry_price: float, tp2_price: float) -> dict:
-        half_qty = round(total_qty * 0.5, 4)
+        # Dùng phương pháp gọt chữ số thay vì round() để tránh lỗi vượt quá Margin khi làm tròn lên
+        half_qty_raw = total_qty * 0.5
+        half_qty = float(int(half_qty_raw * 10000) / 10000)
+        
         log.info("Handling partial TP1 close for %s: %s, qty=%s", symbol, direction, half_qty)
         
         res = self.close_position(symbol, half_qty, direction)
@@ -321,10 +302,15 @@ class BingXExchange:
             return res
 
         self.cancel_all_orders(symbol)
+        
+        # Tính toán lại số lượng còn lại bằng cách gọt tương tự
+        remaining_qty_raw = total_qty - half_qty
+        remaining_qty = float(int(remaining_qty_raw * 10000) / 10000)
+        
         self._place_sl_tp(
             symbol=symbol,
             side="BUY" if direction == "LONG" else "SELL",
-            qty=round(total_qty - half_qty, 4),
+            qty=remaining_qty,
             sl_price=entry_price,
             tp_price=tp2_price
         )
