@@ -252,7 +252,7 @@ class LLMChain:
                           "temperature": 0.3,
                           "top_p":       0.9,
                           "stream":      False},
-                    timeout=25)
+                    timeout=60)
                 if r.status_code == 429:
                     log.warning("NVIDIA NIM rate limit — thử model tiếp theo")
                     time.sleep(2)
