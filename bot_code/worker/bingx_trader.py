@@ -228,7 +228,7 @@ class BingXExchange:
         available_balance = self.get_balance()
         current_price = self.get_latest_price(symbol)
         
-        risk_percent = 0.10  # Dùng 10% vốn
+        risk_percent = 0.20  # Dùng 20% vốn
         
         # CHỐT CHẶN AN TOÀN NẾU VÍ TRỐNG:
         if available_balance <= 0:
