@@ -207,6 +207,17 @@ class BingXExchange:
 
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
+        # --- CHỐT CHẶN: Kiểm tra vị thế đang mở ---
+        open_positions = self.get_open_positions(symbol)
+        
+        if len(open_positions) > 0:
+            current_direction = open_positions[0].get("direction")
+            current_qty = open_positions[0].get("qty")
+            log.info("⛔ BỎ QUA TÍN HIỆU: Đã có sẵn vị thế %s cho mã %s (qty=%s). Không nhồi thêm lệnh.", current_direction, symbol, current_qty)
+            return {"ok": False, "msg": "Position already exists"}
+        # ------------------------------------------
+
+        # Nếu chưa có vị thế, tiến hành đặt lệnh bình thường
         position_side = "LONG" if side == "BUY" else "SHORT"
         params = {
             "symbol": symbol,
@@ -215,12 +226,15 @@ class BingXExchange:
             "quantity": qty,
             "positionSide": position_side
         }
+        
         res = self._safe_order(params)
+        
         if res.get("code") == 0:
             order_id = res.get("data", {}).get("orderId")
             log.info("Placed Market Order %s OK: %s", order_id, side)
             self._place_sl_tp(symbol, side, qty, sl_price, tp_price)
             return {"ok": True, "order_id": order_id}
+            
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
 
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
