@@ -7,7 +7,6 @@ import logging
 
 log = logging.getLogger("BingXExchange")
 
-
 class BingXExchange:
     BASE_URL = "https://open-api.bingx.com"
 
@@ -36,11 +35,8 @@ class BingXExchange:
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
             
-            # GIỮ NGUYÊN mã đặc biệt nếu nó khớp đúng chuẩn từ hệ thống của bạn
             if "NCCOGOLD2USD" in sym:
                 params["symbol"] = "NCCOGOLD2USD-USDT"
-            
-            # Với các mã Crypto thông thường
             elif sym.endswith("USDT"):
                 if "-" not in sym:
                     params["symbol"] = sym[:-4] + "-USDT"
@@ -111,12 +107,21 @@ class BingXExchange:
                 return float(data.get("price", 0))
         return 0.0
 
-    def set_leverage(self, symbol: str, leverage: int, side: str = "BOTH") -> dict:
-        return self._request("POST", "/openApi/swap/v2/trade/leverage", {
+    def set_leverage(self, symbol: str, leverage: int, side: str = "ALL") -> dict:
+        # Bắt buộc mặc định side="ALL" để tương thích tuyệt đối Hedge Mode
+        res = self._request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": symbol,
             "leverage": leverage,
             "side": side
         })
+        # Fallback nếu sàn đang ở One-Way mode (Lỗi 109400)
+        if isinstance(res, dict) and res.get("code") == 109400:
+            res = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+                "symbol": symbol,
+                "leverage": leverage,
+                "side": "BOTH"
+            })
+        return res
 
     def get_open_positions(self, symbol: str = None) -> list:
         params = {}
@@ -132,7 +137,9 @@ class BingXExchange:
                         qty = float(p.get("positionAmt", 0))
                         if qty == 0:
                             continue
+                        
                         sym = p.get("symbol", "")
+                        # Bỏ dấu gạch ngang để tương thích Database / Miniapp
                         normalized_sym = sym.replace("-", "") if sym else ""
                         
                         pos_side = p.get("positionSide")
@@ -141,10 +148,13 @@ class BingXExchange:
                         else:
                             direction = "LONG" if qty > 0 else "SHORT"
                             
+                        # FIX LỖI 0.0000 ENTRY BUG: Ưu tiên dùng avgPrice từ API
+                        entry_val = p.get("avgPrice", p.get("entryPrice", 0))
+                        
                         positions.append({
                             "symbol": normalized_sym,
                             "direction": direction,
-                            "entry": float(p.get("entryPrice", 0)),
+                            "entry": float(entry_val),
                             "qty": abs(qty),
                             "pnl": float(p.get("unrealizedProfit", 0)),
                         })
@@ -170,31 +180,25 @@ class BingXExchange:
         return triggers
 
     def _safe_order(self, params: dict) -> dict:
-        # Xử lý an toàn float để tránh lỗi tràn thập phân hoặc dính Scientific Notation (1e-05)
+        # Xử lý an toàn float tránh tràn thập phân hoặc dính Scientific Notation
         for k, v in list(params.items()):
             if isinstance(v, float):
-                # Format tối đa 8 số thập phân, tự cắt bỏ số 0 vô nghĩa ở cuối
                 formatted_v = format(v, '.8f').rstrip('0').rstrip('.')
                 params[k] = formatted_v if formatted_v else "0"
             elif isinstance(v, int) and not isinstance(v, bool):
                 params[k] = str(v)
 
-        # Gửi request lần 1 (Mặc định kỳ vọng tài khoản đang dùng Hedge Mode)
         res = self._request("POST", "/openApi/swap/v2/trade/order", params)
         
         # Xử lý Fallback nếu user đang dùng One-Way Mode (lỗi 109400)
         if res.get("code") == 109400 and "positionSide" in params: 
-            log.warning("Lỗi Hedge Mode 109400. Kích hoạt Fallback One-Way (BOTH) cho mã: %s", params.get("symbol"))
-            
             params["positionSide"] = "BOTH"
-            
-            # --- CHỐT CHẶN AN TOÀN TRÁNH MỞ LỆNH NGƯỢC ---
             order_type = params.get("type", "").upper()
+            
+            # VAN AN TOÀN: Bắt buộc chèn reduceOnly nếu là lệnh cắt lỗ / chốt lời ở mode One-Way
             if order_type in ["STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT"]:
                 params["reduceOnly"] = "true"
-                log.info("Đã chèn thêm reduceOnly=true cho lệnh %s để chống mở vị thế ngược.", order_type)
-            
-            # Thực hiện gửi lại request sau khi đã sửa tham số
+                
             res = self._request("POST", "/openApi/swap/v2/trade/order", params)
             
         return res
@@ -215,40 +219,32 @@ class BingXExchange:
         except Exception as e:
             log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
 
-        # ---------------------------------------------------------
         # 3. TỰ ĐỘNG LẤY SỐ DƯ VÀ TÍNH TOÁN THEO % QUẢN LÝ VỐN
-        # ---------------------------------------------------------
         available_balance = self.get_balance()
         current_price = self.get_latest_price(symbol)
         
-        # --- CẤU HÌNH RỦI RO (RISK MANAGEMENT) ---
-        # Ví dụ: Dùng 10% số dư khả dụng để vào lệnh
-        risk_percent = 0.10  
+        risk_percent = 0.10  # Dùng 10% vốn
         
-        if current_price > 0 and available_balance > 0:
-            # Số vốn thực tế sẽ đánh cho lệnh này
-            capital = available_balance * risk_percent
+        # CHỐT CHẶN AN TOÀN NẾU VÍ TRỐNG:
+        if available_balance <= 0:
+            log.error(f"⛔ Ví Swap trống (hoặc lỗi API)! Hủy lệnh {symbol}.")
+            return {"ok": False, "msg": "Ví Swap trống."}
             
-            # Sàn BingX yêu cầu tối thiểu lệnh phải >= 2 USDT. (Bảo vệ user vốn quá nhỏ)
-            if capital < 2.5:
-                capital = 2.5
-                
-            # Đảm bảo không vượt quá số dư (nếu user có dưới 2.5$)
-            if capital > available_balance:
-                capital = available_balance
+        if current_price <= 0:
+            log.error(f"⛔ LỖI: Không lấy được giá thị trường cho {symbol}. Bot hủy lệnh.")
+            return {"ok": False, "msg": "Lỗi API giá."}
 
-            # Sức mua = Vốn * Đòn bẩy
-            calculated_qty = (capital * leverage) / current_price
-            
-            # Gọt số thập phân an toàn (tối đa 4 số)
-            safe_qty = float(int(calculated_qty * 10000) / 10000)
-            
-            log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital:.2f} USDT (Lev {leverage}x) -> Tự động tính Qty: {safe_qty}")
-        else:
-            # Fallback nếu lỗi API không lấy được giá hoặc số dư
-            safe_qty = float(int(qty * 10000) / 10000)
-            log.warning("Không lấy được số dư/giá, sử dụng qty mặc định từ AI: %s", safe_qty)
-        # ---------------------------------------------------------
+        # Tính toán vốn
+        capital = available_balance * risk_percent
+        if capital < 2.5: # Bảo vệ lệnh tối thiểu của sàn
+            capital = 2.5
+        if capital > available_balance:
+            capital = available_balance
+
+        # Tính toán Qty và gọt số thập phân (max 4 số)
+        calculated_qty = (capital * leverage) / current_price
+        safe_qty = float(int(calculated_qty * 10000) / 10000)
+        log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital:.2f} USDT (Lev {leverage}x) -> Tự động tính Qty: {safe_qty}")
 
         position_side = "LONG" if side == "BUY" else "SHORT"
 
@@ -267,7 +263,7 @@ class BingXExchange:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty an toàn: %s)", order_id, side, safe_qty)
             
-            # Đặt luôn Stoploss và Take Profit
+            # Đặt luôn Stoploss và Take Profit (đã tích hợp WICK PROTECT)
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
             
             return {"ok": True, "order_id": order_id}
@@ -278,8 +274,7 @@ class BingXExchange:
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
         
-        # LƯU Ý: Tuyệt đối KHÔNG gán "reduceOnly": "true" vì nó báo lỗi xung đột với Hedge Mode ban đầu
-        # Trách nhiệm xử lý reduceOnly đã được đẩy sang hàm _safe_order khi cần thiết
+        # TÍCH HỢP CHỐNG GIẬT RÂU (Wick Management)
         if sl_price > 0:
             self._safe_order({
                 "symbol": symbol,
@@ -287,7 +282,8 @@ class BingXExchange:
                 "type": "STOP_MARKET",
                 "stopPrice": sl_price,
                 "quantity": qty,
-                "positionSide": position_side
+                "positionSide": position_side,
+                "workingType": "MARK_PRICE"  # NÉ QUÉT RÂU ẢO
             })
             
         if tp_price > 0:
@@ -297,7 +293,8 @@ class BingXExchange:
                 "type": "TAKE_PROFIT_MARKET",
                 "stopPrice": tp_price,
                 "quantity": qty,
-                "positionSide": position_side
+                "positionSide": position_side,
+                "workingType": "CONTRACT_PRICE" # BẮT RÂU CHỐT LỜI SỚM
             })
 
     def cancel_all_orders(self, symbol: str) -> dict:
@@ -313,34 +310,43 @@ class BingXExchange:
             "type": "MARKET",
             "quantity": qty,
             "positionSide": direction
-            # Đã xóa reduceOnly để không lỗi 109400
         }
         res = self._safe_order(params)
         if res.get("code") in (0, 101205):
-            self.cancel_all_orders(symbol)
             return {"ok": True}
         return {"ok": False, "msg": res.get("msg", "Error closing")}
 
     def handle_tp1_hit(self, symbol: str, direction: str, total_qty: float, entry_price: float, tp2_price: float) -> dict:
-        # Dùng phương pháp gọt chữ số thay vì round() để tránh lỗi vượt quá Margin khi làm tròn lên
-        half_qty_raw = total_qty * 0.5
-        half_qty = float(int(half_qty_raw * 10000) / 10000)
-        
-        log.info("Handling partial TP1 close for %s: %s, qty=%s", symbol, direction, half_qty)
-        
-        res = self.close_position(symbol, half_qty, direction)
-        if not res.get("ok"):
-            return res
-
+        # 1. Hủy ngay mọi lệnh chờ (TP/SL cũ)
+        log.info(f"Đang xóa lệnh SL/TP cũ của {symbol}...")
         self.cancel_all_orders(symbol)
         
-        # Tính toán lại số lượng còn lại bằng cách gọt tương tự
-        remaining_qty_raw = total_qty - half_qty
-        remaining_qty = float(int(remaining_qty_raw * 10000) / 10000)
+        # 2. Gọt số thập phân và chốt lời 50%
+        half_qty = float(int((total_qty * 0.5) * 10000) / 10000)
+        log.info(f"Đang chốt 50% vị thế {direction} của {symbol} (Qty: {half_qty})...")
         
+        close_res = self.close_position(symbol, half_qty, direction)
+        if not close_res.get("ok"):
+            log.error(f"Lỗi khi chốt 50% vị thế: {close_res.get('msg')}")
+            return close_res
+
+        # Hủy lại lần 2 đảm bảo an toàn tuyệt đối
+        self.cancel_all_orders(symbol)
+        
+        # 3. Tính toán 50% khối lượng còn lại
+        remaining_qty = float(int((total_qty - half_qty) * 10000) / 10000)
+        
+        # Dự phòng khẩn cấp: Tự fetch lại Entry nếu tín hiệu truyền vào bị sai
+        if entry_price <= 0:
+            open_pos = self.get_open_positions(symbol)
+            if open_pos:
+                entry_price = open_pos[0].get("entry", 0)
+        
+        # 4. Kéo SL về chuẩn giá Entry và thả TP2
+        log.info(f"Cài đặt SL mới tại Entry ({entry_price}) và TP2 ({tp2_price}) cho {remaining_qty} {symbol}...")
         self._place_sl_tp(
             symbol=symbol,
-            side="BUY" if direction == "LONG" else "SELL",
+            side="BUY" if direction == "LONG" else "SELL", # Trả lại hướng mua/bán gốc
             qty=remaining_qty,
             sl_price=entry_price,
             tp_price=tp2_price
