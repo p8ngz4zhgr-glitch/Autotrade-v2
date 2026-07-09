@@ -208,7 +208,7 @@ class BingXExchange:
             
         return res
 
-    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5) -> dict:
+    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5, p_win: float = 0.5, rr_ratio: float = 1.5) -> dict:
         # 1. KIỂM TRA VỊ THẾ (CHỐNG NHỒI LỆNH)
         open_positions = self.get_open_positions(symbol)
         if len(open_positions) > 0:
