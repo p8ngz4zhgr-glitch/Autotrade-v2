@@ -845,7 +845,7 @@ async def startup_event():
 # ══════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ══════════════════════════════════════════════════════════════════
-@app.get("/", methods=["GET", "HEAD"])
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {
         "status": "online", 
