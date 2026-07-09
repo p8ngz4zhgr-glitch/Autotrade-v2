@@ -206,24 +206,49 @@ class BingXExchange:
         return res
 
 
-    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float) -> dict:
-        # --- CHỐT CHẶN: Kiểm tra vị thế đang mở ---
+    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5) -> dict:
+        """
+        Hàm đặt lệnh đã được nâng cấp:
+        1. Chống nhồi lệnh.
+        2. Tự động set đòn bẩy (Fix lỗi Insufficient Margin).
+        3. Làm tròn khối lượng (Fix lỗi Quantity Precision).
+        """
+        # ---------------------------------------------------------
+        # CHỐT CHẶN 1: KIỂM TRA VỊ THẾ (CHỐNG NHỒI LỆNH)
+        # ---------------------------------------------------------
         open_positions = self.get_open_positions(symbol)
-        
         if len(open_positions) > 0:
             current_direction = open_positions[0].get("direction")
             current_qty = open_positions[0].get("qty")
-            log.info("⛔ BỎ QUA TÍN HIỆU: Đã có sẵn vị thế %s cho mã %s (qty=%s). Không nhồi thêm lệnh.", current_direction, symbol, current_qty)
+            log.info("⛔ BỎ QUA: Đã có sẵn vị thế %s cho mã %s (qty=%s). Không nhồi thêm lệnh.", current_direction, symbol, current_qty)
             return {"ok": False, "msg": "Position already exists"}
-        # ------------------------------------------
 
-        # Nếu chưa có vị thế, tiến hành đặt lệnh bình thường
+        # ---------------------------------------------------------
+        # CHỐT CHẶN 2: ÉP ĐÒN BẨY LÊN SÀN TRƯỚC KHI ĐẶT LỆNH
+        # (Fix triệt để lỗi sàn hiểu nhầm đòn bẩy 1x dẫn đến thiếu tiền)
+        # ---------------------------------------------------------
+        try:
+            log.info(f"Cài đặt đòn bẩy {leverage}x cho {symbol} trước khi đặt lệnh...")
+            self.set_leverage(symbol, leverage)
+        except Exception as e:
+            log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
+
+        # ---------------------------------------------------------
+        # CHỐT CHẶN 3: LÀM TRÒN KHỐI LƯỢNG (QUANTITY)
+        # Sàn yêu cầu tối đa 4 chữ số thập phân cho Vàng và Crypto
+        # Cắt đuôi để không làm tròn lên (tránh lố số dư)
+        # ---------------------------------------------------------
+        safe_qty = float(int(qty * 10000) / 10000)
+
+        # ---------------------------------------------------------
+        # THỰC THI LỆNH
+        # ---------------------------------------------------------
         position_side = "LONG" if side == "BUY" else "SHORT"
         params = {
             "symbol": symbol,
             "side": side,
             "type": "MARKET",
-            "quantity": qty,
+            "quantity": safe_qty,
             "positionSide": position_side
         }
         
@@ -231,11 +256,15 @@ class BingXExchange:
         
         if res.get("code") == 0:
             order_id = res.get("data", {}).get("orderId")
-            log.info("Placed Market Order %s OK: %s", order_id, side)
-            self._place_sl_tp(symbol, side, qty, sl_price, tp_price)
+            log.info("✅ Placed Market Order %s OK: %s (Qty an toàn: %s)", order_id, side, safe_qty)
+            
+            # Đặt luôn Stoploss và Take Profit
+            self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
+            
             return {"ok": True, "order_id": order_id}
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
+
 
     def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
         opposite_side = "SELL" if side == "BUY" else "BUY"
