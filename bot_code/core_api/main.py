@@ -845,13 +845,14 @@ async def startup_event():
 # ══════════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ══════════════════════════════════════════════════════════════════
-@app.get("/")
+@app.get("/", methods=["GET", "HEAD"])
 def health():
     return {
         "status": "online", 
         "version": "v6.1",
         "tiers": {t: c["label"] for t, c in TIER_CONFIG.items()}
     }
+
 
 # THÊM ĐOẠN NÀY VÀO CUỐI FILE
 if __name__ == "__main__":
