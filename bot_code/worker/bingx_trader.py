@@ -33,23 +33,30 @@ class BingXExchange:
                 params[k] = "true" if v else "false"
             
         # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
+                # Tự động dọn dẹp và định dạng Symbol thành chuẩn BingX
         if "symbol" in params and params["symbol"]:
             sym = str(params["symbol"]).strip().upper()
             
-            # Xóa các tiền tố lạ từ webhook/signal nội bộ (nếu có)
-            if sym.startswith("NCCO"):
-                sym = sym.replace("NCCO", "")
-                
-            # Xóa gạch ngang cũ để chuẩn hóa về chuỗi liền (VD: GOLD2USDUSDT)
-            sym = sym.replace("-", "")
+            # CHỈNH SỬA: Map mọi tín hiệu Vàng sang XAU-USDT
+        if "GOLD" in sym or "XAU" in sym:
+                params["symbol"] = "XAU-USDT"
             
-            # Gắn lại gạch ngang chuẩn xác cho API BingX
-            if sym.endswith("USDT"):
-                params["symbol"] = sym[:-4] + "-USDT"
-            elif sym.endswith("USDC"):
-                params["symbol"] = sym[:-4] + "-USDC"
+            # Xóa tiền tố NCCO và chuẩn hóa các mã khác
+            elif sym.startswith("NCCO"):
+                sym = sym.replace("NCCO", "")
+                sym = sym.replace("-", "")
+                params["symbol"] = sym + "-USDT"
+            
+            # Xử lý chuẩn cho các cặp Crypto (HYPE-USDT, BTC-USDT)
+            elif sym.endswith("USDT"):
+                # Đảm bảo có dấu gạch ngang trước USDT
+                if "-" not in sym:
+                    params["symbol"] = sym[:-4] + "-USDT"
+                else:
+                    params["symbol"] = sym
             else:
                 params["symbol"] = sym
+
 
         if not self.api_key or not self.api_secret:
             return {"code": -1, "msg": "API key or secret is empty", "data": {}}
