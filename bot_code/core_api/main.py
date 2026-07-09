@@ -847,8 +847,17 @@ async def startup_event():
 # ══════════════════════════════════════════════════════════════════
 @app.get("/")
 def health():
-    return {"status": "online", "version": "v6.1",
-            "tiers": {t: c["label"] for t, c in TIER_CONFIG.items()}}
+    return {
+        "status": "online", 
+        "version": "v6.1",
+        "tiers": {t: c["label"] for t, c in TIER_CONFIG.items()}
+    }
+
+# THÊM ĐOẠN NÀY VÀO CUỐI FILE
+if __name__ == "__main__":
+    # Lấy port từ Render (mặc định là 10000 nếu chạy cục bộ)
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 # ══════════════════════════════════════════════════════════════════
