@@ -208,18 +208,49 @@ class BingXExchange:
             log.info("⛔ BỎ QUA: Đã có sẵn vị thế %s cho mã %s (qty=%s). Không nhồi thêm lệnh.", current_direction, symbol, current_qty)
             return {"ok": False, "msg": "Position already exists"}
 
-        position_side = "LONG" if side == "BUY" else "SHORT"
-
         # 2. CÀI ĐẶT ĐÒN BẨY TRƯỚC KHI VÀO LỆNH (Tránh thiếu margin)
         try:
-            log.info(f"Cài đặt đòn bẩy {leverage}x cho {symbol} ({position_side}) trước khi đặt lệnh...")
-            # Truyền đích danh hướng (position_side) thay vì "BOTH" để tương thích chuẩn Hedge Mode
-            self.set_leverage(symbol, leverage, side=position_side)
+            log.info(f"Cài đặt đòn bẩy {leverage}x cho {symbol} trước khi đặt lệnh...")
+            self.set_leverage(symbol, leverage, side="ALL")
         except Exception as e:
             log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
 
-        # 3. GỌT SỐ THẬP PHÂN KHỐI LƯỢNG (Tránh lỗi size precision)
-        safe_qty = float(int(qty * 10000) / 10000)
+        # ---------------------------------------------------------
+        # 3. TỰ ĐỘNG LẤY SỐ DƯ VÀ TÍNH TOÁN THEO % QUẢN LÝ VỐN
+        # ---------------------------------------------------------
+        available_balance = self.get_balance()
+        current_price = self.get_latest_price(symbol)
+        
+        # --- CẤU HÌNH RỦI RO (RISK MANAGEMENT) ---
+        # Ví dụ: Dùng 10% số dư khả dụng để vào lệnh
+        risk_percent = 0.10  
+        
+        if current_price > 0 and available_balance > 0:
+            # Số vốn thực tế sẽ đánh cho lệnh này
+            capital = available_balance * risk_percent
+            
+            # Sàn BingX yêu cầu tối thiểu lệnh phải >= 2 USDT. (Bảo vệ user vốn quá nhỏ)
+            if capital < 2.5:
+                capital = 2.5
+                
+            # Đảm bảo không vượt quá số dư (nếu user có dưới 2.5$)
+            if capital > available_balance:
+                capital = available_balance
+
+            # Sức mua = Vốn * Đòn bẩy
+            calculated_qty = (capital * leverage) / current_price
+            
+            # Gọt số thập phân an toàn (tối đa 4 số)
+            safe_qty = float(int(calculated_qty * 10000) / 10000)
+            
+            log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital:.2f} USDT (Lev {leverage}x) -> Tự động tính Qty: {safe_qty}")
+        else:
+            # Fallback nếu lỗi API không lấy được giá hoặc số dư
+            safe_qty = float(int(qty * 10000) / 10000)
+            log.warning("Không lấy được số dư/giá, sử dụng qty mặc định từ AI: %s", safe_qty)
+        # ---------------------------------------------------------
+
+        position_side = "LONG" if side == "BUY" else "SHORT"
 
         # 4. THỰC THI ĐẶT LỆNH
         params = {
