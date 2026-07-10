@@ -229,7 +229,7 @@ class BingXExchange:
             return {"ok": False, "msg": "Lỗi API giá."}
 
         # Áp dụng Quant Model
-        risk_percent = 0.10 # Giá trị mặc định an toàn
+        risk_percent = 0.15 # Giá trị mặc định an toàn
         
         if QuantRiskManager:
             try:
@@ -249,7 +249,7 @@ class BingXExchange:
         # Tính vốn thực tế với chốt chặn an toàn
         capital = available_balance * risk_percent
         if capital < 2.5: 
-            capital = 2.5
+            capital = 5
         if capital > available_balance: 
             capital = available_balance
 
