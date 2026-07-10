@@ -9,6 +9,7 @@ from analyzer.engine import SignalEngine
 from analyzer.llm_agents import LLMChain, MultiAgentPipeline
 from analyzer.telegram_bot import TelegramBot
 from analyzer.config import Config
+from core_api.models import SessionLocal, TradeJournal
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 cfg = Config()
