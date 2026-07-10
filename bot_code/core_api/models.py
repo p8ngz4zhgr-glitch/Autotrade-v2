@@ -70,5 +70,24 @@ class SignalStats(Base):
     total_trades       = Column(Integer)
     updated_at         = Column(DateTime, default=datetime.utcnow)
 
+# ═══════════════════════════════════════════════════════════
+# MODELS CHO HMM WORKER (MARKET REGIME DETECTOR)
+# ═══════════════════════════════════════════════════════════
 
+class TrackedSymbol(Base):
+    __tablename__ = "tracked_symbols"
+    id                 = Column(Integer,  primary_key=True, index=True)
+    symbol             = Column(String,   unique=True, index=True)
+    is_active          = Column(Boolean,  default=True)
+
+class MarketRegime(Base):
+    __tablename__ = "market_regimes"
+    id                 = Column(Integer,  primary_key=True, index=True)
+    symbol             = Column(String,   unique=True, index=True)
+    current_regime     = Column(Integer)  
+    regime_name        = Column(String)      
+    confidence         = Column(Float)
+    updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# Tạo bảng
 Base.metadata.create_all(bind=engine)
