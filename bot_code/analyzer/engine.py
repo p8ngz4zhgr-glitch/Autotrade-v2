@@ -337,11 +337,13 @@ class SignalEngine:
             # Khởi tạo class QuantRiskManager nếu chưa có
             if not hasattr(self, 'quant'):
                 try:
-                    # Hãy đảm bảo đường dẫn import này khớp với file thực tế của bạn
-                    from analyzer.quant_math import QuantRiskManager 
+                    # Đã sửa đường dẫn import gọi thẳng từ thư mục gốc
+                    from quant_math import QuantRiskManager 
                     self.quant = QuantRiskManager()
-                except ImportError:
-                    pass
+                except ImportError as e:
+                    # Thêm log lỗi để bạn dễ dàng biết nếu gọi sai tên file
+                    log.error(f"Lỗi import QuantRiskManager: {e}") 
+
 
             if hasattr(self, 'quant'):
                 try:
