@@ -216,20 +216,16 @@ class BingXExchange:
         except Exception as e:
             log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
 
-        # 3. TÍNH TOÁN QUẢN LÝ VỐN 
+        # 3. TÍNH TOÁN QUẢN LÝ VỐN THEO QUANT
         available_balance = self.get_balance()
         current_price = self.get_latest_price(symbol)
         
-        if available_balance <= 0:
-            log.error(f"⛔ Ví Swap trống! Hủy lệnh {symbol}.")
-            return {"ok": False, "msg": "Ví Swap trống."}
-            
-        if current_price <= 0:
-            log.error(f"⛔ LỖI API giá cho {symbol}. Bot hủy lệnh.")
-            return {"ok": False, "msg": "Lỗi API giá."}
+        if available_balance <= 0 or current_price <= 0:
+            log.error(f"⛔ Lỗi số dư hoặc giá cho {symbol}.")
+            return {"ok": False, "msg": "Invalid balance or price"}
 
-        # Áp dụng Quant Model
-        risk_percent = 0.15 # Giá trị mặc định an toàn
+        # Mặc định rủi ro 10% (0.1) theo yêu cầu của bạn
+        risk_percent = 0.1 
         
         if QuantRiskManager:
             try:
@@ -237,26 +233,26 @@ class BingXExchange:
                 all_open_pos = self.get_open_positions() 
                 markowitz_multiplier = quant.get_markowitz_penalty(symbol, all_open_pos)
                 kelly_percent = quant.calculate_kelly_fraction(p_win, rr_ratio, fraction=0.5)
-                risk_percent = kelly_percent * markowitz_multiplier
+                # Kết hợp Kelly và Markowitz nhưng vẫn bị chặn bởi trần rủi ro 10%
+                risk_percent = min(0.1, kelly_percent * markowitz_multiplier)
                 log.info(f"🧠 [QUANT] Markowitz={markowitz_multiplier:.2f}, Kelly={kelly_percent:.3f} -> Risk={risk_percent:.3f}")
             except Exception as e:
-                log.warning(f"Lỗi module Quant, quay về mức Risk mặc định 10%. Lỗi: {e}")
+                log.warning(f"Lỗi module Quant, dùng Risk mặc định 10%. Lỗi: {e}")
         
-        if risk_percent <= 0:
-            log.warning(f"⛔ Mô hình Quant chặn lệnh {symbol} (Kèo EV âm hoặc Rủi ro danh mục quá cao).")
-            return {"ok": False, "msg": "Quant Risk Block"}
-            
-        # Tính vốn thực tế với chốt chặn an toàn
-        capital = available_balance * risk_percent
-        if capital < 2.5: 
-            capital = 5
-        if capital > available_balance: 
-            capital = available_balance
+        # Tính vốn sử dụng: Vốn khả dụng * % rủi ro
+        capital_to_use = available_balance * risk_percent
+        
+        # Đảm bảo lệnh tối thiểu của sàn (BingX Swap thường là 5 USD giá trị vị thế)
+        # Chúng ta dùng đòn bẩy để đảm bảo giá trị vị thế = capital * leverage >= 5
+        if (capital_to_use * leverage) < 5.0:
+            capital_to_use = 5.0 / leverage
+            log.info(f"⚠️ Vốn tính toán nhỏ hơn mức tối thiểu, điều chỉnh vốn về {capital_to_use:.2f} để đáp ứng lệnh sàn.")
 
-        calculated_qty = (capital * leverage) / current_price
+        # Tính khối lượng (Quantity)
+        calculated_qty = (capital_to_use * leverage) / current_price
         safe_qty = float(int(calculated_qty * 10000) / 10000)
         
-        log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital:.2f} USDT (Lev {leverage}x) -> Tự động tính Qty: {safe_qty}")
+        log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital_to_use:.2f} USDT (Lev {leverage}x) -> Qty: {safe_qty}")
 
         # 4. THỰC THI ĐẶT LỆNH
         position_side = "LONG" if side == "BUY" else "SHORT"
@@ -272,7 +268,7 @@ class BingXExchange:
         
         if res.get("code") == 0:
             order_id = res.get("data", {}).get("orderId")
-            log.info("✅ Placed Market Order %s OK: %s (Qty an toàn: %s)", order_id, side, safe_qty)
+            log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
             return {"ok": True, "order_id": order_id}
             
