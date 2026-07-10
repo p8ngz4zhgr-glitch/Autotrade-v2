@@ -43,6 +43,7 @@ class SignalBot:
     def __init__(self):
         self.log = logging.getLogger("SignalBot")
         self.dt  = dt_module
+        self.db  = SessionLocal()
 
         self.engine       = SignalEngine()
         self.llm          = LLMChain()
@@ -165,7 +166,7 @@ class SignalBot:
                         self._closed_notified.add(sym)
                     continue
 
-                data = self.engine.full_analysis(sym)
+                data = self.engine.full_analysis(sym, db=self.db)
                 data["ai_memory"] = get_memory_for_ai(sym)
 
                 final_sig = data.get("final", "WAIT")
