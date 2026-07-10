@@ -290,14 +290,18 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 "analysis": analysis
             }
 
-        # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI
+        # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI (ĐƯA LÊN ĐẦU ĐỂ PHỤC VỤ QUYẾT ĐỊNH ĐỘNG)
+        leverage = 5  # Sử dụng đòn bẩy mặc định của hệ thống
         in_profit = False
         pnl_pct = 0.0
+        
         if entry > 0:
             in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
-            pnl_pct = ((current_price - entry) / entry * 100 if direction == "LONG" else (entry - current_price) / entry * 100)
+            # Công thức tính toán ROE chuẩn hóa theo đòn bẩy 
+            pnl_pct = ((current_price - entry) / entry) * 100 * leverage if direction == "LONG" else ((entry - current_price) / entry) * 100 * leverage
 
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
+        is_trend_active = (new_direction == direction)  # Xu thế cũ vẫn tiếp diễn tăng/giảm
         
         # Bóc tách mốc TP1, TP2 từ AI
         plan = analysis.get("plan", {})
@@ -312,7 +316,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             except: pass
 
         # ══════════════════════════════════════════════════════════
-        # LOGIC GIAO DỊCH (Ưu tiên kiểm tra BIẾN ĐỘNG trước, GỒNG LÃI sau)
+        # LOGIC GIAO DỊCH (HỆ THỐNG QUẢN LÝ TRẠNG THÁI ƯU TIÊN ĐỘNG)
         # ══════════════════════════════════════════════════════════
         action = "KEEP"
         reason = "Xu hướng ủng hộ, tiếp tục giữ lệnh."
@@ -320,66 +324,63 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         emoji = "🛡️"
         action_type = ""
 
-        # ĐIỀU KIỆN 1: THỊ TRƯỜNG QUAY ĐẦU (NGẮT MẠCH NGAY LẬP TỨC)
-        if is_reversal and conf >= 60:
+        DYNAMIC_SL_LIMIT = -12.0  # Ngưỡng cắt lỗ sớm bảo vệ NAV
+        DYNAMIC_TP_LIMIT = 12.0   # Ngưỡng chốt lời sớm khi thị trường mất phương hướng
+
+        # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM)
+        # Bất kể xu hướng AI báo thế nào, nếu trạng thái âm chạm mốc -12% ROE, ngắt vị thế khẩn cấp không chờ SL gốc
+        if pnl_pct <= DYNAMIC_SL_LIMIT:
+            action = "CLOSE_ALL"
+            action_type = "CẮT LỖ SỚM"
+            emoji = "🚨"
+            reason = f"Trạng thái âm {pnl_pct:.2f}% chạm ngưỡng giới hạn sớm ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Hard Stop bảo toàn tài sản."
+
+        # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK)
+        # Xảy ra khi lệnh đang chạy (hoặc đang trong quá trình thả TP2) mà xu hướng quay đầu bất ngờ
+        elif is_reversal and conf >= 60:
             action = "CLOSE_ALL"
             should_reverse = True
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
             emoji = "🚨"
-            reason = f"Thị trường QUAY ĐẦU MẠNH sang {new_direction} -> Ngắt lệnh khẩn cấp, không đợi SL/TP cứng."
+            reason = f"Mắt thần phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Ngắt lệnh khẩn cấp, bảo vệ phần vị thế còn lại."
             
         elif is_reversal and conf >= 40:
             action = "CLOSE_ALL"
             action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
             emoji = "⚠️"
-            reason = "Xu hướng có dấu hiệu quay đầu -> Ngắt lệnh bảo toàn vốn."
-            
-        elif new_direction == "WAIT":
-            # 1. Tính toán % Lãi/Lỗ hiện tại (ROE) theo đòn bẩy
-            # Có thể dùng user.leverage thay vì fix cứng 5 nếu muốn linh hoạt
-            leverage = 5
-            
-            # Đã sửa: current_direction -> direction và entry_price -> entry
-            if direction == "LONG":
-                pnl_pct = ((current_price - entry) / entry) * 100 * leverage
+            reason = f"Dòng tiền phân kỳ nhẹ, xu hướng có dấu hiệu quay đầu sang {new_direction} -> Đóng lệnh chủ động."
+
+        # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT (CƠ CHẾ GỒNG LÃI PHÂN TẦNG)
+        # Nếu xu thế đồng nhất với hướng lệnh, BỎ QUA việc chốt lời sớm 12% để tối ưu hóa sóng chạy lên TP1 và thả TP2
+        elif is_trend_active:
+            if not is_scaled_out and tp1 > 0:
+                reached_tp1 = (direction == "LONG" and current_price >= tp1) or (direction == "SHORT" and current_price <= tp1)
+                if reached_tp1:
+                    action = "SCALE_OUT"
+                    action_type = "CHỐT LỜI TỪNG PHẦN"
+                    emoji = "🎯"
+                    reason = f"Xu thế {new_direction} tiếp diễn mạnh mẽ và đã chạm mốc mục tiêu TP1 (${tp1:.4f}) -> Khóa 50% lợi nhuận, dời SL về Entry và thả TP2."
             else:
-                pnl_pct = ((entry - current_price) / entry) * 100 * leverage
+                # Nếu đã chốt 1/2 hoặc chưa tới TP1 nhưng trend tốt, ép trạng thái tiếp tục gồng lệnh vĩ mô
+                action = "KEEP"
+                reason = f"Xu thế {new_direction} đang tiếp diễn thuận lợi (PnL hiện tại: {pnl_pct:+.2f}%). Tiếp tục thả vị thế theo kế hoạch ban đầu."
 
-            # 2. Cài đặt ngưỡng biến động 
-            THRESHOLD = 12.0 
-
-            # 3. Phân nhánh quyết định dựa trên độ lệch PnL
-            if pnl_pct >= THRESHOLD:
+        # [TẦNG ƯU TIÊN 4]: THỊ TRƯỜNG MẤT ĐỘNG LƯỢNG SÓNG (WAIT REGIME)
+        # Chỉ khi thị trường không rõ xu hướng (WAIT), các mốc chặn biên độ 12% mới được kích hoạt để tránh chôn vốn
+        elif new_direction == "WAIT":
+            if pnl_pct >= DYNAMIC_TP_LIMIT:
                 action = "CLOSE_ALL"
                 action_type = "CHỐT LỜI SỚM"
                 emoji = "✅"
-                reason = f"Thị trường mất xu hướng (WAIT). Đã lãi +{pnl_pct:.2f}% (Đạt ngưỡng) -> Bỏ tiền vào túi."
-                
-            elif pnl_pct <= -THRESHOLD:
-                action = "CLOSE_ALL"
-                action_type = "CẮT LỖ SỚM"
-                emoji = "🚨"
-                reason = f"Thị trường gãy sóng (WAIT). Đang âm {pnl_pct:.2f}% (Vượt ngưỡng) -> Cắt máu bảo vệ vốn."
-                
+                reason = f"Thị trường rơi vào vùng mất phương hướng (WAIT) nhưng vị thế đã đạt mức ROE kỳ vọng +{pnl_pct:.2f}% (>= {DYNAMIC_TP_LIMIT}%) -> Thu hoạch sớm."
             else:
-                action = "HOLD" 
-                # Đã sửa: symbol -> sym
-                log.info(f"Tín hiệu WAIT nhưng PnL ({pnl_pct:.2f}%) chưa chạm mốc {THRESHOLD}%. Tiếp tục HOLD lệnh {sym}.")
-
-        # ĐIỀU KIỆN 2: XU HƯỚNG VẪN TỐT & ĐẠT MỤC TIÊU TP1 (CƠ CHẾ GỒNG LÃI)
-        elif not is_scaled_out and tp1 > 0:
-            reached_tp1 = (direction == "LONG" and current_price >= tp1) or (direction == "SHORT" and current_price <= tp1)
-            
-            if reached_tp1:
-                action = "SCALE_OUT"
-                action_type = "CHỐT LỜI TỪNG PHẦN"
-                emoji = "🎯"
-                reason = "Đã chạm TP1, xu hướng vẫn tốt -> Chốt lời 1/2, dời SL về Entry, thả TP2."
+                action = "HOLD"
+                log.info(f"Tín hiệu {sym} báo WAIT nhưng ROE chưa đạt ngưỡng chốt sớm ({pnl_pct:.2f}% / {DYNAMIC_TP_LIMIT}%). Tiếp tục neo lệnh giám sát.")
 
         # ══════════════════════════════════════════════════════════
-        # THỰC THI GIAO DỊCH
+        # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
         # ══════════════════════════════════════════════════════════
-        if action != "KEEP" and action != "HOLD": # Bỏ qua nếu lệnh được gán HOLD ở trên
+        if action != "KEEP" and action != "HOLD":
             bx = get_bx(user)
             
             # --- CƠ CHẾ GỒNG: CHỐT 1/2 & DỜI SL ---
