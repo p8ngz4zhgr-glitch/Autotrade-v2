@@ -321,22 +321,77 @@ class SignalEngine:
         vol_1h = results.get("1h", {}).get("volume", {})
         vol_4h = results.get("4h", {}).get("volume", {})
 
+        # ══════════════════════════════════════════════════════════
+        # 1. KHỞI TẠO VÀ CHẠY KALMAN FILTER (Lọc nhiễu tìm True Price)
+        # ══════════════════════════════════════════════════════════
+        kalman_trend = "NEUTRAL"
+        kalman_price = price
+        kalman_data = {"detected": False}
+        
+        # Thử lấy mảng nến đóng cửa (closes) từ TF 1H. Fetcher thường lưu dưới dạng 'closes' hoặc 'close'
+        closes_1h = results.get("1h", {}).get("closes", [])
+        if not closes_1h:
+            closes_1h = results.get("1h", {}).get("close", [])
+
+        if closes_1h and len(closes_1h) > 2:
+            # Khởi tạo class QuantRiskManager nếu chưa có
+            if not hasattr(self, 'quant'):
+                try:
+                    # Hãy đảm bảo đường dẫn import này khớp với file thực tế của bạn
+                    from analyzer.quant_math import QuantRiskManager 
+                    self.quant = QuantRiskManager()
+                except ImportError:
+                    pass
+
+            if hasattr(self, 'quant'):
+                try:
+                    # Chạy Kalman với R=0.05 để khử râu nến chuyên dụng cho Crypto
+                    k_filter = self.quant.calculate_kalman_filter(closes_1h, r=0.05)
+                    kalman_price = k_filter[-1]
+                    prev_kalman = k_filter[-2]
+
+                    if kalman_price > prev_kalman and price > kalman_price:
+                        kalman_trend = "BULLISH"
+                    elif kalman_price < prev_kalman and price < kalman_price:
+                        kalman_trend = "BEARISH"
+
+                    kalman_data = {
+                        "detected": True,
+                        "price": round(kalman_price, 4),
+                        "trend": kalman_trend
+                    }
+                    log.info("  [Kalman] True Price: %.4f | Trend: %s", kalman_price, kalman_trend)
+                except Exception as e:
+                    log.warning("  ⚠️ Kalman Filter lỗi: %s", e)
+
+        # ══════════════════════════════════════════════════════════
+        # TÍNH ĐIỂM SMART SCORE
+        # ══════════════════════════════════════════════════════════
         smart = 0
         cvd_tr = cvd_1h.get("trend", "NEUTRAL")
         if cvd_tr == "BULLISH":       smart += 20
         elif cvd_tr == "BULLISH_DIV": smart += 15
         elif cvd_tr == "BEARISH":     smart -= 20
         elif cvd_tr == "BEARISH_DIV": smart -= 15
+        
         if wy_4h.get("bias") == "BULLISH":   smart += 10
         elif wy_4h.get("bias") == "BEARISH": smart -= 10
+        
         if fi_1h.get("trend") == "UPTREND":     smart += 8
         elif fi_1h.get("trend") == "DOWNTREND": smart -= 8
+        
         if wh_1h.get("detected"):
             smart += 25 if wh_1h["type"] == "WHALE_BUY" else -25
+            
         vol_smart = (vol_1h.get("score_adj", 0) + vol_4h.get("score_adj", 0)) * 0.5
         smart += vol_smart
+        
         if vol_1h.get("buy_confirm")  and vol_4h.get("buy_confirm"):  smart += 15
         if vol_1h.get("sell_confirm") and vol_4h.get("sell_confirm"): smart -= 15
+
+        # 2. TÍCH HỢP KALMAN VÀO SMART SCORE
+        if kalman_trend == "BULLISH": smart += 15
+        elif kalman_trend == "BEARISH": smart -= 15
 
         combined = avg_score * 0.6 + (50 + smart) * 0.4
         combined = max(0, min(100, combined))
@@ -414,12 +469,10 @@ class SignalEngine:
                     sweep_type = "NONE"
                     sweep_p = 0.0
                     
-                    # Bullish Liquidity Sweep (Spring): Giá quét dưới Swing Low cũ nhưng đóng cửa trên Swing Low cũ
                     if swing_low > 0 and low_price < swing_low and close_price > swing_low:
                         detected_sweep = True
                         sweep_type = "BULLISH_SWEEP"
                         sweep_p = low_price
-                    # Bearish Liquidity Sweep (UTAD): Giá quét trên Swing High cũ nhưng đóng cửa dưới Swing High cũ
                     elif swing_high > 0 and high_price > swing_high and close_price < swing_high:
                         detected_sweep = True
                         sweep_type = "BEARISH_SWEEP"
@@ -452,8 +505,20 @@ class SignalEngine:
 
         fibo4h_trend = results.get("4h", {}).get("fibo", {}).get("trend", "")
 
+        # ══════════════════════════════════════════════════════════
+        # 3. TỐI ƯU STOPLOSS BẰNG KALMAN (Bảo vệ lệnh khỏi Whipsaw)
+        # ══════════════════════════════════════════════════════════
         if final == "LONG":
             sl = round(price * (1 - sl_atr_pct / 100), 2)
+            
+            # Kalman: Nếu giá thực tế đang nằm trên đường Kalman, giấu Stop Loss dưới đường Kalman
+            if kalman_data["detected"] and kalman_price < price:
+                k_sl = kalman_price * 0.995 # Lùi thêm 0.5% dưới đường hỗ trợ Kalman
+                # Đảm bảo mức SL mới này không vượt quá xa giới hạn an toàn ban đầu (Max 1.5x ATR)
+                if k_sl < price and ((price - k_sl) / price * 100) <= sl_atr_pct * 1.5:
+                    sl = round(k_sl, 2)
+                    log.info("  🛡️ Tối ưu SL LONG giấu dưới đường Kalman: %.4f", sl)
+
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
@@ -472,6 +537,14 @@ class SignalEngine:
 
         elif final == "SHORT":
             sl  = round(price * (1 + sl_atr_pct / 100), 2)
+            
+            # Kalman: Nếu giá thực tế nằm dưới đường Kalman, giấu Stop Loss phía trên đường Kalman
+            if kalman_data["detected"] and kalman_price > price:
+                k_sl = kalman_price * 1.005 
+                if k_sl > price and ((k_sl - price) / price * 100) <= sl_atr_pct * 1.5:
+                    sl = round(k_sl, 2)
+                    log.info("  🛡️ Tối ưu SL SHORT giấu trên đường Kalman: %.4f", sl)
+
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
@@ -567,6 +640,10 @@ class SignalEngine:
             
             if candle_summary["confirm_long"]: likelihood *= 1.2
             
+            # 4. TÍCH HỢP KALMAN VÀO XÁC SUẤT BAYES (LONG)
+            if kalman_trend == "BULLISH": likelihood *= 1.3
+            elif kalman_trend == "BEARISH": likelihood *= 0.7
+            
         elif final == "SHORT":
             if cvd_tr == "BEARISH": likelihood *= 1.3
             elif cvd_tr == "BEARISH_DIV": likelihood *= 1.5
@@ -586,6 +663,10 @@ class SignalEngine:
             if sweep_data.get("detected") and sweep_data.get("type") == "BEARISH_SWEEP": likelihood *= 1.3
             
             if candle_summary["confirm_short"]: likelihood *= 1.2
+
+            # 4. TÍCH HỢP KALMAN VÀO XÁC SUẤT BAYES (SHORT)
+            if kalman_trend == "BEARISH": likelihood *= 1.3
+            elif kalman_trend == "BULLISH": likelihood *= 0.7
 
         if final in ("LONG", "SHORT"):
             bayes_odds = base_odds * likelihood
@@ -612,6 +693,7 @@ class SignalEngine:
             "ev_ratio": round(ev_ratio, 2),
             "likelihood": round(likelihood, 2)
         }
+        
         return {
             "symbol": symbol, "asset_type": atype,
             "price": price, "final": final, "confidence": conf,
@@ -631,6 +713,8 @@ class SignalEngine:
             "tf_count": tf_count,
             "orderbook": ob_data,
             "liquidity_sweep": sweep_data,
+            "kalman": kalman_data, # Dữ liệu Kalman trả về để hiển thị
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
+
