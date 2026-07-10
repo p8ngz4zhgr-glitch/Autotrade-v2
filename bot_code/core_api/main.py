@@ -279,7 +279,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         else:
             from analyzer.engine import SignalEngine
             engine = SignalEngine()
-            analysis = engine.full_analysis(sym)
+            analysis = engine.full_analysis(sym, db=db)
             new_direction = analysis.get("final", "WAIT")
             conf = analysis.get("confidence", 0)
             
