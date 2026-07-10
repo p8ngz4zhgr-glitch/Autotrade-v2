@@ -239,7 +239,7 @@ class BingXExchange:
             except Exception as e:
                 log.warning(f"Lỗi module Quant, dùng Risk mặc định 10%. Lỗi: {e}")
         
-        # Tính vốn sử dụng: Vốn khả dụng * % rủi ro
+                # Tính vốn sử dụng: Vốn khả dụng * % rủi ro
         capital_to_use = available_balance * risk_percent
         
         # Đảm bảo lệnh tối thiểu của sàn (BingX Swap thường là 5 USD giá trị vị thế)
@@ -251,6 +251,29 @@ class BingXExchange:
         # Tính khối lượng (Quantity)
         calculated_qty = (capital_to_use * leverage) / current_price
         safe_qty = float(int(calculated_qty * 10000) / 10000)
+
+        # ═══════════════ PHẦN SỬA LỖI MIN QTY CỦA SÀN BINGX ═══════════════
+        # 1. Khai báo bảng cấu hình số lượng tối thiểu cho các coin chính trên BingX
+        MIN_QTY_MAP = {
+            "BTC": 0.001,
+            "ETH": 0.01,
+            "BNB": 0.1,
+            "SOL": 0.1,
+            "XRP": 10.0,
+            "DOGE": 100.0
+        }
+        
+        # 2. Tách lấy tên coin gốc (Ví dụ: 'ETHUSDT' hoặc 'ETH-USDT' -> 'ETH')
+        base_asset = symbol.replace("USDT", "").replace("-", "").upper()
+        min_qty = MIN_QTY_MAP.get(base_asset, 0.0001) # Mặc định 0.0001 cho altcoin khác
+        
+        # 3. Nếu số lượng tính toán nhỏ hơn quy định của sàn, tự động ép lên mức tối thiểu
+        if safe_qty < min_qty:
+            safe_qty = min_qty
+            # Tính toán lại số vốn thực tế sẽ tiêu tốn sau khi tăng Qty để Log in ra chính xác
+            capital_to_use = (safe_qty * current_price) / leverage
+            log.info(f"⚠️ Qty tính toán nhỏ hơn quy định của sàn đối với {base_asset}. Tự động nâng Qty lên {min_qty}")
+        # ═══════════════════════════════════════════════════════════════════
         
         log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital_to_use:.2f} USDT (Lev {leverage}x) -> Qty: {safe_qty}")
 
