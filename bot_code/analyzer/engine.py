@@ -271,7 +271,7 @@ class SignalEngine:
             try:
                 # Import bên trong hàm để tránh lỗi Circular Import
                 from sqlalchemy.dialects.postgresql import insert
-                from models import TrackedSymbol, MarketRegime 
+                from core_api.models import TrackedSymbol, MarketRegime 
 
                 # A. Tự động đăng ký mã coin cho HMM Worker quét
                 stmt = insert(TrackedSymbol).values(symbol=symbol, is_active=True)
