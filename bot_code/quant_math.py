@@ -20,6 +20,47 @@ class QuantRiskManager:
                 return asset_class
         return "UNKNOWN"
 
+    def calculate_kalman_filter(self, closes: list, q: float = 1e-5, r: float = 0.01) -> list:
+        """
+        Bộ lọc Kalman 1 chiều: Khử nhiễu giá (Whipsaw) để tìm Giá Trị Thực (True Price).
+        Hỗ trợ loại bỏ các râu nến ảo, giúp các mốc Fibonacci hoặc các pha test cung cầu
+        (Spring/Upthrust trong Wyckoff) được xác định chính xác hơn.
+        
+        Tham số:
+        - q (Process Noise): Độ nhiễu hệ thống. Mặc định 1e-5 giả định giá thay đổi mượt mà.
+        - r (Measurement Noise): Độ nhiễu đo lường. Tăng r nếu coin giật râu quá mạnh (Crypto thường dùng 0.01 - 0.05).
+        """
+        if not closes:
+            return []
+
+        kalman_filter = []
+        error_cov = []
+
+        # Khởi tạo trạng thái ban đầu (Lấy giá đóng cửa nến đầu tiên)
+        kalman_filter.append(closes[0])
+        error_cov.append(1.0)
+
+        for t in range(1, len(closes)):
+            # 1. BƯỚC DỰ BÁO (Prediction Step)
+            # Dự báo giá tiếp theo sẽ giữ nguyên như giá trước đó (vì là random walk)
+            pred_estimate = kalman_filter[t-1]
+            pred_error_cov = error_cov[t-1] + q
+
+            # 2. BƯỚC CẬP NHẬT (Update Step)
+            # Tính Hệ số Kalman (Kalman Gain): Quyết định nên tin vào dự báo hay tin vào giá thị trường hiện tại
+            kalman_gain = pred_error_cov / (pred_error_cov + r)
+            
+            # Tính toán lại Giá trị thực (True Price)
+            current_estimate = pred_estimate + kalman_gain * (closes[t] - pred_estimate)
+            
+            # Cập nhật phương sai sai số cho vòng lặp tiếp theo
+            current_error_cov = (1 - kalman_gain) * pred_error_cov
+
+            kalman_filter.append(current_estimate)
+            error_cov.append(current_error_cov)
+
+        return kalman_filter
+
     def calculate_ewma_volatility(self, closes: list, lambda_: float = 0.94) -> float:
         """
         GARCH-Lite (EWMA): Tính toán phương sai/độ lệch chuẩn động.
