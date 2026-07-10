@@ -256,10 +256,38 @@ class SignalEngine:
             "high": highs, "low": lows, "close": closes
         }
 
-    def full_analysis(self, symbol):
+    def full_analysis(self, symbol, db=None):
         fetcher, atype = self._fetcher(symbol)
         log.info("📊 Phân tích %s [%s]...", symbol, atype)
         results = {}
+
+        # ══════════════════════════════════════════════════════════
+        # [NEW] A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM TỪ DATABASE
+        # ══════════════════════════════════════════════════════════
+        hmm_regime = "UNKNOWN"
+        hmm_conf = 0.0
+        
+        if db is not None:
+            try:
+                # Import bên trong hàm để tránh lỗi Circular Import
+                from sqlalchemy.dialects.postgresql import insert
+                from models import TrackedSymbol, MarketRegime 
+
+                # A. Tự động đăng ký mã coin cho HMM Worker quét
+                stmt = insert(TrackedSymbol).values(symbol=symbol, is_active=True)
+                stmt = stmt.on_conflict_do_nothing(index_elements=['symbol'])
+                db.execute(stmt)
+                db.commit()
+
+                # B. Đọc bối cảnh thị trường HMM mới nhất
+                regime_data = db.query(MarketRegime).filter(MarketRegime.symbol == symbol).first()
+                if regime_data:
+                    hmm_regime = regime_data.regime_name
+                    hmm_conf = regime_data.confidence
+                    log.info("  🧠 [HMM Context] %s: %s (Conf: %.1f%%)", symbol, hmm_regime, hmm_conf)
+            except Exception as e:
+                db.rollback()
+                log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
 
         # Chạy song song 4 TF
         def _fetch_tf(tf):
@@ -328,26 +356,20 @@ class SignalEngine:
         kalman_price = price
         kalman_data = {"detected": False}
         
-        # Thử lấy mảng nến đóng cửa (closes) từ TF 1H. Fetcher thường lưu dưới dạng 'closes' hoặc 'close'
         closes_1h = results.get("1h", {}).get("closes", [])
         if not closes_1h:
             closes_1h = results.get("1h", {}).get("close", [])
 
         if closes_1h and len(closes_1h) > 2:
-            # Khởi tạo class QuantRiskManager nếu chưa có
             if not hasattr(self, 'quant'):
                 try:
-                    # Đã sửa đường dẫn import gọi thẳng từ thư mục gốc
                     from quant_math import QuantRiskManager 
                     self.quant = QuantRiskManager()
                 except ImportError as e:
-                    # Thêm log lỗi để bạn dễ dàng biết nếu gọi sai tên file
                     log.error(f"Lỗi import QuantRiskManager: {e}") 
-
 
             if hasattr(self, 'quant'):
                 try:
-                    # Chạy Kalman với R=0.05 để khử râu nến chuyên dụng cho Crypto
                     k_filter = self.quant.calculate_kalman_filter(closes_1h, r=0.05)
                     kalman_price = k_filter[-1]
                     prev_kalman = k_filter[-2]
@@ -436,7 +458,6 @@ class SignalEngine:
 
         if atype == "CRYPTO":
             try:
-                # Lấy dữ liệu Sổ lệnh L2
                 ob_raw = fetcher.order_book(symbol, depth=30)
                 if ob_raw.get("ok"):
                     best_bid_wall = ob_raw["bid_walls"][0] if ob_raw.get("bid_walls") else {"price": 0, "usd": 0}
@@ -453,10 +474,8 @@ class SignalEngine:
                         "resist_wall_usd": best_ask_wall["usd"],
                     }
                 
-                # Lấy dữ liệu thanh lý
                 liq_raw = fetcher.liquidation_levels(symbol, price)
                 
-                # Phân tích Bẫy Thanh Khoản (Liquidity Sweep)
                 tf_to_check = results.get("1h") or results.get("15m")
                 if tf_to_check:
                     mstruct = tf_to_check.get("market_structure", {})
@@ -499,7 +518,6 @@ class SignalEngine:
         tp2_pct    = sl_atr_pct * 3.5
         fibo4l     = results.get("4h", {}).get("fibo", {}).get("levels", {})
 
-        # ATR-based defaults
         atr_tp1 = round(price * (1 + tp1_pct / 100), 2)
         atr_tp2 = round(price * (1 + tp2_pct / 100), 2)
         atr_tp1_s = round(price * (1 - tp1_pct / 100), 2)
@@ -512,22 +530,16 @@ class SignalEngine:
         # ══════════════════════════════════════════════════════════
         if final == "LONG":
             sl = round(price * (1 - sl_atr_pct / 100), 2)
-            
-            # Kalman: Nếu giá thực tế đang nằm trên đường Kalman, giấu Stop Loss dưới đường Kalman
             if kalman_data["detected"] and kalman_price < price:
-                k_sl = kalman_price * 0.995 # Lùi thêm 0.5% dưới đường hỗ trợ Kalman
-                # Đảm bảo mức SL mới này không vượt quá xa giới hạn an toàn ban đầu (Max 1.5x ATR)
+                k_sl = kalman_price * 0.995
                 if k_sl < price and ((price - k_sl) / price * 100) <= sl_atr_pct * 1.5:
                     sl = round(k_sl, 2)
-                    log.info("  🛡️ Tối ưu SL LONG giấu dưới đường Kalman: %.4f", sl)
+                    log.info("  🛡️ Tối ưu SL LONG giấu dưới Kalman: %.4f", sl)
 
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
-                if (f272 and f618 and
-                        f272 > price * 1.005 and
-                        f618 > price * 1.005 and
-                        f618 > f272):
+                if (f272 and f618 and f272 > price * 1.005 and f618 > price * 1.005 and f618 > f272):
                     tp1 = round(f272, 2)
                     tp2 = round(f618, 2)
                 else:
@@ -539,21 +551,16 @@ class SignalEngine:
 
         elif final == "SHORT":
             sl  = round(price * (1 + sl_atr_pct / 100), 2)
-            
-            # Kalman: Nếu giá thực tế nằm dưới đường Kalman, giấu Stop Loss phía trên đường Kalman
             if kalman_data["detected"] and kalman_price > price:
                 k_sl = kalman_price * 1.005 
                 if k_sl > price and ((k_sl - price) / price * 100) <= sl_atr_pct * 1.5:
                     sl = round(k_sl, 2)
-                    log.info("  🛡️ Tối ưu SL SHORT giấu trên đường Kalman: %.4f", sl)
+                    log.info("  🛡️ Tối ưu SL SHORT giấu trên Kalman: %.4f", sl)
 
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
-                if (f272 and f618 and
-                        f272 < price * 0.995 and
-                        f618 < price * 0.995 and
-                        f618 < f272):
+                if (f272 and f618 and f272 < price * 0.995 and f618 < price * 0.995 and f618 < f272):
                     tp1 = round(f272, 2)
                     tp2 = round(f618, 2)
                 else:
@@ -563,31 +570,24 @@ class SignalEngine:
                 tp1 = atr_tp1_s
                 tp2 = atr_tp2_s
 
-        else:  # WAIT
+        else:
             sl  = round(price * (1 - sl_atr_pct / 100), 2)
             tp1 = atr_tp1
             tp2 = atr_tp2
 
-        # Đảm bảo thứ tự TP luôn đúng
         if final == "LONG":
             if tp2 <= tp1:
-                log.warning("⚠️ TP2(%.4f) <= TP1(%.4f) cho LONG %s — dùng ATR", tp2, tp1, symbol)
                 tp1 = atr_tp1
                 tp2 = atr_tp2
-            if tp1 <= price:
-                tp1 = atr_tp1
-            if tp2 <= tp1:
-                tp2 = round(tp1 * 1.015, 2)
+            if tp1 <= price: tp1 = atr_tp1
+            if tp2 <= tp1: tp2 = round(tp1 * 1.015, 2)
 
         elif final == "SHORT":
             if tp2 >= tp1:
-                log.warning("⚠️ TP2(%.4f) >= TP1(%.4f) cho SHORT %s — dùng ATR", tp2, tp1, symbol)
                 tp1 = atr_tp1_s
                 tp2 = atr_tp2_s
-            if tp1 >= price:
-                tp1 = atr_tp1_s
-            if tp2 >= tp1:
-                tp2 = round(tp1 * 0.985, 2)
+            if tp1 >= price: tp1 = atr_tp1_s
+            if tp2 >= tp1: tp2 = round(tp1 * 0.985, 2)
 
         rr_ratio = round(tp1_pct / sl_atr_pct, 2) if sl_atr_pct > 0 else 2.0
 
@@ -596,10 +596,8 @@ class SignalEngine:
         ms_1h     = results.get("1h", {}).get("market_structure", {})
         ms_4h     = results.get("4h", {}).get("market_structure", {})
 
-        all_bull_patterns = (candle_1h.get("bull_patterns", []) +
-                             candle_4h.get("bull_patterns", []))
-        all_bear_patterns = (candle_1h.get("bear_patterns", []) +
-                             candle_4h.get("bear_patterns", []))
+        all_bull_patterns = candle_1h.get("bull_patterns", []) + candle_4h.get("bull_patterns", [])
+        all_bear_patterns = candle_1h.get("bear_patterns", []) + candle_4h.get("bear_patterns", [])
 
         candle_summary = {
             "bias":           candle_4h.get("bias", candle_1h.get("bias", "NEUTRAL")),
@@ -616,8 +614,10 @@ class SignalEngine:
             conf = round(min(95, conf * 1.05), 1)
 
 
+        # ══════════════════════════════════════════════════════════
         # ─── XÁC SUẤT (BAYES) & KỲ VỌNG TOÁN HỌC (EV) ───
-        base_odds = 0.818 # Base win rate ~ 45%
+        # ══════════════════════════════════════════════════════════
+        base_odds = 0.818 
         likelihood = 1.0
         p_win = 0.45
         ev_ratio = 0.0
@@ -642,9 +642,13 @@ class SignalEngine:
             
             if candle_summary["confirm_long"]: likelihood *= 1.2
             
-            # 4. TÍCH HỢP KALMAN VÀO XÁC SUẤT BAYES (LONG)
+            # 4. TÍCH HỢP KALMAN
             if kalman_trend == "BULLISH": likelihood *= 1.3
             elif kalman_trend == "BEARISH": likelihood *= 0.7
+
+            # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
+            if hmm_regime == "UPTREND": likelihood *= 1.4
+            elif hmm_regime == "DOWNTREND": likelihood *= 0.5
             
         elif final == "SHORT":
             if cvd_tr == "BEARISH": likelihood *= 1.3
@@ -666,9 +670,13 @@ class SignalEngine:
             
             if candle_summary["confirm_short"]: likelihood *= 1.2
 
-            # 4. TÍCH HỢP KALMAN VÀO XÁC SUẤT BAYES (SHORT)
+            # 4. TÍCH HỢP KALMAN
             if kalman_trend == "BEARISH": likelihood *= 1.3
             elif kalman_trend == "BULLISH": likelihood *= 0.7
+
+            # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
+            if hmm_regime == "DOWNTREND": likelihood *= 1.4
+            elif hmm_regime == "UPTREND": likelihood *= 0.5
 
         if final in ("LONG", "SHORT"):
             bayes_odds = base_odds * likelihood
@@ -715,8 +723,10 @@ class SignalEngine:
             "tf_count": tf_count,
             "orderbook": ob_data,
             "liquidity_sweep": sweep_data,
-            "kalman": kalman_data, # Dữ liệu Kalman trả về để hiển thị
+            "kalman": kalman_data,
+            "hmm": {"regime": hmm_regime, "confidence": hmm_conf}, # Trả về dữ liệu HMM để hiển thị trên Telegram nếu cần
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
+
 
