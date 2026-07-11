@@ -510,12 +510,25 @@ class SignalEngine:
             except Exception as e:
                 log.warning("⚠️ Lỗi phân tích L2 Orderbook/Liquidity cho %s: %s", symbol, e)
 
-        # ATR-based SL/TP
+       # ══════════════════════════════════════════════════════════
+        # 2.5. ATR-BASED SL/TP (TỐI ƯU HÓA CHỐNG QUÉT RÂU - WHIPSAW)
+        # ══════════════════════════════════════════════════════════
         atr_1h     = results.get("1h", {}).get("atr", price * 0.01)
         atr_pct_1h = results.get("1h", {}).get("atr_pct", 1.0)
-        sl_atr_pct = max(0.8, min(2.5, atr_pct_1h * 1.5))
-        tp1_pct    = sl_atr_pct * 2.0
-        tp2_pct    = sl_atr_pct * 3.5
+        
+        # A. Hệ số nhân động dựa trên HMM Regime
+        atr_multiplier = 2.0  # Mức chuẩn cho Crypto (Trend Following)
+        if hmm_regime == "SIDEWAYS":
+            atr_multiplier = 2.5  # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu
+            
+        # B. Tính % SL với trần (cap) được nâng lên 4.5% để chịu nhiệt Altcoin
+        # Sàn dưới nâng lên 1.0% để tránh đặt SL quá sát khi thị trường đột ngột im ắng
+        sl_atr_pct = max(1.0, min(4.5, atr_pct_1h * atr_multiplier))
+        
+        # C. Tỷ lệ R:R động
+        tp1_pct    = sl_atr_pct * 1.5  # Tối thiểu R:R 1:1.5 cho TP1
+        tp2_pct    = sl_atr_pct * 3.0  # R:R 1:3 cho TP2
+        
         fibo4l     = results.get("4h", {}).get("fibo", {}).get("levels", {})
 
         atr_tp1 = round(price * (1 + tp1_pct / 100), 2)
