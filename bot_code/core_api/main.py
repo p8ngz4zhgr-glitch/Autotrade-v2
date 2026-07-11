@@ -356,10 +356,19 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         tp1 = float(plan.get("tp1", 0))
         tp2 = float(plan.get("tp2", 0))
 
-        # Bóc tách mốc TP1, TP2 từ AI
-        plan = analysis.get("plan", {})
-        tp1 = float(plan.get("tp1", 0))
-        tp2 = float(plan.get("tp2", 0))
+        # ══════════════════════════════════════════════════════════
+        # [BẢN VÁ LỖI TOÁN HỌC]: CHẶN TP ẢO DO AI ĐẢO VIEW
+        # ══════════════════════════════════════════════════════════
+        # Nếu TP do AI quét ra không hợp lý với hướng của vị thế đang giữ -> Vô hiệu hóa
+        if direction == "LONG" and tp1 <= entry:
+            tp1 = 0  
+        elif direction == "SHORT" and tp1 >= entry:
+            tp1 = 0  
+
+        if direction == "LONG" and tp2 <= entry:
+            tp2 = 0
+        elif direction == "SHORT" and tp2 >= entry:
+            tp2 = 0
         
         # Kiểm tra cờ Scale Out (Đã chốt 1/2 chưa?)
         partial_key = f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}"
@@ -378,7 +387,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         action_type = ""
 
         DYNAMIC_SL_LIMIT = -12.0  # Ngưỡng cắt lỗ sớm bảo vệ NAV
-        DYNAMIC_TP_LIMIT = 6.0   # Ngưỡng chốt lời sớm khi thị trường mất phương hướng
+        DYNAMIC_TP_LIMIT = 6.0    # Ngưỡng chốt lời sớm khi thị trường mất phương hướng
 
         # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM)
         if pnl_pct <= DYNAMIC_SL_LIMIT:
