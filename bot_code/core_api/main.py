@@ -289,24 +289,6 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 "conf": conf,
                 "analysis": analysis
             }
-        # ══════════════════════════════════════════════════════════
-        from worker.bingx_trader import BingXExchange
-        bx = BingXExchange(api_key=user.api_key, api_secret=user.api_secret)
-        
-        # Hàm này sẽ xử lý dời SL về Entry và lọc nhiễu cho bạn
-        status = bx.manage_position_dynamic(sym, analysis, leverage=leverage)
-        
-        if status["action"] == "BREAKEVEN":
-            _tg_send(REGISTER_TOKEN, user.telegram_id, f"🛡️ <b>RISK-FREE:</b> {sym} đã dời SL về Entry!")
-            # Sau khi dời SL xong, nếu action là BREAKEVEN thì vẫn tiếp tục cho logic cũ chạy
-        
-        # Nếu bộ lọc nhiễu quyết định đóng lệnh sớm do biến động nhiễu
-        if status["action"] == "CLOSE":
-            # Gán lại action và reason để đoạn code phía dưới tự thực thi
-            action = "CLOSE_ALL"
-            action_type = status.get("type", "CẮT LỖ SỚM")
-            reason = f"Hệ thống lọc nhiễu kích hoạt: {status.get('roe', 0):.2f}% ROE"
-            emoji = "📉"
             
         # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI (ĐƯA LÊN ĐẦU ĐỂ PHỤC VỤ QUYẾT ĐỊNH ĐỘNG)
         leverage = 5  # Sử dụng đòn bẩy mặc định của hệ thống
