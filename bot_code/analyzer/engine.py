@@ -78,7 +78,7 @@ class SignalEngine:
             trs = [max(highs[i] - lows[i],
                        abs(highs[i] - closes[i-1]),
                        abs(lows[i]  - closes[i-1]))
-                   for i in range(1, min(15, len(closes)))]
+                   for i in range(len(closes) - 14, len(closes))]
             atr = sum(trs) / len(trs) if trs else price * 0.01
         else:
             atr = price * 0.01
