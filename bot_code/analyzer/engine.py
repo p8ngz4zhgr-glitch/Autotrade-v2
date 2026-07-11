@@ -511,6 +511,36 @@ class SignalEngine:
             except Exception as e:
                 log.warning("⚠️ Lỗi phân tích L2 Orderbook/Liquidity cho %s: %s", symbol, e)
 
+        # ══════════════════════════════════════════════════════════
+        # [SMC] BỘ LỌC & KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP
+        # ══════════════════════════════════════════════════════════
+        if sweep_data.get("detected"):
+            sw_type = sweep_data.get("type")
+            sw_price = sweep_data.get("price")
+            
+            if sw_type == "BULLISH_SWEEP":
+                # 1. Chặn lệnh Short ném tiền qua cửa sổ
+                if final == "SHORT":
+                    log.warning(f"⛔ FILTER: Cá mập quét đáy lấy thanh khoản (Bullish Sweep @ {sw_price}) -> HỦY LỆNH SHORT")
+                    final = "WAIT"
+                    
+                # 2. Bắt đáy: Nếu hệ thống đang phân vân (WAIT) nhưng có setup quét đáy -> Kích hoạt LONG
+                elif final in ("LONG", "WAIT") and combined >= 45: # Nới lỏng điều kiện combined một chút để bắt râu
+                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đáy cũ (Bullish Sweep @ {sw_price}) -> VÀO LỆNH LONG")
+                    final = "LONG"
+                    conf = round(min(95, conf + 15.0), 1) # Ép confidence lên cao để vượt qua các bộ lọc dưới
+                    
+            elif sw_type == "BEARISH_SWEEP":
+                # 1. Chặn lệnh Long đu đỉnh
+                if final == "LONG":
+                    log.warning(f"⛔ FILTER: Cá mập quét đỉnh xả hàng (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
+                    final = "WAIT"
+                    
+                # 2. Bắt đỉnh: Chờ quét đỉnh xong quay đầu -> Kích hoạt SHORT
+                elif final in ("SHORT", "WAIT") and combined <= 55: 
+                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đỉnh cũ (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
+                    final = "SHORT"
+                    conf = round(min(95, conf + 15.0), 1)
        # ══════════════════════════════════════════════════════════
         # 2.5. ATR-BASED SL/TP (TỐI ƯU HÓA CHỐNG QUÉT RÂU - WHIPSAW)
         # ══════════════════════════════════════════════════════════
