@@ -441,6 +441,16 @@ class SignalEngine:
             if   long_ok  or combined >= 68: final = "LONG";  conf = round(min(95, combined), 1)
             elif short_ok or combined <= 32: final = "SHORT"; conf = round(min(95, 100-combined), 1)
             else:                             final = "WAIT";  conf = round(min(95, max(30, combined)), 1)
+            # CHỐT CHẶN: Nếu có tín hiệu quét thanh khoản ngược hướng, Hủy lệnh
+            if sweep_data.get("detected"):
+               if final == "LONG" and sweep_data["type"] == "BEARISH_SWEEP":
+                  log.warning("⛔ FILTER: Quét đỉnh BEARISH detected -> BLOCK LONG")
+                  final = "WAIT"
+               elif final == "SHORT" and sweep_data["type"] == "BULLISH_SWEEP":
+                  log.warning("⛔ FILTER: Quét đáy BULLISH detected -> BLOCK SHORT")
+                  final = "WAIT"
+
+                
             if cvd_tr in ("BEARISH_DIV","BULLISH_DIV") and abs(smart) < 20:
                 conf = round(conf * 0.85, 1)
                 if conf < 55:
