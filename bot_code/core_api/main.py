@@ -361,7 +361,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         action_type = ""
 
         DYNAMIC_SL_LIMIT = -12.0  # Ngưỡng cắt lỗ sớm bảo vệ NAV
-        DYNAMIC_TP_LIMIT = 12.0   # Ngưỡng chốt lời sớm khi thị trường mất phương hướng
+        DYNAMIC_TP_LIMIT = 6.0   # Ngưỡng chốt lời sớm khi thị trường mất phương hướng
 
         # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM)
         if pnl_pct <= DYNAMIC_SL_LIMIT:
