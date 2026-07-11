@@ -202,7 +202,6 @@ class BingXExchange:
         return res
 
     def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5, p_win: float = 0.5, rr_ratio: float = 1.5) -> dict:
-        # 1. KIỂM TRA VỊ THẾ 
         open_positions = self.get_open_positions(symbol)
         if len(open_positions) > 0:
             current_direction = open_positions[0].get("direction")
@@ -210,13 +209,11 @@ class BingXExchange:
             log.info("⛔ BỎ QUA: Đã có sẵn vị thế %s cho mã %s (qty=%s).", current_direction, symbol, current_qty)
             return {"ok": False, "msg": "Position already exists"}
 
-        # 2. CÀI ĐẶT ĐÒN BẨY
         try:
             self.set_leverage(symbol, leverage, side="ALL")
         except Exception as e:
             log.warning(f"Lỗi khi set đòn bẩy cho {symbol}: {e}")
 
-        # 3. TÍNH TOÁN QUẢN LÝ VỐN THEO QUANT
         available_balance = self.get_balance()
         current_price = self.get_latest_price(symbol)
         
@@ -224,7 +221,6 @@ class BingXExchange:
             log.error(f"⛔ Lỗi số dư hoặc giá cho {symbol}.")
             return {"ok": False, "msg": "Invalid balance or price"}
 
-        # Mặc định rủi ro 10% (0.1) theo yêu cầu của bạn
         risk_percent = 0.1 
         
         if QuantRiskManager:
@@ -233,27 +229,20 @@ class BingXExchange:
                 all_open_pos = self.get_open_positions() 
                 markowitz_multiplier = quant.get_markowitz_penalty(symbol, all_open_pos)
                 kelly_percent = quant.calculate_kelly_fraction(p_win, rr_ratio, fraction=0.5)
-                # Kết hợp Kelly và Markowitz nhưng vẫn bị chặn bởi trần rủi ro 10%
                 risk_percent = min(0.1, kelly_percent * markowitz_multiplier)
                 log.info(f"🧠 [QUANT] Markowitz={markowitz_multiplier:.2f}, Kelly={kelly_percent:.3f} -> Risk={risk_percent:.3f}")
             except Exception as e:
                 log.warning(f"Lỗi module Quant, dùng Risk mặc định 10%. Lỗi: {e}")
         
-                # Tính vốn sử dụng: Vốn khả dụng * % rủi ro
         capital_to_use = available_balance * risk_percent
         
-        # Đảm bảo lệnh tối thiểu của sàn (BingX Swap thường là 5 USD giá trị vị thế)
-        # Chúng ta dùng đòn bẩy để đảm bảo giá trị vị thế = capital * leverage >= 5
         if (capital_to_use * leverage) < 5.0:
             capital_to_use = 5.0 / leverage
             log.info(f"⚠️ Vốn tính toán nhỏ hơn mức tối thiểu, điều chỉnh vốn về {capital_to_use:.2f} để đáp ứng lệnh sàn.")
 
-        # Tính khối lượng (Quantity)
         calculated_qty = (capital_to_use * leverage) / current_price
         safe_qty = float(int(calculated_qty * 10000) / 10000)
 
-        # ═══════════════ PHẦN SỬA LỖI MIN QTY CỦA SÀN BINGX ═══════════════
-        # 1. Khai báo bảng cấu hình số lượng tối thiểu cho các coin chính trên BingX
         MIN_QTY_MAP = {
             "BTC": 0.001,
             "ETH": 0.01,
@@ -263,21 +252,16 @@ class BingXExchange:
             "DOGE": 100.0
         }
         
-        # 2. Tách lấy tên coin gốc (Ví dụ: 'ETHUSDT' hoặc 'ETH-USDT' -> 'ETH')
         base_asset = symbol.replace("USDT", "").replace("-", "").upper()
-        min_qty = MIN_QTY_MAP.get(base_asset, 0.0001) # Mặc định 0.0001 cho altcoin khác
+        min_qty = MIN_QTY_MAP.get(base_asset, 0.0001) 
         
-        # 3. Nếu số lượng tính toán nhỏ hơn quy định của sàn, tự động ép lên mức tối thiểu
         if safe_qty < min_qty:
             safe_qty = min_qty
-            # Tính toán lại số vốn thực tế sẽ tiêu tốn sau khi tăng Qty để Log in ra chính xác
             capital_to_use = (safe_qty * current_price) / leverage
             log.info(f"⚠️ Qty tính toán nhỏ hơn quy định của sàn đối với {base_asset}. Tự động nâng Qty lên {min_qty}")
-        # ═══════════════════════════════════════════════════════════════════
         
         log.info(f"💰 Balance: {available_balance:.2f} USDT | Dùng {capital_to_use:.2f} USDT (Lev {leverage}x) -> Qty: {safe_qty}")
 
-        # 4. THỰC THI ĐẶT LỆNH
         position_side = "LONG" if side == "BUY" else "SHORT"
         params = {
             "symbol": symbol,
@@ -368,3 +352,89 @@ class BingXExchange:
             tp_price=tp2_price
         )
         return {"ok": True}
+
+    # ════════════════════════════════════════════════════════════════════
+    # CƠ CHẾ LỌC NHIỄU, KÉO SL HÒA VỐN SỚM (EARLY BREAKEVEN) VÀ GỒNG LÃI
+    # ════════════════════════════════════════════════════════════════════
+    def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5) -> dict:
+        """
+        Hàm theo dõi tự động: Gọi hàm này trong vòng lặp Worker thay vì code cứng bên ngoài.
+        Trả về dictionary chứa 'action' (HOLD, CLOSE, BREAKEVEN) để Worker báo Telegram.
+        """
+        open_positions = self.get_open_positions(symbol)
+        if not open_positions:
+            return {"action": "NONE", "msg": "Không có vị thế mở."}
+            
+        pos = open_positions[0]
+        direction = pos.get("direction")
+        entry_price = pos.get("entry", 0)
+        current_qty = pos.get("qty", 0)
+        current_price = self.get_latest_price(symbol)
+        
+        if entry_price <= 0 or current_price <= 0:
+            return {"action": "NONE", "msg": "Giá bị lỗi."}
+
+        # Tính toán ROE và quãng đường
+        plan = analysis_result.get("plan", {})
+        tp1_price = plan.get("tp1", 0)
+        
+        if direction == "LONG":
+            roe = ((current_price - entry_price) / entry_price) * 100 * leverage
+            dist_to_tp1 = abs(tp1_price - entry_price) if tp1_price else 0
+            curr_dist = current_price - entry_price
+        else:
+            roe = ((entry_price - current_price) / entry_price) * 100 * leverage
+            dist_to_tp1 = abs(entry_price - tp1_price) if tp1_price else 0
+            curr_dist = entry_price - current_price
+
+        result = {"action": "HOLD", "msg": ""}
+
+        # 1. EARLY BREAKEVEN: Nếu đi được 50% chặng đường đến TP1 -> Kéo SL về Entry
+        if dist_to_tp1 > 0 and (curr_dist / dist_to_tp1) >= 0.50:
+            active_orders = self.get_trigger_orders().get(symbol, {})
+            current_sl = active_orders.get("sl", 0)
+            tp_target = active_orders.get("tp2", tp1_price)
+            
+            # Chỉ kéo nếu chưa kéo (SL đang ở mức âm)
+            if (direction == "LONG" and current_sl < entry_price) or \
+               (direction == "SHORT" and (current_sl > entry_price or current_sl == 0)):
+                log.info(f"🛡️ {symbol} đạt 50% chặng đường đến TP1. Kéo SL về Entry {entry_price}!")
+                self.cancel_all_orders(symbol)
+                self._place_sl_tp(symbol, "BUY" if direction == "LONG" else "SELL", current_qty, entry_price, tp_target)
+                return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn an toàn."}
+
+        # 2. XỬ LÝ LỌC NHIỄU KHUNG 12% (KHI AI BÁO WAIT)
+        new_signal = analysis_result.get("final", "WAIT")
+        
+        if new_signal == "WAIT":
+            is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
+            THRESHOLD = 12.0 # Ngưỡng cắt/chốt sớm 12%
+            
+            if roe >= THRESHOLD:
+                if is_trending:
+                    log.info(f"💎 Lãi {roe:.2f}% và xu hướng 1H vẫn Tốt. Gồng tiếp bỏ qua WAIT.")
+                    result["action"] = "HOLD"
+                else:
+                    log.info(f"💰 Mất xu hướng. Đóng chốt lời sớm {roe:.2f}%.")
+                    self.close_position(symbol, current_qty, direction)
+                    self.cancel_all_orders(symbol)
+                    return {"action": "CLOSE", "type": "CHỐT LỜI SỚM", "roe": roe}
+                    
+            elif roe <= -THRESHOLD:
+                log.warning(f"🚨 Âm {roe:.2f}% vượt ngưỡng chịu đựng. Cắt máu sớm!")
+                self.close_position(symbol, current_qty, direction)
+                self.cancel_all_orders(symbol)
+                return {"action": "CLOSE", "type": "CẮT LỖ SỚM", "roe": roe}
+            else:
+                log.info(f"⏳ Biến động nhiễu {roe:.2f}%. Giữ lệnh an toàn theo sàn.")
+                result["action"] = "HOLD"
+
+        # 3. ĐẢO CHIỀU HOÀN TOÀN (LONG -> SHORT hoặc SHORT -> LONG)
+        elif (direction == "LONG" and new_signal == "SHORT") or \
+             (direction == "SHORT" and new_signal == "LONG"):
+            log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
+            return {"action": "CLOSE", "type": "ĐẢO CHIỀU XU HƯỚNG", "roe": roe}
+
+        return result
