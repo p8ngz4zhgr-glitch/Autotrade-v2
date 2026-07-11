@@ -290,7 +290,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 "analysis": analysis
             }
         # ══════════════════════════════════════════════════════════
-        from bot_code.bingx_trader import BingXExchange
+        from worker.bingx_trader import BingXExchange
         bx = BingXExchange(api_key=user.api_key, api_secret=user.api_secret)
         
         # Hàm này sẽ xử lý dời SL về Entry và lọc nhiễu cho bạn
