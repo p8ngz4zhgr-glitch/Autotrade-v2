@@ -293,29 +293,36 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 "analysis": analysis
             }
 
-        # ══════════════════════════════════════════════════════════
+                # ══════════════════════════════════════════════════════════
         # [NEW] LỚP BẢO VỆ ĐỘNG (BREAKEVEN & LỌC NHIỄU TỪ EXCHANGE)
         # ══════════════════════════════════════════════════════════
-        # Khởi tạo BX sớm để phục vụ cho Dynamic Management
         bx = get_bx(user)
-        # Ưu tiên lấy đòn bẩy từ user, nếu không có mặc định là 5
         leverage = getattr(user, 'leverage', 5) 
+        
+        # Khởi tạo cờ Breakeven từ Redis để chống spam
+        be_key = f"BREAKEVEN_{user.telegram_id}_{sym}_{direction}"
+        is_breakeven = False
+        if redis_client:
+            try: is_breakeven = bool(redis_client.get(be_key))
+            except: pass
         
         # Chạy ngầm hàm quản trị vị thế động
         dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage)
         
         if dynamic_status.get("action") == "BREAKEVEN":
-            _tg_send(
-                REGISTER_TOKEN, user.telegram_id, 
-                f"🛡️ <b>RISK-FREE KÍCH HOẠT: {sym}</b>\n"
-                f"Giá đã đi được 50% quãng đường đến TP1. Tự động dời Stoploss về Entry (<code>${entry:.4f}</code>) để bảo toàn vốn!"
-            )
-            # Hàm không return ở đây vì sau khi kéo SL hòa vốn, ta vẫn muốn check xem 
-            # có chạm TP1 hay có tín hiệu đảo chiều để chốt lời hay không.
+            # Chỉ gửi Telegram và kích hoạt nếu chưa từng làm việc này
+            if not is_breakeven:
+                _tg_send(
+                    REGISTER_TOKEN, user.telegram_id, 
+                    f"🛡️ <b>RISK-FREE KÍCH HOẠT: {sym}</b>\n"
+                    f"Giá đã đi được 50% quãng đường đến TP1. Tự động dời Stoploss về Entry (<code>${entry:.4f}</code>) để bảo toàn vốn!"
+                )
+                # Đánh dấu đã dời SL thành công, khóa lại trong 24h
+                if redis_client:
+                    try: redis_client.setex(be_key, 86400, "1")
+                    except: pass
             
         elif dynamic_status.get("action") == "CLOSE":
-            # Hàm manage_position_dynamic đã TỰ ĐỘNG ĐÓNG LỆNH trên sàn, 
-            # ta chỉ việc báo cáo Telegram, lưu nhật ký và ngắt hàm tại đây.
             roe_closed = dynamic_status.get("roe", 0)
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
@@ -325,7 +332,15 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 f"Lý do: HMM/Market Structure phát hiện thị trường biến động nhiễu. Đã đóng lệnh an toàn."
             )
             _save_journal(user.telegram_id, sym, direction, roe_closed, qty)
-            return  # Dừng xử lý các tầng dưới vì lệnh đã không còn tồn tại
+            
+            # Xóa sạch cờ bộ nhớ khi lệnh đã đóng
+            if redis_client:
+                try: 
+                    redis_client.delete(be_key)
+                    redis_client.delete(f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}")
+                except: pass
+            return  
+
 
         # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI (ĐƯA LÊN ĐẦU ĐỂ PHỤC VỤ QUYẾT ĐỊNH ĐỘNG)
         in_profit = False
