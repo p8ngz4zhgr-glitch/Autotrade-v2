@@ -337,8 +337,25 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             pnl_pct = ((current_price - entry) / entry) * 100 * leverage if direction == "LONG" else ((entry - current_price) / entry) * 100 * leverage
 
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
-        is_trend_active = (new_direction == direction)  # Xu thế cũ vẫn tiếp diễn tăng/giảm
         
+        # ══════════════════════════════════════════════════════════
+        # BẢN VÁ: BẢO VỆ XU HƯỚNG LÕI - CHỐNG CHỐT LỜI NON
+        # ══════════════════════════════════════════════════════════
+        kalman_trend = analysis.get("kalman", {}).get("trend", "NEUTRAL")
+        hmm_regime = analysis.get("hmm", {}).get("regime", "UNKNOWN")
+        
+        ai_same_dir = (new_direction == direction)
+        kalman_same_dir = (direction == "LONG" and kalman_trend == "BULLISH") or (direction == "SHORT" and kalman_trend == "BEARISH")
+        hmm_same_dir = (direction == "LONG" and hmm_regime == "UPTREND") or (direction == "SHORT" and hmm_regime == "DOWNTREND")
+        
+        # Xu thế ĐƯỢC COI LÀ CÒN ACTIVE nếu: AI đồng thuận, HOẶC (AI báo WAIT do EV thấp NHƯNG Kalman/HMM vẫn đang giữ form tăng/giảm)
+        is_trend_active = ai_same_dir or (new_direction == "WAIT" and (kalman_same_dir or hmm_same_dir))
+        
+        # Bóc tách mốc TP1, TP2 từ AI
+        plan = analysis.get("plan", {})
+        tp1 = float(plan.get("tp1", 0))
+        tp2 = float(plan.get("tp2", 0))
+
         # Bóc tách mốc TP1, TP2 từ AI
         plan = analysis.get("plan", {})
         tp1 = float(plan.get("tp1", 0))
@@ -371,42 +388,56 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             reason = f"Trạng thái âm {pnl_pct:.2f}% chạm ngưỡng giới hạn sớm ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Hard Stop bảo toàn tài sản."
 
         # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK)
+        # Bất kể đang trên đường đến TP1 hay đang thả TP2, nếu bị đảo chiều mạnh -> CHỐT LỜI ĐỘNG/CẮT LỖ KHẨN CẤP
         elif is_reversal and conf >= 60:
             action = "CLOSE_ALL"
             should_reverse = True
-            action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
+            action_type = "CHỐT LỜI SỚM (ĐẢO CHIỀU)" if in_profit else "CẮT LỖ SỚM"
+            phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
             emoji = "🚨"
-            reason = f"Mắt thần phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Ngắt lệnh khẩn cấp, bảo vệ phần vị thế còn lại."
+            reason = f"Đang trong giai đoạn {phase_str}, phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Chốt lệnh khẩn cấp."
             
         elif is_reversal and conf >= 40:
             action = "CLOSE_ALL"
-            action_type = "CHỐT LỜI SỚM" if in_profit else "CẮT LỖ SỚM"
+            action_type = "CHỐT LỜI SỚM (PHÂN KỲ)" if in_profit else "CẮT LỖ SỚM"
+            phase_str = "tiến về TP2" if is_scaled_out else "chưa chạm TP1"
             emoji = "⚠️"
-            reason = f"Dòng tiền phân kỳ nhẹ, xu hướng có dấu hiệu quay đầu sang {new_direction} -> Đóng lệnh chủ động."
+            reason = f"Dòng tiền phân kỳ nhẹ khi lệnh đang {phase_str}, xu hướng báo {new_direction} -> Đóng lệnh chủ động thu tiền về."
 
-        # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT (CƠ CHẾ GỒNG LÃI PHÂN TẦNG)
+        # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT (CƠ CHẾ CHỐT TỪNG PHẦN & GỒNG)
         elif is_trend_active:
+            # Nếu CHƯA chốt 1/2 và giá đã chạm mốc TP1 -> Kích hoạt SCALE_OUT
             if not is_scaled_out and tp1 > 0:
                 reached_tp1 = (direction == "LONG" and current_price >= tp1) or (direction == "SHORT" and current_price <= tp1)
                 if reached_tp1:
                     action = "SCALE_OUT"
-                    action_type = "CHỐT LỜI TỪNG PHẦN"
+                    action_type = "CHỐT LỜI 1/2 @ TP1"
                     emoji = "🎯"
-                    reason = f"Xu thế {new_direction} tiếp diễn mạnh mẽ và đã chạm mốc mục tiêu TP1 (${tp1:.4f}) -> Khóa 50% lợi nhuận, dời SL về Entry và thả TP2."
+                    reason = f"Giá đã chạm mốc TP1 (${tp1:.4f}). Khóa 50% lợi nhuận, dời SL phần còn lại về Entry và tiếp tục thả mồi đến TP2."
             else:
+                # Nếu ĐÃ chốt 1/2 (đang chạy TP2) HOẶC chưa tới TP1 nhưng trend đang mạnh -> Tiếp tục giữ lệnh
                 action = "KEEP"
-                reason = f"Xu thế {new_direction} đang tiếp diễn thuận lợi (PnL hiện tại: {pnl_pct:+.2f}%). Tiếp tục thả vị thế theo kế hoạch ban đầu."
+                phase_str = "gồng lãi tiến lên TP2" if is_scaled_out else "chờ chạm mốc TP1"
+                reason = f"Xu thế {new_direction} đang tiếp diễn thuận lợi. Trạng thái: Đang {phase_str} (PnL: {pnl_pct:+.2f}%)."
 
-        # [TẦNG ƯU TIÊN 4]: THỊ TRƯỜNG MẤT ĐỘNG LƯỢNG SÓNG (WAIT REGIME)
+        # [TẦNG ƯU TIÊN 4]: THỊ TRƯỜNG MẤT ĐỘNG LƯỢNG (WAIT REGIME)
         elif new_direction == "WAIT":
-            if pnl_pct >= DYNAMIC_TP_LIMIT:
+            is_market_sideways = (hmm_regime == "SIDEWAYS")
+            
+            # Tính toán ngưỡng chốt lời động (DYNAMIC_TP): 
+            # - Trên đường đến TP1: Ngưỡng chốt sớm là 12%
+            # - Trên đường đến TP2 (đã chốt 1/2): Ngưỡng chốt nâng lên 18% để bot "lì" hơn, cho phép giá giật nhiều hơn
+            current_tp_limit = DYNAMIC_TP_LIMIT if not is_scaled_out else (DYNAMIC_TP_LIMIT * 1.5)
+            
+            if pnl_pct >= current_tp_limit and is_market_sideways:
                 action = "CLOSE_ALL"
-                action_type = "CHỐT LỜI SỚM"
+                action_type = "CHỐT LỜI ĐỘNG (SIDEWAYS)"
                 emoji = "✅"
-                reason = f"Thị trường rơi vào vùng mất phương hướng (WAIT) nhưng vị thế đã đạt mức ROE kỳ vọng +{pnl_pct:.2f}% (>= {DYNAMIC_TP_LIMIT}%) -> Thu hoạch sớm."
+                phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
+                reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận {pnl_pct:.2f}% >= mục tiêu thu hoạch sớm ({current_tp_limit}%) -> Đóng lệnh an toàn."
             else:
                 action = "HOLD"
-                log.info(f"Tín hiệu {sym} báo WAIT nhưng ROE chưa đạt ngưỡng chốt sớm ({pnl_pct:.2f}% / {DYNAMIC_TP_LIMIT}%). Tiếp tục neo lệnh giám sát.")
+                log.info(f"Tín hiệu {sym} báo WAIT nhưng Kalman/HMM chưa gãy hoặc ROE chưa đủ ngưỡng chốt sớm. Tiếp tục neo lệnh giám sát.")
 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
