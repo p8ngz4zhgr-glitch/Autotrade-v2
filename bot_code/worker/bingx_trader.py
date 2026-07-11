@@ -357,84 +357,72 @@ class BingXExchange:
     # CƠ CHẾ LỌC NHIỄU, KÉO SL HÒA VỐN SỚM (EARLY BREAKEVEN) VÀ GỒNG LÃI
     # ════════════════════════════════════════════════════════════════════
     def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5) -> dict:
-        """
-        Hàm theo dõi tự động: Gọi hàm này trong vòng lặp Worker thay vì code cứng bên ngoài.
-        Trả về dictionary chứa 'action' (HOLD, CLOSE, BREAKEVEN) để Worker báo Telegram.
-        """
         open_positions = self.get_open_positions(symbol)
         if not open_positions:
             return {"action": "NONE", "msg": "Không có vị thế mở."}
             
         pos = open_positions[0]
         direction = pos.get("direction")
-        entry_price = pos.get("entry", 0)
-        current_qty = pos.get("qty", 0)
+        entry_price = float(pos.get("entry", 0))
+        current_qty = float(pos.get("qty", 0))
         current_price = self.get_latest_price(symbol)
+        
+        # Lấy thông tin SL/TP hiện tại TRÊN SÀN (quan trọng để tránh spam)
+        # Lưu ý: Hàm get_position_info hoặc get_open_orders của bạn phải trả về SL/TP hiện tại
+        active_orders = self.get_trigger_orders().get(symbol, {}) 
+        current_sl = float(active_orders.get("sl", 0))
         
         if entry_price <= 0 or current_price <= 0:
             return {"action": "NONE", "msg": "Giá bị lỗi."}
 
         # Tính toán ROE và quãng đường
         plan = analysis_result.get("plan", {})
-        tp1_price = plan.get("tp1", 0)
+        tp1_price = float(plan.get("tp1", 0))
         
         if direction == "LONG":
             roe = ((current_price - entry_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(tp1_price - entry_price) if tp1_price else 0
+            dist_to_tp1 = abs(tp1_price - entry_price) if tp1_price > 0 else 0
             curr_dist = current_price - entry_price
         else:
             roe = ((entry_price - current_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(entry_price - tp1_price) if tp1_price else 0
+            dist_to_tp1 = abs(entry_price - tp1_price) if tp1_price > 0 else 0
             curr_dist = entry_price - current_price
 
-        result = {"action": "HOLD", "msg": ""}
-
-        # 1. EARLY BREAKEVEN: Nếu đi được 50% chặng đường đến TP1 -> Kéo SL về Entry
+        # 1. EARLY BREAKEVEN: 50% chặng đường -> Dời SL về Entry
         if dist_to_tp1 > 0 and (curr_dist / dist_to_tp1) >= 0.50:
-            active_orders = self.get_trigger_orders().get(symbol, {})
-            current_sl = active_orders.get("sl", 0)
-            tp_target = active_orders.get("tp2", tp1_price)
-            
-            # Chỉ kéo nếu chưa kéo (SL đang ở mức âm)
-            if (direction == "LONG" and current_sl < entry_price) or \
-               (direction == "SHORT" and (current_sl > entry_price or current_sl == 0)):
-                log.info(f"🛡️ {symbol} đạt 50% chặng đường đến TP1. Kéo SL về Entry {entry_price}!")
+            # KIỂM TRA ĐIỀU KIỆN KÉO: 
+            # Chỉ kéo nếu SL hiện tại CÒN ĐANG LÀ SL CŨ (sai lệch lớn với entry)
+            # Dùng ngưỡng sai số 0.0001 (0.01%) để so sánh float
+            if abs(current_sl - entry_price) > (entry_price * 0.0001):
+                log.info(f"🛡️ {symbol} đạt 50% TP1. Kéo SL về Entry {entry_price}!")
                 self.cancel_all_orders(symbol)
+                # Dùng TP2 từ plan nếu có, không thì dùng TP1 cũ
+                tp_target = float(plan.get("tp2", tp1_price))
                 self._place_sl_tp(symbol, "BUY" if direction == "LONG" else "SELL", current_qty, entry_price, tp_target)
-                return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn an toàn."}
+                return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn."}
 
-        # 2. XỬ LÝ LỌC NHIỄU KHUNG 12% (KHI AI BÁO WAIT)
+        # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
         new_signal = analysis_result.get("final", "WAIT")
-        
         if new_signal == "WAIT":
             is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
-            THRESHOLD = 12.0 # Ngưỡng cắt/chốt sớm 12%
+            THRESHOLD = 12.0
             
-            if roe >= THRESHOLD:
-                if is_trending:
-                    log.info(f"💎 Lãi {roe:.2f}% và xu hướng 1H vẫn Tốt. Gồng tiếp bỏ qua WAIT.")
-                    result["action"] = "HOLD"
-                else:
-                    log.info(f"💰 Mất xu hướng. Đóng chốt lời sớm {roe:.2f}%.")
+            # Cần so sánh abs(roe) để cắt cả LONG lẫn SHORT
+            if roe >= THRESHOLD or roe <= -THRESHOLD:
+                # Chỉ đóng khi trend đã mất (is_trending == False)
+                if not is_trending:
+                    log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
                     self.close_position(symbol, current_qty, direction)
                     self.cancel_all_orders(symbol)
-                    return {"action": "CLOSE", "type": "CHỐT LỜI SỚM", "roe": roe}
-                    
-            elif roe <= -THRESHOLD:
-                log.warning(f"🚨 Âm {roe:.2f}% vượt ngưỡng chịu đựng. Cắt máu sớm!")
-                self.close_position(symbol, current_qty, direction)
-                self.cancel_all_orders(symbol)
-                return {"action": "CLOSE", "type": "CẮT LỖ SỚM", "roe": roe}
-            else:
-                log.info(f"⏳ Biến động nhiễu {roe:.2f}%. Giữ lệnh an toàn theo sàn.")
-                result["action"] = "HOLD"
-
-        # 3. ĐẢO CHIỀU HOÀN TOÀN (LONG -> SHORT hoặc SHORT -> LONG)
+                    return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
+        
+        # 3. ĐẢO CHIỀU HOÀN TOÀN
         elif (direction == "LONG" and new_signal == "SHORT") or \
              (direction == "SHORT" and new_signal == "LONG"):
             log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
-            return {"action": "CLOSE", "type": "ĐẢO CHIỀU XU HƯỚNG", "roe": roe}
+            return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
 
-        return result
+        return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
+
