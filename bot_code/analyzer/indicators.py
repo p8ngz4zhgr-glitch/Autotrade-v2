@@ -639,9 +639,12 @@ class Indicators:
                     and c[i] < (o[i2] + c[i2]) / 2):
                 found_bear.append("Evening Star" + (" [V]" if vol_surge else ""))
 
-        # 15. Three Black Crows
+         # 15. Three Black Crows
         if i >= 2:
             if (bearish(i2) and bearish(i1) and bearish(i)
                     and c[i] < c[i1] < c[i2]
                     and o[i1] < o[i2] and o[i] < o[i1]
-                    and
+                    and upper_wick(i) <= body(i) * 0.3
+                    and body(i) > ab5 * 0.6):
+                found_bear.append("Three Black Crows")
+
