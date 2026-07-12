@@ -262,7 +262,7 @@ class SignalEngine:
         results = {}
 
         # ══════════════════════════════════════════════════════════
-        # A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM
+        # A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM TỪ DATABASE (Đã fix SSL)
         # ══════════════════════════════════════════════════════════
         hmm_regime = "UNKNOWN"
         hmm_conf = 0.0
@@ -271,20 +271,35 @@ class SignalEngine:
             try:
                 from sqlalchemy.dialects.postgresql import insert
                 from core_api.models import TrackedSymbol, MarketRegime 
+                
+                # Quan trọng: Gửi một lệnh ping "vô hại" trước để đánh thức database, 
+                # hoặc bắt SQLAlchemy tự tạo connection mới nếu cái cũ đã chết do nhàn rỗi.
+                try:
+                    db.execute("SELECT 1") 
+                except Exception as ping_err:
+                    log.warning(f"  ⚠️ SSL Ping thất bại, cố gắng rollback để khôi phục: {ping_err}")
+                    db.rollback()
 
+                # A. Đăng ký symbol
                 stmt = insert(TrackedSymbol).values(symbol=symbol, is_active=True)
                 stmt = stmt.on_conflict_do_nothing(index_elements=['symbol'])
                 db.execute(stmt)
                 db.commit()
 
+                # B. Lấy Market Regime
                 regime_data = db.query(MarketRegime).filter(MarketRegime.symbol == symbol).first()
                 if regime_data:
                     hmm_regime = regime_data.regime_name
                     hmm_conf = regime_data.confidence
                     log.info("  🧠 [HMM Context] %s: %s (Conf: %.1f%%)", symbol, hmm_regime, hmm_conf)
+                    
             except Exception as e:
                 db.rollback()
-                log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
+                # Log ra lỗi chính xác thay vì chỉ báo chung chung để theo dõi
+                if "SSL" in str(e) or "server closed the connection" in str(e):
+                    log.error("  ❌ Bị Server (Render/ElephantSQL) cắt đứt kết nối Database đột ngột.")
+                else:
+                    log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
 
         # Chạy song song 4 TF
         def _fetch_tf(tf):
