@@ -256,13 +256,13 @@ class SignalEngine:
             "high": highs, "low": lows, "close": closes
         }
 
-    def full_analysis(self, symbol, db=None):
+        def full_analysis(self, symbol, db=None):
         fetcher, atype = self._fetcher(symbol)
         log.info("📊 Phân tích %s [%s]...", symbol, atype)
         results = {}
 
         # ══════════════════════════════════════════════════════════
-        # [NEW] A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM TỪ DATABASE
+        # A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM
         # ══════════════════════════════════════════════════════════
         hmm_regime = "UNKNOWN"
         hmm_conf = 0.0
@@ -287,15 +287,16 @@ class SignalEngine:
                 log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
 
         # Chạy song song 4 TF
-    def _fetch_tf(tf):
-        return tf, self.analyze_tf(symbol, tf, fetcher)
+        def _fetch_tf(tf):
+            return tf, self.analyze_tf(symbol, tf, fetcher)
 
         futures = {self._executor.submit(_fetch_tf, tf): tf for tf in self.TIMEFRAMES}
         for fut in as_completed(futures, timeout=35):
             tf = futures[fut]
             try:
                 tf_name, res = fut.result()
-                results[tf_name] = res
+                if res is not None:
+                    results[tf_name] = res
             except Exception as e:
                 log.warning("  TF %s lỗi: %s", tf, e)
 
@@ -309,7 +310,28 @@ class SignalEngine:
         if tf_count < 2:
             raise RuntimeError(f"Quá ít TF ({tf_count}) cho {symbol}")
 
-        price = list(results.values())[-1]["price"]
+        # ══════════════════════════════════════════════════════════
+        # [BẢN VÁ LÕI] BÓC TÁCH DỮ LIỆU AN TOÀN TUYỆT ĐỐI (CHỐNG NONE)
+        # ══════════════════════════════════════════════════════════
+        res_1h = results.get("1h") or {}
+        res_4h = results.get("4h") or {}
+
+        price = 0.0
+        for r in results.values():
+            if r and r.get("price"):
+                price = r.get("price")
+        if price == 0.0:
+            raise RuntimeError(f"Không tìm thấy giá hợp lệ cho {symbol}")
+
+        cvd_1h = res_1h.get("cvd") or {}
+        bo_1h  = res_1h.get("breakout") or {}
+        bo_4h  = res_4h.get("breakout") or {}
+        wh_1h  = res_1h.get("whale") or {}
+        wy_4h  = res_4h.get("wyckoff") or {}
+        fi_1h  = res_1h.get("fibo") or {}
+        vol_1h = res_1h.get("volume") or {}
+        vol_4h = res_4h.get("volume") or {}
+
         oi_now, oi_delta = 0.0, 0.0
         funding = 0.0
         oi_signal, oi_desc = "N/A", "N/A"
@@ -317,8 +339,14 @@ class SignalEngine:
         if atype == "CRYPTO":
             oi_now, oi_delta = self.crypto.open_interest(symbol)
             funding          = self.crypto.funding_rate(symbol)
+            
+            # Vá lỗi NoneType Assignment cho Cache
+            if not hasattr(self, '_cache') or self._cache is None:
+                self._cache = {}
+                
             prev             = self._cache.get(symbol, price)
             self._cache[symbol] = price
+            
             px_up  = price > prev
             oi_up  = oi_delta > 0.5
             oi_dn  = oi_delta < -0.5
@@ -332,18 +360,10 @@ class SignalEngine:
         if atype == "STOCK":
             mkt_open, mkt_note = self.stock.market_open()
 
-        longs     = sum(1 for r in results.values() if r["direction"] == "LONG")
-        shorts    = sum(1 for r in results.values() if r["direction"] == "SHORT")
-        avg_score = sum(r["score"] for r in results.values()) / len(results)
-
-        cvd_1h = results.get("1h", {}).get("cvd", {})
-        bo_1h  = results.get("1h", {}).get("breakout", {})
-        bo_4h  = results.get("4h", {}).get("breakout", {})
-        wh_1h  = results.get("1h", {}).get("whale", {})
-        wy_4h  = results.get("4h", {}).get("wyckoff", {})
-        fi_1h  = results.get("1h", {}).get("fibo", {})
-        vol_1h = results.get("1h", {}).get("volume", {})
-        vol_4h = results.get("4h", {}).get("volume", {})
+        longs     = sum(1 for r in results.values() if r and r.get("direction") == "LONG")
+        shorts    = sum(1 for r in results.values() if r and r.get("direction") == "SHORT")
+        valid_scores = [r.get("score", 50) for r in results.values() if r and "score" in r]
+        avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 50
 
         # ══════════════════════════════════════════════════════════
         # 1. KHỞI TẠO VÀ CHẠY KALMAN FILTER
@@ -352,9 +372,7 @@ class SignalEngine:
         kalman_price = price
         kalman_data = {"detected": False}
         
-        closes_1h = results.get("1h", {}).get("closes", [])
-        if not closes_1h:
-            closes_1h = results.get("1h", {}).get("close", [])
+        closes_1h = res_1h.get("closes") or res_1h.get("close") or []
 
         if closes_1h and len(closes_1h) > 2:
             if not hasattr(self, 'quant'):
@@ -367,20 +385,21 @@ class SignalEngine:
             if hasattr(self, 'quant'):
                 try:
                     k_filter = self.quant.calculate_kalman_filter(closes_1h, r=0.05)
-                    kalman_price = k_filter[-1]
-                    prev_kalman = k_filter[-2]
+                    if k_filter and len(k_filter) > 1:
+                        kalman_price = k_filter[-1]
+                        prev_kalman = k_filter[-2]
 
-                    if kalman_price > prev_kalman and price > kalman_price:
-                        kalman_trend = "BULLISH"
-                    elif kalman_price < prev_kalman and price < kalman_price:
-                        kalman_trend = "BEARISH"
+                        if kalman_price > prev_kalman and price > kalman_price:
+                            kalman_trend = "BULLISH"
+                        elif kalman_price < prev_kalman and price < kalman_price:
+                            kalman_trend = "BEARISH"
 
-                    kalman_data = {
-                        "detected": True,
-                        "price": round(kalman_price, 4),
-                        "trend": kalman_trend
-                    }
-                    log.info("  [Kalman] True Price: %.4f | Trend: %s", kalman_price, kalman_trend)
+                        kalman_data = {
+                            "detected": True,
+                            "price": round(kalman_price, 4),
+                            "trend": kalman_trend
+                        }
+                        log.info("  [Kalman] True Price: %.4f | Trend: %s", kalman_price, kalman_trend)
                 except Exception as e:
                     log.warning("  ⚠️ Kalman Filter lỗi: %s", e)
 
@@ -401,7 +420,7 @@ class SignalEngine:
         elif fi_1h.get("trend") == "DOWNTREND": smart -= 8
         
         if wh_1h.get("detected"):
-            smart += 25 if wh_1h["type"] == "WHALE_BUY" else -25
+            smart += 25 if wh_1h.get("type") == "WHALE_BUY" else -25
             
         vol_smart = (vol_1h.get("score_adj", 0) + vol_4h.get("score_adj", 0)) * 0.5
         smart += vol_smart
@@ -423,9 +442,9 @@ class SignalEngine:
 
         final, conf = None, 50.0
         for tf_n, bo in [("1H", bo_1h), ("4H", bo_4h)]:
-            if bo.get("type") in ("BREAKOUT_UP","BREAKOUT_DOWN") and bo.get("strength",0) >= 70:
-                final = "LONG" if bo["type"] == "BREAKOUT_UP" else "SHORT"
-                conf  = min(95, 70 + bo["strength"] * 0.25)
+            if bo.get("type") in ("BREAKOUT_UP","BREAKOUT_DOWN") and bo.get("strength", 0) >= 70:
+                final = "LONG" if bo.get("type") == "BREAKOUT_UP" else "SHORT"
+                conf  = min(95, 70 + bo.get("strength", 0) * 0.25)
                 log.info("🚨 Breakout override [%s]", tf_n)
                 break
 
@@ -449,8 +468,7 @@ class SignalEngine:
         # ══════════════════════════════════════════════════════════
         # [SMC] BỘ LỌC CHỐNG FOMO (PREMIUM & DISCOUNT ZONES)
         # ══════════════════════════════════════════════════════════
-        # Chỉ vào lệnh khi giá nằm ở vùng lợi thế, tương thích hoàn hảo với logic Fibo/Wyckoff
-        ms_1h = results.get("1h", {}).get("market_structure", {})
+        ms_1h = res_1h.get("market_structure") or {}
         swing_high = ms_1h.get("last_swing_high", 0)
         swing_low = ms_1h.get("last_swing_low", 0)
         smc_zone = "UNKNOWN"
@@ -458,7 +476,6 @@ class SignalEngine:
         if swing_high > 0 and swing_low > 0 and swing_high > swing_low:
             equilibrium = (swing_high + swing_low) / 2
             
-            # Tính % vị trí của giá trong con sóng (0 = đáy, 1 = đỉnh)
             wave_range = swing_high - swing_low
             price_pos = (price - swing_low) / wave_range
             
@@ -469,17 +486,16 @@ class SignalEngine:
                 
             log.info("  [SMC Filter] Eq: %.4f | Vị trí: %s", equilibrium, smc_zone)
 
-            # Ngoại lệ: Cho phép FOMO nếu đây là cú Breakout cực mạnh (> 85)
             is_extreme_breakout = (bo_1h.get("strength", 0) >= 85 or bo_4h.get("strength", 0) >= 85)
             
             if not is_extreme_breakout:
                 if final == "LONG" and smc_zone == "PREMIUM":
-                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu LONG nhưng giá đang neo ở đỉnh (PREMIUM). Ép về WAIT chờ giá hồi về Discount / lấp FVG.")
+                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu LONG nhưng giá đang neo ở đỉnh (PREMIUM). Ép về WAIT.")
                     final = "WAIT"
                     conf = round(conf * 0.7, 1)
                     
                 elif final == "SHORT" and smc_zone == "DISCOUNT":
-                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu SHORT nhưng giá đã dí xuống đáy (DISCOUNT). Ép về WAIT chờ giá giật lên Premium / lấp FVG.")
+                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu SHORT nhưng giá đã dí xuống đáy (DISCOUNT). Ép về WAIT.")
                     final = "WAIT"
                     conf = round(conf * 0.7, 1)
 
@@ -489,28 +505,32 @@ class SignalEngine:
 
         if atype == "CRYPTO":
             try:
-                ob_raw = fetcher.order_book(symbol, depth=30)
+                ob_raw = fetcher.order_book(symbol, depth=30) or {}
                 if ob_raw.get("ok"):
-                    best_bid_wall = ob_raw["bid_walls"][0] if ob_raw.get("bid_walls") else {"price": 0, "usd": 0}
-                    best_ask_wall = ob_raw["ask_walls"][0] if ob_raw.get("ask_walls") else {"price": 0, "usd": 0}
+                    bid_walls = ob_raw.get("bid_walls") or [{"price": 0, "usd": 0}]
+                    ask_walls = ob_raw.get("ask_walls") or [{"price": 0, "usd": 0}]
+                    best_bid_wall = bid_walls[0] if bid_walls else {"price": 0, "usd": 0}
+                    best_ask_wall = ask_walls[0] if ask_walls else {"price": 0, "usd": 0}
                     
                     ob_data = {
                         "detected": True,
-                        "ratio": ob_raw["ratio"],
-                        "imbalance": ob_raw["imbalance"],
-                        "spread_pct": ob_raw["spread_pct"],
-                        "support_wall": best_bid_wall["price"],
-                        "support_wall_usd": best_bid_wall["usd"],
-                        "resist_wall": best_ask_wall["price"],
-                        "resist_wall_usd": best_ask_wall["usd"],
+                        "ratio": ob_raw.get("ratio", 1.0),
+                        "imbalance": ob_raw.get("imbalance", 0.0),
+                        "spread_pct": ob_raw.get("spread_pct", 0.0),
+                        "support_wall": best_bid_wall.get("price", 0),
+                        "support_wall_usd": best_bid_wall.get("usd", 0),
+                        "resist_wall": best_ask_wall.get("price", 0),
+                        "resist_wall_usd": best_ask_wall.get("usd", 0),
                     }
                 
-                liq_raw = fetcher.liquidation_levels(symbol, price)
+                liq_raw = fetcher.liquidation_levels(symbol, price) or {}
                 
-                tf_to_check = results.get("1h") or results.get("15m")
+                tf_to_check = results.get("1h") or results.get("15m") or {}
                 if tf_to_check:
-                    high_price = tf_to_check.get("high", [0])[-1]
-                    low_price = tf_to_check.get("low", [0])[-1]
+                    highs = tf_to_check.get("high") or [0]
+                    lows = tf_to_check.get("low") or [0]
+                    high_price = highs[-1] if highs else 0
+                    low_price = lows[-1] if lows else 0
                     close_price = tf_to_check.get("price", price)
                     
                     detected_sweep = False
@@ -542,7 +562,7 @@ class SignalEngine:
         # ══════════════════════════════════════════════════════════
         if sweep_data.get("detected"):
             sw_type = sweep_data.get("type")
-            sw_price = sweep_data.get("price")
+            sw_price = sweep_data.get("price", 0)
             
             if sw_type == "BULLISH_SWEEP":
                 if final == "SHORT":
@@ -565,8 +585,8 @@ class SignalEngine:
         # ══════════════════════════════════════════════════════════
         # 2.5. ATR-BASED SL/TP
         # ══════════════════════════════════════════════════════════
-        atr_1h     = results.get("1h", {}).get("atr", price * 0.01)
-        atr_pct_1h = results.get("1h", {}).get("atr_pct", 1.0)
+        atr_1h     = res_1h.get("atr", price * 0.01)
+        atr_pct_1h = res_1h.get("atr_pct", 1.0)
         
         atr_multiplier = 2.0  
         if hmm_regime == "SIDEWAYS":
@@ -576,19 +596,20 @@ class SignalEngine:
         tp1_pct    = sl_atr_pct * 1.5  
         tp2_pct    = sl_atr_pct * 3.0  
         
-        fibo4l     = results.get("4h", {}).get("fibo", {}).get("levels", {})
+        fibo4l       = (res_4h.get("fibo") or {}).get("levels") or {}
+        fibo4h_trend = (res_4h.get("fibo") or {}).get("trend", "")
+        
         atr_tp1 = round(price * (1 + tp1_pct / 100), 2)
         atr_tp2 = round(price * (1 + tp2_pct / 100), 2)
         atr_tp1_s = round(price * (1 - tp1_pct / 100), 2)
         atr_tp2_s = round(price * (1 - tp2_pct / 100), 2)
-        fibo4h_trend = results.get("4h", {}).get("fibo", {}).get("trend", "")
 
         # ══════════════════════════════════════════════════════════
         # 3. TỐI ƯU STOPLOSS BẰNG KALMAN
         # ══════════════════════════════════════════════════════════
         if final == "LONG":
             sl = round(price * (1 - sl_atr_pct / 100), 2)
-            if kalman_data["detected"] and kalman_price < price:
+            if kalman_data.get("detected") and kalman_price < price:
                 k_sl = kalman_price * 0.995
                 if k_sl < price and ((price - k_sl) / price * 100) <= sl_atr_pct * 1.5:
                     sl = round(k_sl, 2)
@@ -609,7 +630,7 @@ class SignalEngine:
 
         elif final == "SHORT":
             sl  = round(price * (1 + sl_atr_pct / 100), 2)
-            if kalman_data["detected"] and kalman_price > price:
+            if kalman_data.get("detected") and kalman_price > price:
                 k_sl = kalman_price * 1.005 
                 if k_sl > price and ((k_sl - price) / price * 100) <= sl_atr_pct * 1.5:
                     sl = round(k_sl, 2)
@@ -649,10 +670,9 @@ class SignalEngine:
 
         rr_ratio = round(tp1_pct / sl_atr_pct, 2) if sl_atr_pct > 0 else 2.0
 
-        candle_1h = results.get("1h", {}).get("candle", {})
-        candle_4h = results.get("4h", {}).get("candle", {})
-        ms_1h     = results.get("1h", {}).get("market_structure", {})
-        ms_4h     = results.get("4h", {}).get("market_structure", {})
+        candle_1h = res_1h.get("candle") or {}
+        candle_4h = res_4h.get("candle") or {}
+        ms_4h     = res_4h.get("market_structure") or {}
 
         all_bull_patterns = candle_1h.get("bull_patterns", []) + candle_4h.get("bull_patterns", [])
         all_bear_patterns = candle_1h.get("bear_patterns", []) + candle_4h.get("bear_patterns", [])
@@ -666,9 +686,9 @@ class SignalEngine:
             "strength":       max(candle_4h.get("strength", 0), candle_1h.get("strength", 0)),
         }
 
-        if final == "LONG" and candle_summary["confirm_long"]:
+        if final == "LONG" and candle_summary.get("confirm_long"):
             conf = round(min(95, conf * 1.05), 1)
-        elif final == "SHORT" and candle_summary["confirm_short"]:
+        elif final == "SHORT" and candle_summary.get("confirm_short"):
             conf = round(min(95, conf * 1.05), 1)
 
         # ══════════════════════════════════════════════════════════
@@ -697,7 +717,7 @@ class SignalEngine:
             
             if sweep_data.get("detected") and sweep_data.get("type") == "BULLISH_SWEEP": likelihood *= 1.3
             
-            if candle_summary["confirm_long"]: likelihood *= 1.2
+            if candle_summary.get("confirm_long"): likelihood *= 1.2
             
             if kalman_trend == "BULLISH": likelihood *= 1.3
             elif kalman_trend == "BEARISH": likelihood *= 0.7
@@ -723,7 +743,7 @@ class SignalEngine:
             
             if sweep_data.get("detected") and sweep_data.get("type") == "BEARISH_SWEEP": likelihood *= 1.3
             
-            if candle_summary["confirm_short"]: likelihood *= 1.2
+            if candle_summary.get("confirm_short"): likelihood *= 1.2
 
             if kalman_trend == "BEARISH": likelihood *= 1.3
             elif kalman_trend == "BULLISH": likelihood *= 0.7
@@ -766,7 +786,7 @@ class SignalEngine:
             "breakout": bo_1h, "whale": wh_1h,
             "volume_1h": vol_1h, "volume_4h": vol_4h,
             "candle": candle_summary,
-            "elliott_4h": results.get("4h", {}).get("elliott", {}),
+            "elliott_4h": res_4h.get("elliott") or {},
             "market_structure_1h": ms_1h,
             "market_structure_4h": ms_4h,
             "oi_signal": oi_signal, "oi_desc": oi_desc,
@@ -781,6 +801,7 @@ class SignalEngine:
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
+
 
 
 
