@@ -10,14 +10,24 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trading_bot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
-    pool_pre_ping=True,
-)
+# Phân tách cấu hình riêng cho SQLite (Local) và Postgres (Cloud/Render)
+if "sqlite" in DATABASE_URL:
+    engine_kwargs = {
+        "connect_args": {"check_same_thread": False},
+        "pool_pre_ping": True,
+    }
+else:
+    engine_kwargs = {
+        "pool_pre_ping": True,     # Ping kiểm tra trước khi query
+        "pool_recycle": 1800,      # Tự động reset kết nối mỗi 30 phút (Chặn lỗi Cloud ngắt SSL)
+        "pool_size": 10,           # Kích thước Pool tối ưu cho Render
+        "max_overflow": 20,
+        "pool_use_lifo": True      # Luôn tái sử dụng các đường truyền mới nhất
+    }
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
 
 class User(Base):
     __tablename__ = "users"
