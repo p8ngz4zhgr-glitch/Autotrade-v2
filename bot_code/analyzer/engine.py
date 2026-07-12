@@ -311,7 +311,7 @@ class SignalEngine:
             raise RuntimeError(f"Quá ít TF ({tf_count}) cho {symbol}")
 
         # ══════════════════════════════════════════════════════════
-        # [BẢN VÁ LÕI] BÓC TÁCH DỮ LIỆU AN TOÀN TUYỆT ĐỐI (CHỐNG NONE)
+        # BÓC TÁCH DỮ LIỆU AN TOÀN TUYỆT ĐỐI (CHỐNG NONE)
         # ══════════════════════════════════════════════════════════
         res_1h = results.get("1h") or {}
         res_4h = results.get("4h") or {}
@@ -340,7 +340,6 @@ class SignalEngine:
             oi_now, oi_delta = self.crypto.open_interest(symbol)
             funding          = self.crypto.funding_rate(symbol)
             
-            # Vá lỗi NoneType Assignment cho Cache
             if not hasattr(self, '_cache') or self._cache is None:
                 self._cache = {}
                 
@@ -475,14 +474,9 @@ class SignalEngine:
         
         if swing_high > 0 and swing_low > 0 and swing_high > swing_low:
             equilibrium = (swing_high + swing_low) / 2
-            
             wave_range = swing_high - swing_low
             price_pos = (price - swing_low) / wave_range
-            
-            if price_pos >= 0.5:
-                smc_zone = "PREMIUM"
-            else:
-                smc_zone = "DISCOUNT"
+            smc_zone = "PREMIUM" if price_pos >= 0.5 else "DISCOUNT"
                 
             log.info("  [SMC Filter] Eq: %.4f | Vị trí: %s", equilibrium, smc_zone)
 
@@ -490,12 +484,11 @@ class SignalEngine:
             
             if not is_extreme_breakout:
                 if final == "LONG" and smc_zone == "PREMIUM":
-                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu LONG nhưng giá đang neo ở đỉnh (PREMIUM). Ép về WAIT.")
+                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu LONG tại đỉnh (PREMIUM) -> Ép về WAIT.")
                     final = "WAIT"
                     conf = round(conf * 0.7, 1)
-                    
                 elif final == "SHORT" and smc_zone == "DISCOUNT":
-                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu SHORT nhưng giá đã dí xuống đáy (DISCOUNT). Ép về WAIT.")
+                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu SHORT tại đáy (DISCOUNT) -> Ép về WAIT.")
                     final = "WAIT"
                     conf = round(conf * 0.7, 1)
 
@@ -558,27 +551,33 @@ class SignalEngine:
                 log.warning("⚠️ Lỗi phân tích L2 Orderbook/Liquidity cho %s: %s", symbol, e)
 
         # ══════════════════════════════════════════════════════════
-        # [SMC] KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP
+        # [SMC] BỘ LỌC & KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP
         # ══════════════════════════════════════════════════════════
         if sweep_data.get("detected"):
             sw_type = sweep_data.get("type")
             sw_price = sweep_data.get("price", 0)
             
             if sw_type == "BULLISH_SWEEP":
+                # 1. Chặn lệnh Short ném tiền qua cửa sổ
                 if final == "SHORT":
-                    log.warning(f"⛔ FILTER: Cá mập quét đáy (Bullish Sweep @ {sw_price}) -> HỦY LỆNH SHORT")
+                    log.warning(f"⛔ FILTER: Cá mập quét đáy lấy thanh khoản (Bullish Sweep @ {sw_price}) -> HỦY LỆNH SHORT")
                     final = "WAIT"
+                    
+                # 2. Bắt đáy: Nếu hệ thống đang phân vân (WAIT) nhưng có setup quét đáy -> Kích hoạt LONG
                 elif final in ("LONG", "WAIT") and combined >= 45: 
-                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đáy cũ (Bullish Sweep @ {sw_price}) -> KÍCH HOẠT LONG")
+                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đáy cũ (Bullish Sweep @ {sw_price}) -> VÀO LỆNH LONG")
                     final = "LONG"
                     conf = round(min(95, conf + 15.0), 1) 
                     
             elif sw_type == "BEARISH_SWEEP":
+                # 1. Chặn lệnh Long đu đỉnh
                 if final == "LONG":
-                    log.warning(f"⛔ FILTER: Cá mập quét đỉnh (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
+                    log.warning(f"⛔ FILTER: Cá mập quét đỉnh xả hàng (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
                     final = "WAIT"
+                    
+                # 2. Bắt đỉnh: Chờ quét đỉnh xong quay đầu -> Kích hoạt SHORT
                 elif final in ("SHORT", "WAIT") and combined <= 55: 
-                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đỉnh cũ (Bearish Sweep @ {sw_price}) -> KÍCH HOẠT SHORT")
+                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đỉnh cũ (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
                     final = "SHORT"
                     conf = round(min(95, conf + 15.0), 1)
 
@@ -801,6 +800,7 @@ class SignalEngine:
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
+
 
 
 
