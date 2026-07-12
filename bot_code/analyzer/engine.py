@@ -269,17 +269,14 @@ class SignalEngine:
         
         if db is not None:
             try:
-                # Import bên trong hàm để tránh lỗi Circular Import
                 from sqlalchemy.dialects.postgresql import insert
                 from core_api.models import TrackedSymbol, MarketRegime 
 
-                # A. Tự động đăng ký mã coin cho HMM Worker quét
                 stmt = insert(TrackedSymbol).values(symbol=symbol, is_active=True)
                 stmt = stmt.on_conflict_do_nothing(index_elements=['symbol'])
                 db.execute(stmt)
                 db.commit()
 
-                # B. Đọc bối cảnh thị trường HMM mới nhất
                 regime_data = db.query(MarketRegime).filter(MarketRegime.symbol == symbol).first()
                 if regime_data:
                     hmm_regime = regime_data.regime_name
@@ -290,7 +287,7 @@ class SignalEngine:
                 log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
 
         # Chạy song song 4 TF
-        def _fetch_tf(tf):
+    def _fetch_tf(tf):
             return tf, self.analyze_tf(symbol, tf, fetcher)
 
         futures = {self._executor.submit(_fetch_tf, tf): tf for tf in self.TIMEFRAMES}
@@ -305,7 +302,6 @@ class SignalEngine:
         if not results:
             raise RuntimeError("Không lấy được dữ liệu " + symbol)
 
-        # Penalty confidence khi thiếu TF quan trọng
         missing_important = [tf for tf in ("1h", "4h") if tf not in results]
         tf_penalty = len(missing_important) * 10
 
@@ -350,7 +346,7 @@ class SignalEngine:
         vol_4h = results.get("4h", {}).get("volume", {})
 
         # ══════════════════════════════════════════════════════════
-        # 1. KHỞI TẠO VÀ CHẠY KALMAN FILTER (Lọc nhiễu tìm True Price)
+        # 1. KHỞI TẠO VÀ CHẠY KALMAN FILTER
         # ══════════════════════════════════════════════════════════
         kalman_trend = "NEUTRAL"
         kalman_price = price
@@ -413,7 +409,6 @@ class SignalEngine:
         if vol_1h.get("buy_confirm")  and vol_4h.get("buy_confirm"):  smart += 15
         if vol_1h.get("sell_confirm") and vol_4h.get("sell_confirm"): smart -= 15
 
-        # 2. TÍCH HỢP KALMAN VÀO SMART SCORE
         if kalman_trend == "BULLISH": smart += 15
         elif kalman_trend == "BEARISH": smart -= 15
 
@@ -423,7 +418,6 @@ class SignalEngine:
         log.info("  TF=%.1f Smart=%+.1f Combined=%.1f L:%d S:%d",
                  avg_score, smart, combined, longs, shorts)
 
-        # Scale down threshold khi thiếu TF
         min_long_tfs  = min(3, tf_count - 1)
         min_short_tfs = min(3, tf_count - 1)
 
@@ -447,11 +441,47 @@ class SignalEngine:
                 if conf < 55:
                     final = "WAIT"
 
-        # Áp dụng TF penalty vào confidence
         if tf_penalty > 0:
             conf = round(max(30, conf - tf_penalty), 1)
             log.warning("  ⚠️ Thiếu TF %s → penalty -%d%% → conf=%.1f%%",
                         missing_important, tf_penalty, conf)
+
+        # ══════════════════════════════════════════════════════════
+        # [SMC] BỘ LỌC CHỐNG FOMO (PREMIUM & DISCOUNT ZONES)
+        # ══════════════════════════════════════════════════════════
+        # Chỉ vào lệnh khi giá nằm ở vùng lợi thế, tương thích hoàn hảo với logic Fibo/Wyckoff
+        ms_1h = results.get("1h", {}).get("market_structure", {})
+        swing_high = ms_1h.get("last_swing_high", 0)
+        swing_low = ms_1h.get("last_swing_low", 0)
+        smc_zone = "UNKNOWN"
+        
+        if swing_high > 0 and swing_low > 0 and swing_high > swing_low:
+            equilibrium = (swing_high + swing_low) / 2
+            
+            # Tính % vị trí của giá trong con sóng (0 = đáy, 1 = đỉnh)
+            wave_range = swing_high - swing_low
+            price_pos = (price - swing_low) / wave_range
+            
+            if price_pos >= 0.5:
+                smc_zone = "PREMIUM"
+            else:
+                smc_zone = "DISCOUNT"
+                
+            log.info("  [SMC Filter] Eq: %.4f | Vị trí: %s", equilibrium, smc_zone)
+
+            # Ngoại lệ: Cho phép FOMO nếu đây là cú Breakout cực mạnh (> 85)
+            is_extreme_breakout = (bo_1h.get("strength", 0) >= 85 or bo_4h.get("strength", 0) >= 85)
+            
+            if not is_extreme_breakout:
+                if final == "LONG" and smc_zone == "PREMIUM":
+                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu LONG nhưng giá đang neo ở đỉnh (PREMIUM). Ép về WAIT chờ giá hồi về Discount / lấp FVG.")
+                    final = "WAIT"
+                    conf = round(conf * 0.7, 1)
+                    
+                elif final == "SHORT" and smc_zone == "DISCOUNT":
+                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu SHORT nhưng giá đã dí xuống đáy (DISCOUNT). Ép về WAIT chờ giá giật lên Premium / lấp FVG.")
+                    final = "WAIT"
+                    conf = round(conf * 0.7, 1)
 
         # ── 12-Agent L2 Orderbook and Liquidity Analysis ─────────────────
         ob_data = {"detected": False}
@@ -479,10 +509,6 @@ class SignalEngine:
                 
                 tf_to_check = results.get("1h") or results.get("15m")
                 if tf_to_check:
-                    mstruct = tf_to_check.get("market_structure", {})
-                    swing_high = mstruct.get("last_swing_high", 0)
-                    swing_low = mstruct.get("last_swing_low", 0)
-                    
                     high_price = tf_to_check.get("high", [0])[-1]
                     low_price = tf_to_check.get("low", [0])[-1]
                     close_price = tf_to_check.get("price", price)
@@ -512,65 +538,53 @@ class SignalEngine:
                 log.warning("⚠️ Lỗi phân tích L2 Orderbook/Liquidity cho %s: %s", symbol, e)
 
         # ══════════════════════════════════════════════════════════
-        # [SMC] BỘ LỌC & KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP
+        # [SMC] KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP
         # ══════════════════════════════════════════════════════════
         if sweep_data.get("detected"):
             sw_type = sweep_data.get("type")
             sw_price = sweep_data.get("price")
             
             if sw_type == "BULLISH_SWEEP":
-                # 1. Chặn lệnh Short ném tiền qua cửa sổ
                 if final == "SHORT":
-                    log.warning(f"⛔ FILTER: Cá mập quét đáy lấy thanh khoản (Bullish Sweep @ {sw_price}) -> HỦY LỆNH SHORT")
+                    log.warning(f"⛔ FILTER: Cá mập quét đáy (Bullish Sweep @ {sw_price}) -> HỦY LỆNH SHORT")
                     final = "WAIT"
-                    
-                # 2. Bắt đáy: Nếu hệ thống đang phân vân (WAIT) nhưng có setup quét đáy -> Kích hoạt LONG
-                elif final in ("LONG", "WAIT") and combined >= 45: # Nới lỏng điều kiện combined một chút để bắt râu
-                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đáy cũ (Bullish Sweep @ {sw_price}) -> VÀO LỆNH LONG")
+                elif final in ("LONG", "WAIT") and combined >= 45: 
+                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đáy cũ (Bullish Sweep @ {sw_price}) -> KÍCH HOẠT LONG")
                     final = "LONG"
-                    conf = round(min(95, conf + 15.0), 1) # Ép confidence lên cao để vượt qua các bộ lọc dưới
+                    conf = round(min(95, conf + 15.0), 1) 
                     
             elif sw_type == "BEARISH_SWEEP":
-                # 1. Chặn lệnh Long đu đỉnh
                 if final == "LONG":
-                    log.warning(f"⛔ FILTER: Cá mập quét đỉnh xả hàng (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
+                    log.warning(f"⛔ FILTER: Cá mập quét đỉnh (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
                     final = "WAIT"
-                    
-                # 2. Bắt đỉnh: Chờ quét đỉnh xong quay đầu -> Kích hoạt SHORT
                 elif final in ("SHORT", "WAIT") and combined <= 55: 
-                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đỉnh cũ (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
+                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đỉnh cũ (Bearish Sweep @ {sw_price}) -> KÍCH HOẠT SHORT")
                     final = "SHORT"
                     conf = round(min(95, conf + 15.0), 1)
-       # ══════════════════════════════════════════════════════════
-        # 2.5. ATR-BASED SL/TP (TỐI ƯU HÓA CHỐNG QUÉT RÂU - WHIPSAW)
+
+        # ══════════════════════════════════════════════════════════
+        # 2.5. ATR-BASED SL/TP
         # ══════════════════════════════════════════════════════════
         atr_1h     = results.get("1h", {}).get("atr", price * 0.01)
         atr_pct_1h = results.get("1h", {}).get("atr_pct", 1.0)
         
-        # A. Hệ số nhân động dựa trên HMM Regime
-        atr_multiplier = 2.0  # Mức chuẩn cho Crypto (Trend Following)
+        atr_multiplier = 2.0  
         if hmm_regime == "SIDEWAYS":
-            atr_multiplier = 2.5  # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu
+            atr_multiplier = 2.5  
             
-        # B. Tính % SL với trần (cap) được nâng lên 4.5% để chịu nhiệt Altcoin
-        # Sàn dưới nâng lên 1.0% để tránh đặt SL quá sát khi thị trường đột ngột im ắng
         sl_atr_pct = max(1.0, min(4.5, atr_pct_1h * atr_multiplier))
-        
-        # C. Tỷ lệ R:R động
-        tp1_pct    = sl_atr_pct * 1.5  # Tối thiểu R:R 1:1.5 cho TP1
-        tp2_pct    = sl_atr_pct * 3.0  # R:R 1:3 cho TP2
+        tp1_pct    = sl_atr_pct * 1.5  
+        tp2_pct    = sl_atr_pct * 3.0  
         
         fibo4l     = results.get("4h", {}).get("fibo", {}).get("levels", {})
-
         atr_tp1 = round(price * (1 + tp1_pct / 100), 2)
         atr_tp2 = round(price * (1 + tp2_pct / 100), 2)
         atr_tp1_s = round(price * (1 - tp1_pct / 100), 2)
         atr_tp2_s = round(price * (1 - tp2_pct / 100), 2)
-
         fibo4h_trend = results.get("4h", {}).get("fibo", {}).get("trend", "")
 
         # ══════════════════════════════════════════════════════════
-        # 3. TỐI ƯU STOPLOSS BẰNG KALMAN (Bảo vệ lệnh khỏi Whipsaw)
+        # 3. TỐI ƯU STOPLOSS BẰNG KALMAN
         # ══════════════════════════════════════════════════════════
         if final == "LONG":
             sl = round(price * (1 - sl_atr_pct / 100), 2)
@@ -657,7 +671,6 @@ class SignalEngine:
         elif final == "SHORT" and candle_summary["confirm_short"]:
             conf = round(min(95, conf * 1.05), 1)
 
-
         # ══════════════════════════════════════════════════════════
         # ─── XÁC SUẤT (BAYES) & KỲ VỌNG TOÁN HỌC (EV) ───
         # ══════════════════════════════════════════════════════════
@@ -686,11 +699,9 @@ class SignalEngine:
             
             if candle_summary["confirm_long"]: likelihood *= 1.2
             
-            # 4. TÍCH HỢP KALMAN
             if kalman_trend == "BULLISH": likelihood *= 1.3
             elif kalman_trend == "BEARISH": likelihood *= 0.7
 
-            # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
             if hmm_regime == "UPTREND": likelihood *= 1.4
             elif hmm_regime == "DOWNTREND": likelihood *= 0.5
             
@@ -714,11 +725,9 @@ class SignalEngine:
             
             if candle_summary["confirm_short"]: likelihood *= 1.2
 
-            # 4. TÍCH HỢP KALMAN
             if kalman_trend == "BEARISH": likelihood *= 1.3
             elif kalman_trend == "BULLISH": likelihood *= 0.7
 
-            # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
             if hmm_regime == "DOWNTREND": likelihood *= 1.4
             elif hmm_regime == "UPTREND": likelihood *= 0.5
 
@@ -768,9 +777,10 @@ class SignalEngine:
             "orderbook": ob_data,
             "liquidity_sweep": sweep_data,
             "kalman": kalman_data,
-            "hmm": {"regime": hmm_regime, "confidence": hmm_conf}, # Trả về dữ liệu HMM để hiển thị trên Telegram nếu cần
+            "hmm": {"regime": hmm_regime, "confidence": hmm_conf},
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
+
 
 
