@@ -270,14 +270,14 @@ class SignalEngine:
         if db is not None:
             try:
                 from sqlalchemy.dialects.postgresql import insert
+                from sqlalchemy import text  # Bổ sung import hàm text tại đây
                 from core_api.models import TrackedSymbol, MarketRegime 
                 
-                # Quan trọng: Gửi một lệnh ping "vô hại" trước để đánh thức database, 
-                # hoặc bắt SQLAlchemy tự tạo connection mới nếu cái cũ đã chết do nhàn rỗi.
+                # Ping Database chuẩn cú pháp SQLAlchemy 2.0+
                 try:
-                    db.execute("SELECT 1") 
+                    db.execute(text("SELECT 1")) 
                 except Exception as ping_err:
-                    log.warning(f"  ⚠️ SSL Ping thất bại, cố gắng rollback để khôi phục: {ping_err}")
+                    log.warning(f"  ⚠️ SSL Ping thất bại, khôi phục kết nối: {ping_err}")
                     db.rollback()
 
                 # A. Đăng ký symbol
@@ -295,9 +295,8 @@ class SignalEngine:
                     
             except Exception as e:
                 db.rollback()
-                # Log ra lỗi chính xác thay vì chỉ báo chung chung để theo dõi
                 if "SSL" in str(e) or "server closed the connection" in str(e):
-                    log.error("  ❌ Bị Server (Render/ElephantSQL) cắt đứt kết nối Database đột ngột.")
+                    log.error("  ❌ Bị Server cắt đứt kết nối Database đột ngột.")
                 else:
                     log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
 
