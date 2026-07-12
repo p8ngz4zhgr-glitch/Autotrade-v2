@@ -22,6 +22,13 @@ class BingXExchange:
     def __init__(self, api_key: str, api_secret: str):
         self.api_key    = str(api_key).strip() if api_key else ""
         self.api_secret = str(api_secret).strip() if api_secret else ""
+        # Trạng thái nhiều chặng (leg) chốt lời từng phần cho mỗi symbol.
+        # leg=1  : chặng Entry -> TP1
+        # leg=2  : chặng TP1 -> TP2
+        # mid_done: đã chốt 1 phần ở mốc 50% của chặng hiện tại hay chưa
+        # LƯU Ý: trạng thái này chỉ tồn tại trong bộ nhớ của process. Nếu bot bị
+        # restart giữa chừng, trạng thái sẽ về mặc định (leg=1, mid_done=False).
+        self._position_stage = {}
 
     def _sign(self, params: dict) -> str:
         query_string = urllib.parse.urlencode(sorted(params.items()))
@@ -277,6 +284,8 @@ class BingXExchange:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
+            # Reset trạng thái nhiều chặng cho lệnh mới này
+            self._position_stage[symbol] = {"leg": 1, "mid_done": False, "original_qty": safe_qty}
             return {"ok": True, "order_id": order_id}
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
@@ -354,11 +363,28 @@ class BingXExchange:
         return {"ok": True}
 
     # ════════════════════════════════════════════════════════════════════
-    # CƠ CHẾ LỌC NHIỄU, KÉO SL HÒA VỐN SỚM (EARLY BREAKEVEN) VÀ GỒNG LÃI
+    # CƠ CHẾ QUẢN LÝ ĐỘNG: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
+    # VÀ ĐẢO CHIỀU TỨC THÌ
     # ════════════════════════════════════════════════════════════════════
+    #
+    # Luồng chốt lời từng phần:
+    #   Chặng 1 (Entry -> TP1):
+    #     - Đi được 50% quãng đường tới TP1  -> chốt 1 phần nhỏ (MID_CLOSE_RATIO),
+    #       dời SL về Entry (hòa vốn), giữ TP ở TP1.
+    #     - Chạm TP1                         -> chốt thêm 1 phần (TP1_CLOSE_RATIO).
+    #       + Nếu xu hướng vẫn tiếp diễn      -> chuyển sang Chặng 2, SL dời lên TP1,
+    #         TP mới = TP2 (gồng lãi tiếp).
+    #       + Nếu xu hướng yếu/không rõ       -> chốt toàn bộ phần còn lại, kết thúc lệnh.
+    #   Chặng 2 (TP1 -> TP2):
+    #     - Đi được 50% quãng đường tới TP2  -> lặp lại: chốt 1 phần nhỏ, dời SL lên TP1.
+    #     - Chạm TP2                         -> chốt toàn bộ phần còn lại, kết thúc lệnh.
+    #
+    # Bất kỳ lúc nào (ở chặng 1 hay chặng 2) nếu xu hướng đảo chiều mạnh
+    # (tín hiệu mới ngược hướng lệnh đang giữ) -> đóng toàn bộ vị thế ngay lập tức.
     def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5) -> dict:
         open_positions = self.get_open_positions(symbol)
         if not open_positions:
+            self._position_stage.pop(symbol, None)
             return {"action": "NONE", "msg": "Không có vị thế mở."}
             
         pos = open_positions[0]
@@ -367,59 +393,178 @@ class BingXExchange:
         current_qty = float(pos.get("qty", 0))
         current_price = self.get_latest_price(symbol)
         
-        active_orders = self.get_trigger_orders().get(symbol, {}) 
-        current_sl = float(active_orders.get("sl", 0))
-        
         if entry_price <= 0 or current_price <= 0:
             return {"action": "NONE", "msg": "Giá bị lỗi."}
 
+        # Lấy kế hoạch giá từ AI
         plan = analysis_result.get("plan", {})
         tp1_price = float(plan.get("tp1", 0))
+        tp2_price = float(plan.get("tp2", 0))
         
+        # Tính toán tỷ lệ % ROE
         if direction == "LONG":
             roe = ((current_price - entry_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(tp1_price - entry_price) if tp1_price > 0 else 0
-            curr_dist = current_price - entry_price
         else:
             roe = ((entry_price - current_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(entry_price - tp1_price) if tp1_price > 0 else 0
-            curr_dist = entry_price - current_price
 
-        # 1. EARLY BREAKEVEN: 50% chặng đường -> Dời SL về Entry
-        if dist_to_tp1 > 0 and (curr_dist / dist_to_tp1) >= 0.50:
-            if abs(current_sl - entry_price) > (entry_price * 0.0001):
-                log.info(f"🛡️ {symbol} đạt 50% TP1. Kéo SL về Entry {entry_price}!")
-                self.cancel_all_orders(symbol)
-                
-                tp_target = float(plan.get("tp2", tp1_price))
-                
-                # [ĐÃ SỬA LỖI MŨI TÊN CHÍ MẠNG]
-                # Phải truyền chiều MỞ vị thế gốc (original_side) vào hàm _place_sl_tp.
-                # Hàm này nhận vào chiều gốc và sẽ tự tính toán sinh lệnh ngược chiều (opposite_side) để ĐÓNG vị thế.
-                original_side = "BUY" if direction == "LONG" else "SELL"
-                
-                self._place_sl_tp(symbol, original_side, current_qty, entry_price, tp_target)
-                return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn."}
-
-        # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
         new_signal = analysis_result.get("final", "WAIT")
-        if new_signal == "WAIT":
-            is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
-            THRESHOLD = 12.0
-            
-            if roe >= THRESHOLD or roe <= -THRESHOLD:
-                if not is_trending:
-                    log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
-                    self.close_position(symbol, current_qty, direction)
-                    self.cancel_all_orders(symbol)
-                    return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
-        
-        # 3. ĐẢO CHIỀU HOÀN TOÀN
-        elif (direction == "LONG" and new_signal == "SHORT") or \
-             (direction == "SHORT" and new_signal == "LONG"):
-            log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
+        is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
+
+        # ------------------------------------------------------------------
+        # BƯỚC 1: XỬ LÝ ĐẢO CHIỀU (REVERSAL) — áp dụng cho MỌI chặng
+        # ------------------------------------------------------------------
+        if (direction == "LONG" and new_signal == "SHORT") or \
+           (direction == "SHORT" and new_signal == "LONG"):
+            log.warning(f"🚨 Xu hướng đảo chiều ({direction} -> {new_signal}). Đóng toàn bộ lệnh cũ!")
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
-            return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
+            self._position_stage.pop(symbol, None)
+            # Trả về tín hiệu để vòng lặp chính (main loop) mở lệnh mới theo new_signal
+            return {
+                "action": "REVERSE", 
+                "msg": f"Đã đóng vị thế {direction}.",
+                "new_direction": new_signal
+            }
 
-        return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
+        # ------------------------------------------------------------------
+        # BƯỚC 2: XỬ LÝ LỌC NHIỄU KHÔNG RÕ XU HƯỚNG (WAIT REGIME)
+        # Phân cấp riêng: chiều lỗ (SL) 12% | chiều lãi (TP) 8%
+        # ------------------------------------------------------------------
+        if new_signal == "WAIT":
+            SL_THRESHOLD = 12.0
+            TP_THRESHOLD = 8.0
+            if roe <= -SL_THRESHOLD or roe >= TP_THRESHOLD:
+                if not is_trending:
+                    log.info(f"💰 Chốt lời/Cắt lỗ sớm {roe:.2f}% do thị trường đi ngang (WAIT).")
+                    self.close_position(symbol, current_qty, direction)
+                    self.cancel_all_orders(symbol)
+                    self._position_stage.pop(symbol, None)
+                    return {"action": "CLOSE", "type": "WAIT_REGIME", "roe": roe}
+
+        # ------------------------------------------------------------------
+        # BƯỚC 3: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
+        # ------------------------------------------------------------------
+        stage = self._position_stage.get(symbol)
+        if stage is None:
+            stage = {"leg": 1, "mid_done": False, "original_qty": current_qty}
+            self._position_stage[symbol] = stage
+
+        original_side = "BUY" if direction == "LONG" else "SELL"
+        trend_continues = (direction == "LONG" and new_signal == "LONG") or \
+                          (direction == "SHORT" and new_signal == "SHORT")
+
+        MID_CLOSE_RATIO = 0.3   # % vị thế hiện tại chốt ở mốc 50% mỗi chặng
+        TP1_CLOSE_RATIO = 0.5   # % vị thế hiện tại chốt khi chạm TP1
+
+        # ================= CHẶNG 1: ENTRY -> TP1 =================
+        if stage["leg"] == 1:
+            if tp1_price <= 0:
+                return {"action": "HOLD", "msg": "Chưa có TP1 để tính toán."}
+
+            if direction == "LONG":
+                dist_to_tp1 = tp1_price - entry_price if tp1_price > entry_price else 0
+                curr_dist = current_price - entry_price
+                tp1_hit = current_price >= tp1_price
+            else:
+                dist_to_tp1 = entry_price - tp1_price if entry_price > tp1_price else 0
+                curr_dist = entry_price - current_price
+                tp1_hit = current_price <= tp1_price
+
+            progress = (curr_dist / dist_to_tp1) if dist_to_tp1 > 0 else 0
+
+            # -- Mốc 50% quãng đường tới TP1: chốt 1 ít, dời SL về Entry --
+            if not stage["mid_done"]:
+                if progress >= 0.5:
+                    partial_qty = float(int((current_qty * MID_CLOSE_RATIO) * 10000) / 10000)
+                    partial_qty = min(partial_qty, current_qty)
+                    if partial_qty > 0:
+                        self.close_position(symbol, partial_qty, direction)
+                    remaining_qty = float(int((current_qty - partial_qty) * 10000) / 10000)
+                    self.cancel_all_orders(symbol)
+                    self._place_sl_tp(symbol, original_side, remaining_qty, entry_price, tp1_price)
+                    stage["mid_done"] = True
+                    log.info(f"🛡️ {symbol} đạt 50% quãng đường tới TP1. Chốt {partial_qty}, dời SL về Entry, chờ TP1={tp1_price}.")
+                    return {
+                        "action": "SCALE_OUT",
+                        "leg": 1,
+                        "msg": f"Chốt {partial_qty} tại 50% TP1 | SL={entry_price} | chờ TP1={tp1_price}"
+                    }
+                return {"action": "HOLD", "msg": "Đang chờ 50% quãng đường tới TP1."}
+
+            # -- Đã qua mốc 50%, chờ chạm TP1 để chốt thêm và xét gồng tiếp --
+            if tp1_hit:
+                close_qty = float(int((current_qty * TP1_CLOSE_RATIO) * 10000) / 10000)
+                close_qty = min(close_qty, current_qty)
+                self.cancel_all_orders(symbol)
+                if close_qty > 0:
+                    self.close_position(symbol, close_qty, direction)
+                remaining_qty = float(int((current_qty - close_qty) * 10000) / 10000)
+
+                if trend_continues and tp2_price > 0 and remaining_qty > 0:
+                    # Xu hướng còn mạnh -> gồng lãi tiếp sang Chặng 2 (TP1 -> TP2)
+                    self._place_sl_tp(symbol, original_side, remaining_qty, tp1_price, tp2_price)
+                    stage["leg"] = 2
+                    stage["mid_done"] = False
+                    log.info(f"📈 {symbol} chạm TP1. Chốt {close_qty}, gồng {remaining_qty} tới TP2={tp2_price}.")
+                    return {
+                        "action": "SCALE_OUT",
+                        "leg": 1,
+                        "msg": f"TP1 đạt, chốt {close_qty}, gồng {remaining_qty} sang TP2={tp2_price}",
+                        "next_leg": 2
+                    }
+                else:
+                    # Xu hướng yếu/không rõ -> chốt toàn bộ phần còn lại tại TP1
+                    if remaining_qty > 0:
+                        self.close_position(symbol, remaining_qty, direction)
+                    self.cancel_all_orders(symbol)
+                    self._position_stage.pop(symbol, None)
+                    log.info(f"💰 {symbol} chạm TP1, xu hướng yếu -> chốt toàn bộ.")
+                    return {"action": "CLOSE", "type": "TP1_FINAL", "msg": "Chạm TP1, xu hướng yếu, đóng toàn bộ."}
+
+            return {"action": "HOLD", "msg": "Đã dời SL về Entry, đang chờ chạm TP1."}
+
+        # ================= CHẶNG 2: TP1 -> TP2 =================
+        else:
+            if tp2_price <= 0:
+                return {"action": "HOLD", "msg": "Chưa có TP2 để tính toán."}
+
+            if direction == "LONG":
+                dist_to_tp2 = tp2_price - tp1_price if tp2_price > tp1_price else 0
+                curr_dist2 = current_price - tp1_price
+                tp2_hit = current_price >= tp2_price
+            else:
+                dist_to_tp2 = tp1_price - tp2_price if tp1_price > tp2_price else 0
+                curr_dist2 = tp1_price - current_price
+                tp2_hit = current_price <= tp2_price
+
+            progress2 = (curr_dist2 / dist_to_tp2) if dist_to_tp2 > 0 else 0
+
+            # -- Mốc 50% quãng đường tới TP2: lặp lại — chốt 1 ít, dời SL lên TP1 --
+            if not stage["mid_done"]:
+                if progress2 >= 0.5:
+                    partial_qty = float(int((current_qty * MID_CLOSE_RATIO) * 10000) / 10000)
+                    partial_qty = min(partial_qty, current_qty)
+                    if partial_qty > 0:
+                        self.close_position(symbol, partial_qty, direction)
+                    remaining_qty = float(int((current_qty - partial_qty) * 10000) / 10000)
+                    self.cancel_all_orders(symbol)
+                    self._place_sl_tp(symbol, original_side, remaining_qty, tp1_price, tp2_price)
+                    stage["mid_done"] = True
+                    log.info(f"🛡️ {symbol} đạt 50% quãng đường tới TP2. Chốt {partial_qty}, dời SL lên TP1={tp1_price}, chờ TP2={tp2_price}.")
+                    return {
+                        "action": "SCALE_OUT",
+                        "leg": 2,
+                        "msg": f"Chốt {partial_qty} tại 50% TP2 | SL={tp1_price} | chờ TP2={tp2_price}"
+                    }
+                return {"action": "HOLD", "msg": "Đang chờ 50% quãng đường tới TP2."}
+
+            # -- Chạm TP2: chốt toàn bộ phần còn lại, kết thúc lệnh --
+            if tp2_hit:
+                self.cancel_all_orders(symbol)
+                if current_qty > 0:
+                    self.close_position(symbol, current_qty, direction)
+                self._position_stage.pop(symbol, None)
+                log.info(f"🎯 {symbol} đạt TP2. Chốt toàn bộ lệnh.")
+                return {"action": "CLOSE", "type": "TP2_FINAL", "msg": "Đạt TP2, chốt toàn bộ lệnh."}
+
+            return {"action": "HOLD", "msg": "Đã dời SL lên TP1, đang chờ chạm TP2."}
