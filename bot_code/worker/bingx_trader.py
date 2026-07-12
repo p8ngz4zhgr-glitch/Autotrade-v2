@@ -367,15 +367,12 @@ class BingXExchange:
         current_qty = float(pos.get("qty", 0))
         current_price = self.get_latest_price(symbol)
         
-        # Lấy thông tin SL/TP hiện tại TRÊN SÀN (quan trọng để tránh spam)
-        # Lưu ý: Hàm get_position_info hoặc get_open_orders của bạn phải trả về SL/TP hiện tại
         active_orders = self.get_trigger_orders().get(symbol, {}) 
         current_sl = float(active_orders.get("sl", 0))
         
         if entry_price <= 0 or current_price <= 0:
             return {"action": "NONE", "msg": "Giá bị lỗi."}
 
-        # Tính toán ROE và quãng đường
         plan = analysis_result.get("plan", {})
         tp1_price = float(plan.get("tp1", 0))
         
@@ -390,15 +387,17 @@ class BingXExchange:
 
         # 1. EARLY BREAKEVEN: 50% chặng đường -> Dời SL về Entry
         if dist_to_tp1 > 0 and (curr_dist / dist_to_tp1) >= 0.50:
-            # KIỂM TRA ĐIỀU KIỆN KÉO: 
-            # Chỉ kéo nếu SL hiện tại CÒN ĐANG LÀ SL CŨ (sai lệch lớn với entry)
-            # Dùng ngưỡng sai số 0.0001 (0.01%) để so sánh float
             if abs(current_sl - entry_price) > (entry_price * 0.0001):
                 log.info(f"🛡️ {symbol} đạt 50% TP1. Kéo SL về Entry {entry_price}!")
                 self.cancel_all_orders(symbol)
-                # Dùng TP2 từ plan nếu có, không thì dùng TP1 cũ
+                
                 tp_target = float(plan.get("tp2", tp1_price))
-                self._place_sl_tp(symbol, "BUY" if direction == "LONG" else "SELL", current_qty, entry_price, tp_target)
+                
+                # [BẢN VÁ LỖI MŨI TÊN CHÍ MẠNG]
+                # LONG thì phải đặt lệnh SELL để đóng. SHORT thì phải đặt lệnh BUY để đóng.
+                close_direction = "SELL" if direction == "LONG" else "BUY"
+                
+                self._place_sl_tp(symbol, close_direction, current_qty, entry_price, tp_target)
                 return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn."}
 
         # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
@@ -407,9 +406,7 @@ class BingXExchange:
             is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
             THRESHOLD = 12.0
             
-            # Cần so sánh abs(roe) để cắt cả LONG lẫn SHORT
             if roe >= THRESHOLD or roe <= -THRESHOLD:
-                # Chỉ đóng khi trend đã mất (is_trending == False)
                 if not is_trending:
                     log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
                     self.close_position(symbol, current_qty, direction)
