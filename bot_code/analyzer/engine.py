@@ -256,7 +256,7 @@ class SignalEngine:
             "high": highs, "low": lows, "close": closes
         }
 
-        def full_analysis(self, symbol, db=None):
+    def full_analysis(self, symbol, db=None):
         fetcher, atype = self._fetcher(symbol)
         log.info("📊 Phân tích %s [%s]...", symbol, atype)
         results = {}
