@@ -288,7 +288,7 @@ class SignalEngine:
 
         # Chạy song song 4 TF
     def _fetch_tf(tf):
-            return tf, self.analyze_tf(symbol, tf, fetcher)
+        return tf, self.analyze_tf(symbol, tf, fetcher)
 
         futures = {self._executor.submit(_fetch_tf, tf): tf for tf in self.TIMEFRAMES}
         for fut in as_completed(futures, timeout=35):
