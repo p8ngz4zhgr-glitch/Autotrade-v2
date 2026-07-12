@@ -262,7 +262,7 @@ class SignalEngine:
         results = {}
 
         # ══════════════════════════════════════════════════════════
-        # A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM TỪ DATABASE (Đã fix SSL)
+        # A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM TỪ DATABASE
         # ══════════════════════════════════════════════════════════
         hmm_regime = "UNKNOWN"
         hmm_conf = 0.0
@@ -270,23 +270,20 @@ class SignalEngine:
         if db is not None:
             try:
                 from sqlalchemy.dialects.postgresql import insert
-                from sqlalchemy import text  # Bổ sung import hàm text tại đây
+                from sqlalchemy import text  
                 from core_api.models import TrackedSymbol, MarketRegime 
                 
-                # Ping Database chuẩn cú pháp SQLAlchemy 2.0+
                 try:
                     db.execute(text("SELECT 1")) 
                 except Exception as ping_err:
                     log.warning(f"  ⚠️ SSL Ping thất bại, khôi phục kết nối: {ping_err}")
                     db.rollback()
 
-                # A. Đăng ký symbol
                 stmt = insert(TrackedSymbol).values(symbol=symbol, is_active=True)
                 stmt = stmt.on_conflict_do_nothing(index_elements=['symbol'])
                 db.execute(stmt)
                 db.commit()
 
-                # B. Lấy Market Regime
                 regime_data = db.query(MarketRegime).filter(MarketRegime.symbol == symbol).first()
                 if regime_data:
                     hmm_regime = regime_data.regime_name
@@ -325,7 +322,7 @@ class SignalEngine:
             raise RuntimeError(f"Quá ít TF ({tf_count}) cho {symbol}")
 
         # ══════════════════════════════════════════════════════════
-        # BÓC TÁCH DỮ LIỆU AN TOÀN TUYỆT ĐỐI (CHỐNG NONE)
+        # BÓC TÁCH DỮ LIỆU AN TOÀN TUYỆT ĐỐI
         # ══════════════════════════════════════════════════════════
         res_1h = results.get("1h") or {}
         res_4h = results.get("4h") or {}
@@ -429,8 +426,12 @@ class SignalEngine:
         if wy_4h.get("bias") == "BULLISH":   smart += 10
         elif wy_4h.get("bias") == "BEARISH": smart -= 10
         
-        if fi_1h.get("trend") == "UPTREND":     smart += 8
-        elif fi_1h.get("trend") == "DOWNTREND": smart -= 8
+        fi_1h_trend = fi_1h.get("trend")
+        fibo4l       = (res_4h.get("fibo") or {}).get("levels") or {}
+        fibo4h_trend = (res_4h.get("fibo") or {}).get("trend", "")
+        
+        if fi_1h_trend == "UPTREND":     smart += 8
+        elif fi_1h_trend == "DOWNTREND": smart -= 8
         
         if wh_1h.get("detected"):
             smart += 25 if wh_1h.get("type") == "WHALE_BUY" else -25
@@ -447,8 +448,7 @@ class SignalEngine:
         combined = avg_score * 0.6 + (50 + smart) * 0.4
         combined = max(0, min(100, combined))
 
-        log.info("  TF=%.1f Smart=%+.1f Combined=%.1f L:%d S:%d",
-                 avg_score, smart, combined, longs, shorts)
+        log.info("  TF=%.1f Smart=%+.1f Combined=%.1f L:%d S:%d", avg_score, smart, combined, longs, shorts)
 
         min_long_tfs  = min(3, tf_count - 1)
         min_short_tfs = min(3, tf_count - 1)
@@ -470,13 +470,18 @@ class SignalEngine:
             
             if cvd_tr in ("BEARISH_DIV","BULLISH_DIV") and abs(smart) < 20:
                 conf = round(conf * 0.85, 1)
-                if conf < 55:
-                    final = "WAIT"
+                if conf < 55: final = "WAIT"
+
+        # ══════════════════════════════════════════════════════════
+        # [MACRO FILTER] CHỐNG ĐÁNH NGƯỢC XU HƯỚNG LỚN (TINH CHỈNH)
+        # ══════════════════════════════════════════════════════════
+        if final == "SHORT" and atype == "CRYPTO":
+            if hmm_regime == "UPTREND" or fibo4h_trend == "UPTREND":
+                log.warning("  ⛔ [MACRO] Cấm SHORT Crypto khi xu hướng lớn (HMM/4H) đang TĂNG -> Ép về WAIT")
+                final = "WAIT"
 
         if tf_penalty > 0:
             conf = round(max(30, conf - tf_penalty), 1)
-            log.warning("  ⚠️ Thiếu TF %s → penalty -%d%% → conf=%.1f%%",
-                        missing_important, tf_penalty, conf)
 
         # ══════════════════════════════════════════════════════════
         # [SMC] BỘ LỌC CHỐNG FOMO (PREMIUM & DISCOUNT ZONES)
@@ -498,11 +503,11 @@ class SignalEngine:
             
             if not is_extreme_breakout:
                 if final == "LONG" and smc_zone == "PREMIUM":
-                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu LONG tại đỉnh (PREMIUM) -> Ép về WAIT.")
+                    log.warning("  ⛔ [CHỐNG FOMO] LONG tại đỉnh (PREMIUM) -> WAIT.")
                     final = "WAIT"
                     conf = round(conf * 0.7, 1)
                 elif final == "SHORT" and smc_zone == "DISCOUNT":
-                    log.warning("  ⛔ [CHỐNG FOMO] Tín hiệu SHORT tại đáy (DISCOUNT) -> Ép về WAIT.")
+                    log.warning("  ⛔ [CHỐNG FOMO] SHORT tại đáy (DISCOUNT) -> WAIT.")
                     final = "WAIT"
                     conf = round(conf * 0.7, 1)
 
@@ -565,38 +570,38 @@ class SignalEngine:
                 log.warning("⚠️ Lỗi phân tích L2 Orderbook/Liquidity cho %s: %s", symbol, e)
 
         # ══════════════════════════════════════════════════════════
-        # [SMC] BỘ LỌC & KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP
+        # [SMC] BỘ LỌC & KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP (TINH CHỈNH)
         # ══════════════════════════════════════════════════════════
         if sweep_data.get("detected"):
             sw_type = sweep_data.get("type")
             sw_price = sweep_data.get("price", 0)
             
             if sw_type == "BULLISH_SWEEP":
-                # 1. Chặn lệnh Short ném tiền qua cửa sổ
                 if final == "SHORT":
-                    log.warning(f"⛔ FILTER: Cá mập quét đáy lấy thanh khoản (Bullish Sweep @ {sw_price}) -> HỦY LỆNH SHORT")
+                    log.warning(f"⛔ FILTER: Cá mập quét đáy (Bullish Sweep @ {sw_price}) -> HỦY LỆNH SHORT")
                     final = "WAIT"
                     
-                # 2. Bắt đáy: Nếu hệ thống đang phân vân (WAIT) nhưng có setup quét đáy -> Kích hoạt LONG
-                elif final in ("LONG", "WAIT") and combined >= 45: 
-                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đáy cũ (Bullish Sweep @ {sw_price}) -> VÀO LỆNH LONG")
+                # [TINH CHỈNH 1] Chỉ kích hoạt LONG khi quét đáy VÀ giá ở vùng DISCOUNT
+                elif final in ("LONG", "WAIT") and combined >= 45 and smc_zone == "DISCOUNT": 
+                    log.info(f"🎯 TRIGGER (SMC): Phá đáy giả ở Discount (Bullish Sweep @ {sw_price}) -> VÀO LỆNH LONG")
                     final = "LONG"
                     conf = round(min(95, conf + 15.0), 1) 
                     
             elif sw_type == "BEARISH_SWEEP":
-                # 1. Chặn lệnh Long đu đỉnh
                 if final == "LONG":
-                    log.warning(f"⛔ FILTER: Cá mập quét đỉnh xả hàng (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
+                    log.warning(f"⛔ FILTER: Cá mập quét đỉnh (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
                     final = "WAIT"
                     
-                # 2. Bắt đỉnh: Chờ quét đỉnh xong quay đầu -> Kích hoạt SHORT
-                elif final in ("SHORT", "WAIT") and combined <= 55: 
-                    log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đỉnh cũ (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
-                    final = "SHORT"
-                    conf = round(min(95, conf + 15.0), 1)
+                # [TINH CHỈNH 1] Chỉ kích hoạt SHORT khi quét đỉnh VÀ giá ở vùng PREMIUM
+                elif final in ("SHORT", "WAIT") and combined <= 55 and smc_zone == "PREMIUM": 
+                    # Đảm bảo Macro trend không ngăn cấm Short
+                    if not (atype == "CRYPTO" and (hmm_regime == "UPTREND" or fibo4h_trend == "UPTREND")):
+                        log.info(f"🎯 TRIGGER (SMC): Phá đỉnh giả ở Premium (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
+                        final = "SHORT"
+                        conf = round(min(95, conf + 15.0), 1)
 
         # ══════════════════════════════════════════════════════════
-        # 2.5. ATR-BASED SL/TP
+        # 2.5. ATR-BASED SL/TP (THÁO TRẦN STOP LOSS)
         # ══════════════════════════════════════════════════════════
         atr_1h     = res_1h.get("atr", price * 0.01)
         atr_pct_1h = res_1h.get("atr_pct", 1.0)
@@ -605,12 +610,12 @@ class SignalEngine:
         if hmm_regime == "SIDEWAYS":
             atr_multiplier = 2.5  
             
-        sl_atr_pct = max(1.0, min(4.5, atr_pct_1h * atr_multiplier))
+        # [TINH CHỈNH 2] Nâng trần SL cho Crypto lên 8.0% để tránh bị săn thanh khoản (Whipsaw)
+        max_sl_cap = 8.0 if atype == "CRYPTO" else 4.5
+        sl_atr_pct = max(1.0, min(max_sl_cap, atr_pct_1h * atr_multiplier))
+        
         tp1_pct    = sl_atr_pct * 1.5  
         tp2_pct    = sl_atr_pct * 3.0  
-        
-        fibo4l       = (res_4h.get("fibo") or {}).get("levels") or {}
-        fibo4h_trend = (res_4h.get("fibo") or {}).get("trend", "")
         
         atr_tp1 = round(price * (1 + tp1_pct / 100), 2)
         atr_tp2 = round(price * (1 + tp2_pct / 100), 2)
@@ -777,8 +782,9 @@ class SignalEngine:
             log.info("  [Bayes EV] %s %s: P(win)=%.1f%%, EV_Ratio=%.2f (Likelihood=%.2f)",
                      final, symbol, p_win * 100, ev_ratio, likelihood)
             
-            if ev_ratio < 0.15:
-                log.warning("  ⚠️ EV(%.2f) quá thấp, hạ cấp thành WAIT", ev_ratio)
+            # [TINH CHỈNH 3] Nâng ngưỡng EV cắt nhiễu từ 0.15 lên 0.25 để bỏ qua các lệnh 50/50
+            if ev_ratio < 0.25:
+                log.warning("  ⚠️ EV(%.2f) quá thấp (cần >= 0.25), hạ cấp thành WAIT", ev_ratio)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
             elif ev_ratio > 0.5:
