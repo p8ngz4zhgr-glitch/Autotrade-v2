@@ -393,11 +393,12 @@ class BingXExchange:
                 
                 tp_target = float(plan.get("tp2", tp1_price))
                 
-                # [BẢN VÁ LỖI MŨI TÊN CHÍ MẠNG]
-                # LONG thì phải đặt lệnh SELL để đóng. SHORT thì phải đặt lệnh BUY để đóng.
-                close_direction = "SELL" if direction == "LONG" else "BUY"
+                # [ĐÃ SỬA LỖI MŨI TÊN CHÍ MẠNG]
+                # Phải truyền chiều MỞ vị thế gốc (original_side) vào hàm _place_sl_tp.
+                # Hàm này nhận vào chiều gốc và sẽ tự tính toán sinh lệnh ngược chiều (opposite_side) để ĐÓNG vị thế.
+                original_side = "BUY" if direction == "LONG" else "SELL"
                 
-                self._place_sl_tp(symbol, close_direction, current_qty, entry_price, tp_target)
+                self._place_sl_tp(symbol, original_side, current_qty, entry_price, tp_target)
                 return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn."}
 
         # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
@@ -422,4 +423,3 @@ class BingXExchange:
             return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
 
         return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
-
