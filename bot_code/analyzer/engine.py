@@ -499,7 +499,7 @@ class SignalEngine:
                 
             log.info("  [SMC Filter] Eq: %.4f | Vị trí: %s", equilibrium, smc_zone)
 
-            is_extreme_breakout = (bo_1h.get("strength", 0) >= 85 or bo_4h.get("strength", 0) >= 85)
+            is_extreme_breakout = (bo_1h.get("strength", 0) >= 75 or bo_4h.get("strength", 0) >= 85)
             
             if not is_extreme_breakout:
                 if final == "LONG" and smc_zone == "PREMIUM":
@@ -878,8 +878,8 @@ class SignalEngine:
                      final, symbol, p_win * 100, ev_ratio, likelihood)
             
             # [TINH CHỈNH 3] Nâng ngưỡng EV cắt nhiễu từ 0.15 lên 0.25 để bỏ qua các lệnh 50/50
-            if ev_ratio < 0.25:
-                log.warning("  ⚠️ EV(%.2f) quá thấp (cần >= 0.25), hạ cấp thành WAIT", ev_ratio)
+            if ev_ratio < 0.20:
+                log.warning("  ⚠️ EV(%.2f) quá thấp (cần >= 0.20), hạ cấp thành WAIT", ev_ratio)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
             elif ev_ratio > 0.5:
