@@ -637,7 +637,7 @@ class SignalEngine:
                 ms_4h_struct == "DOWNTREND",
             ])
 
-            HTF_BLOCK_VOTES = 3  # nới từ 2 -> 3: cần đa số áp đảo mới chặn
+            HTF_BLOCK_VOTES = 2  # nới từ 2 -> 3: cần đa số áp đảo mới chặn
             if final == "LONG" and htf_bear_votes >= HTF_BLOCK_VOTES and htf_bull_votes == 0:
                 log.warning("  ⛔ [HTF GATE] LONG bị chặn: 1H/4H nghiêng giảm (%d/4 phiếu) -> WAIT", htf_bear_votes)
                 final = "WAIT"
@@ -878,7 +878,7 @@ class SignalEngine:
                      final, symbol, p_win * 100, ev_ratio, likelihood)
             
             # [TINH CHỈNH 3] Nâng ngưỡng EV cắt nhiễu từ 0.15 lên 0.25 để bỏ qua các lệnh 50/50
-            if ev_ratio < 0.20:
+            if ev_ratio < 0.15:
                 log.warning("  ⚠️ EV(%.2f) quá thấp (cần >= 0.20), hạ cấp thành WAIT", ev_ratio)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
