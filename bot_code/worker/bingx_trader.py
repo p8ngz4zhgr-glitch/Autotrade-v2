@@ -285,7 +285,7 @@ class BingXExchange:
             log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
             # Reset trạng thái nhiều chặng cho lệnh mới này
-            self._position_stage[symbol] = {"leg": 1, "mid_done": False, "original_qty": safe_qty}
+            self._position_stage[symbol] = {"leg": 1, "mid_done": False, "original_qty": safe_qty, "peak_roe": 0.0}
             return {"ok": True, "order_id": order_id}
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
@@ -363,24 +363,32 @@ class BingXExchange:
         return {"ok": True}
 
     # ════════════════════════════════════════════════════════════════════
-    # CƠ CHẾ QUẢN LÝ ĐỘNG: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
-    # VÀ ĐẢO CHIỀU TỨC THÌ
+    # CƠ CHẾ QUẢN LÝ ĐỘNG: BẢO VỆ VỐN/LỢI NHUẬN SỚM + GỒNG LÃI NHIỀU CHẶNG
+    # (ENTRY -> TP1 -> TP2) + ĐẢO CHIỀU TỨC THÌ
     # ════════════════════════════════════════════════════════════════════
     #
-    # Luồng chốt lời từng phần:
-    #   Chặng 1 (Entry -> TP1):
-    #     - Đi được 50% quãng đường tới TP1  -> chốt 1 phần nhỏ (MID_CLOSE_RATIO),
-    #       dời SL về Entry (hòa vốn), giữ TP ở TP1.
-    #     - Chạm TP1                         -> chốt thêm 1 phần (TP1_CLOSE_RATIO).
-    #       + Nếu xu hướng vẫn tiếp diễn      -> chuyển sang Chặng 2, SL dời lên TP1,
-    #         TP mới = TP2 (gồng lãi tiếp).
-    #       + Nếu xu hướng yếu/không rõ       -> chốt toàn bộ phần còn lại, kết thúc lệnh.
-    #   Chặng 2 (TP1 -> TP2):
-    #     - Đi được 50% quãng đường tới TP2  -> lặp lại: chốt 1 phần nhỏ, dời SL lên TP1.
-    #     - Chạm TP2                         -> chốt toàn bộ phần còn lại, kết thúc lệnh.
-    #
-    # Bất kỳ lúc nào (ở chặng 1 hay chặng 2) nếu xu hướng đảo chiều mạnh
-    # (tín hiệu mới ngược hướng lệnh đang giữ) -> đóng toàn bộ vị thế ngay lập tức.
+    # Thứ tự ưu tiên kiểm tra mỗi lần gọi (cái nào khớp trước sẽ return luôn):
+    #   BƯỚC 1 - Đảo chiều mạnh      -> đóng toàn bộ NGAY, bất kể đang ở giai đoạn nào.
+    #   BƯỚC 2 - Chốt lời sớm        -> đạt ngưỡng ROE (PROFIT_ARM_ROE) thì "arm" trailing;
+    #             (bảo vệ lợi nhuận)    sau đó nếu ROE hồi lại quá PROFIT_TRAIL_GIVEBACK
+    #                                   điểm % so với đỉnh đã đạt -> chốt toàn bộ, khóa lời.
+    #   BƯỚC 3 - SL sớm              -> chỉ khi CHƯA chốt phần nào ở Chặng 1 (SL gốc vẫn
+    #             (bảo vệ vốn)          đang giữ), nếu ROE âm chạm EARLY_SL_ROE_THRESHOLD
+    #                                   VÀ xu hướng đang yếu (is_trending=False) cùng lúc
+    #                                   -> đóng toàn bộ sớm để bảo toàn vốn.
+    #   BƯỚC 4 - Lọc nhiễu WAIT       -> tín hiệu WAIT + ROE chạm ngưỡng (SL 12% / TP 8%)
+    #                                   + thị trường đi ngang -> đóng toàn bộ.
+    #   BƯỚC 5 - Gồng lãi nhiều chặng:
+    #     Chặng 1 (Entry -> TP1):
+    #       - Đi được 50% quãng đường tới TP1  -> chốt 1 phần nhỏ (MID_CLOSE_RATIO),
+    #         dời SL về Entry (hòa vốn), giữ TP ở TP1.
+    #       - Chạm TP1                         -> chốt thêm 1 phần (TP1_CLOSE_RATIO).
+    #         + Nếu xu hướng vẫn tiếp diễn      -> chuyển sang Chặng 2, SL dời lên TP1,
+    #           TP mới = TP2 (gồng lãi tiếp).
+    #         + Nếu xu hướng yếu/không rõ       -> chốt toàn bộ phần còn lại, kết thúc lệnh.
+    #     Chặng 2 (TP1 -> TP2):
+    #       - Đi được 50% quãng đường tới TP2  -> lặp lại: chốt 1 phần nhỏ, dời SL lên TP1.
+    #       - Chạm TP2                         -> chốt toàn bộ phần còn lại, kết thúc lệnh.
     def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5) -> dict:
         open_positions = self.get_open_positions(symbol)
         if not open_positions:
@@ -426,8 +434,46 @@ class BingXExchange:
                 "new_direction": new_signal
             }
 
+        # Lấy/khởi tạo trạng thái nhiều chặng + cập nhật đỉnh ROE (peak_roe) —
+        # cần làm trước vì cả 2 cơ chế bảo vệ sớm bên dưới đều dựa vào đây.
+        stage = self._position_stage.get(symbol)
+        if stage is None:
+            stage = {"leg": 1, "mid_done": False, "original_qty": current_qty, "peak_roe": roe}
+            self._position_stage[symbol] = stage
+        else:
+            stage["peak_roe"] = max(stage.get("peak_roe", roe), roe)
+
         # ------------------------------------------------------------------
-        # BƯỚC 2: XỬ LÝ LỌC NHIỄU KHÔNG RÕ XU HƯỚNG (WAIT REGIME)
+        # BƯỚC 2: CHỐT LỜI SỚM BẢO VỆ LỢI NHUẬN (kết hợp ngưỡng + trailing)
+        # Đạt PROFIT_ARM_ROE thì "arm" cơ chế; sau đó nếu ROE hồi lại quá
+        # PROFIT_TRAIL_GIVEBACK điểm % so với đỉnh -> khóa lời, chốt toàn bộ.
+        # ------------------------------------------------------------------
+        PROFIT_ARM_ROE = 6.0
+        PROFIT_TRAIL_GIVEBACK = 4.0
+        peak_roe = stage.get("peak_roe", roe)
+        if peak_roe >= PROFIT_ARM_ROE and roe <= (peak_roe - PROFIT_TRAIL_GIVEBACK):
+            log.info(f"🔒 {symbol} chốt lời sớm: đỉnh ROE={peak_roe:.2f}%, hiện tại={roe:.2f}% (hồi lại > {PROFIT_TRAIL_GIVEBACK}%).")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
+            self._position_stage.pop(symbol, None)
+            return {"action": "CLOSE", "type": "PROFIT_LOCK", "roe": roe, "peak_roe": peak_roe}
+
+        # ------------------------------------------------------------------
+        # BƯỚC 3: SL SỚM BẢO VỆ VỐN (chỉ khi SL gốc còn đang giữ, tức Chặng 1
+        # và CHƯA chốt phần nào ở mốc 50%) — cần cả 2 điều kiện cùng lúc:
+        # ROE âm chạm ngưỡng nhỏ + xu hướng đang yếu đi.
+        # ------------------------------------------------------------------
+        EARLY_SL_ROE_THRESHOLD = -5.0
+        if stage["leg"] == 1 and not stage["mid_done"]:
+            if roe <= EARLY_SL_ROE_THRESHOLD and not is_trending:
+                log.info(f"🛑 {symbol} cắt lỗ sớm bảo vệ vốn: ROE={roe:.2f}% <= {EARLY_SL_ROE_THRESHOLD}% và xu hướng yếu.")
+                self.close_position(symbol, current_qty, direction)
+                self.cancel_all_orders(symbol)
+                self._position_stage.pop(symbol, None)
+                return {"action": "CLOSE", "type": "EARLY_SL", "roe": roe}
+
+        # ------------------------------------------------------------------
+        # BƯỚC 4: XỬ LÝ LỌC NHIỄU KHÔNG RÕ XU HƯỚNG (WAIT REGIME)
         # Phân cấp riêng: chiều lỗ (SL) 12% | chiều lãi (TP) 8%
         # ------------------------------------------------------------------
         if new_signal == "WAIT":
@@ -442,13 +488,8 @@ class BingXExchange:
                     return {"action": "CLOSE", "type": "WAIT_REGIME", "roe": roe}
 
         # ------------------------------------------------------------------
-        # BƯỚC 3: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
+        # BƯỚC 5: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
         # ------------------------------------------------------------------
-        stage = self._position_stage.get(symbol)
-        if stage is None:
-            stage = {"leg": 1, "mid_done": False, "original_qty": current_qty}
-            self._position_stage[symbol] = stage
-
         original_side = "BUY" if direction == "LONG" else "SELL"
         trend_continues = (direction == "LONG" and new_signal == "LONG") or \
                           (direction == "SHORT" and new_signal == "SHORT")
