@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════
-# 5. SIGNAL ENGINE — v6.2 (Parallel TF + Smart Confidence + 15m Trigger)
+# 5. SIGNAL ENGINE — v6.1 (Parallel TF + Smart Confidence)
 # ═══════════════════════════════════════════════════════════
 import time
 import logging
@@ -601,101 +601,6 @@ class SignalEngine:
                         conf = round(min(95, conf + 15.0), 1)
 
         # ══════════════════════════════════════════════════════════
-        # [v6.2] BỘ LỌC CUỐI: HTF TREND GATE (1H+4H) + 15M ENTRY TRIGGER
-        # Bot quét 15 phút/lần -> nến 15m đóng vai trò tín hiệu kích hoạt
-        # (entry trigger) đúng theo nhịp quét thực tế, còn 1H/4H tiếp tục
-        # giữ vai trò xác định xu hướng tổng thể để không vào lệnh ngược
-        # dòng. Đặt SAU CÙNG (sau macro filter, SMC zone, liquidity sweep)
-        # để chốt lại mọi thay đổi hướng lệnh trước khi tính SL/TP — cả 2
-        # bước chỉ được phép HẠ final xuống WAIT, KHÔNG được tự nâng WAIT
-        # thành LONG/SHORT, nên không phá vỡ hiệu chỉnh (calibration) của
-        # phần smart-score/combined phía trên.
-        # [NỚI LỎNG] Cả 2 bước dùng kiểu "biểu quyết đa số" thay vì bắt
-        # buộc TẤT CẢ tín hiệu phải đồng thuận — chỉ chặn khi số tín hiệu
-        # ngược chiều thực sự áp đảo, để không bỏ lỡ lệnh tốt vì 1 tín
-        # hiệu phụ lệch nhịp, nhưng vẫn giữ được hàng rào chống vào lệnh
-        # ngược dòng rõ ràng.
-        # ══════════════════════════════════════════════════════════
-        if final in ("LONG", "SHORT"):
-            # -- 3a. HTF TREND GATE: chỉ chặn khi 3/4 tín hiệu 1H+4H NGƯỢC
-            # chiều và không có tín hiệu nào ủng hộ (nới từ 2/4 lên 3/4).
-            ms_4h_htf = res_4h.get("market_structure") or {}
-            ms_1h_struct = ms_1h.get("structure", "SIDEWAYS")
-            ms_4h_struct = ms_4h_htf.get("structure", "SIDEWAYS")
-            ema_1h_htf = res_1h.get("ema") or {}
-
-            htf_bull_votes = sum([
-                bool(ema_1h_htf.get("bull", False)),
-                ms_1h_struct == "UPTREND",
-                fibo4h_trend == "UPTREND",
-                ms_4h_struct == "UPTREND",
-            ])
-            htf_bear_votes = sum([
-                bool(ema_1h_htf.get("bear", False)),
-                ms_1h_struct == "DOWNTREND",
-                fibo4h_trend == "DOWNTREND",
-                ms_4h_struct == "DOWNTREND",
-            ])
-
-            HTF_BLOCK_VOTES = 3  # nới từ 2 -> 3: cần đa số áp đảo mới chặn
-            if final == "LONG" and htf_bear_votes >= HTF_BLOCK_VOTES and htf_bull_votes == 0:
-                log.warning("  ⛔ [HTF GATE] LONG bị chặn: 1H/4H nghiêng giảm (%d/4 phiếu) -> WAIT", htf_bear_votes)
-                final = "WAIT"
-                conf = round(conf * 0.85, 1)
-            elif final == "SHORT" and htf_bull_votes >= HTF_BLOCK_VOTES and htf_bear_votes == 0:
-                log.warning("  ⛔ [HTF GATE] SHORT bị chặn: 1H/4H nghiêng tăng (%d/4 phiếu) -> WAIT", htf_bull_votes)
-                final = "WAIT"
-                conf = round(conf * 0.85, 1)
-
-        if final in ("LONG", "SHORT"):
-            # -- 3b. 15M ENTRY TRIGGER: đổi từ "bắt buộc cả 4 tín hiệu 15m
-            # đồng thuận" sang biểu quyết theo đa số — chỉ hạ về WAIT khi
-            # số tín hiệu 15m NGƯỢC chiều nhiều hơn số tín hiệu THUẬN chiều
-            # (tránh vào lệnh đúng lúc momentum ngắn hạn đã đảo hẳn), thay
-            # vì chặn cả khi chỉ 1 tín hiệu phụ lệch nhịp.
-            res_15m = results.get("15m") or {}
-            if res_15m:
-                cvd_tr_15m = (res_15m.get("cvd") or {}).get("trend", "NEUTRAL")
-                bo_15m = res_15m.get("breakout") or {}
-                candle_15m = res_15m.get("candle") or {}
-                ema_15m = res_15m.get("ema") or {}
-
-                if final == "LONG":
-                    confirm_votes = sum([
-                        cvd_tr_15m in ("BULLISH", "BULLISH_DIV"),
-                        bo_15m.get("type") == "BREAKOUT_UP",
-                        bool(candle_15m.get("confirm_long", False)),
-                        bool(ema_15m.get("bull", False)),
-                    ])
-                    oppose_votes = sum([
-                        cvd_tr_15m in ("BEARISH", "BEARISH_DIV"),
-                        bo_15m.get("type") == "BREAKOUT_DOWN",
-                        bool(candle_15m.get("confirm_short", False)),
-                        bool(ema_15m.get("bear", False)),
-                    ])
-                else:
-                    confirm_votes = sum([
-                        cvd_tr_15m in ("BEARISH", "BEARISH_DIV"),
-                        bo_15m.get("type") == "BREAKOUT_DOWN",
-                        bool(candle_15m.get("confirm_short", False)),
-                        bool(ema_15m.get("bear", False)),
-                    ])
-                    oppose_votes = sum([
-                        cvd_tr_15m in ("BULLISH", "BULLISH_DIV"),
-                        bo_15m.get("type") == "BREAKOUT_UP",
-                        bool(candle_15m.get("confirm_long", False)),
-                        bool(ema_15m.get("bull", False)),
-                    ])
-
-                entry_confirm = oppose_votes == 0 or confirm_votes > oppose_votes
-
-                if not entry_confirm:
-                    log.info("  ⏳ [15M TRIGGER] %s bị nến 15m áp đảo ngược chiều (%d thuận/%d nghịch) -> chờ (WAIT).",
-                             final, confirm_votes, oppose_votes)
-                    final = "WAIT"
-                    conf = round(conf * 0.9, 1)
-
-        # ══════════════════════════════════════════════════════════
         # 2.5. ATR-BASED SL/TP (THÁO TRẦN STOP LOSS)
         # ══════════════════════════════════════════════════════════
         atr_1h     = res_1h.get("atr", price * 0.01)
@@ -915,3 +820,8 @@ class SignalEngine:
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
+
+
+
+
+
