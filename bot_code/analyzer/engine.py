@@ -610,10 +610,15 @@ class SignalEngine:
         # bước chỉ được phép HẠ final xuống WAIT, KHÔNG được tự nâng WAIT
         # thành LONG/SHORT, nên không phá vỡ hiệu chỉnh (calibration) của
         # phần smart-score/combined phía trên.
+        # [NỚI LỎNG] Cả 2 bước dùng kiểu "biểu quyết đa số" thay vì bắt
+        # buộc TẤT CẢ tín hiệu phải đồng thuận — chỉ chặn khi số tín hiệu
+        # ngược chiều thực sự áp đảo, để không bỏ lỡ lệnh tốt vì 1 tín
+        # hiệu phụ lệch nhịp, nhưng vẫn giữ được hàng rào chống vào lệnh
+        # ngược dòng rõ ràng.
         # ══════════════════════════════════════════════════════════
         if final in ("LONG", "SHORT"):
-            # -- 3a. HTF TREND GATE: cần tối thiểu 2/4 tín hiệu 1H+4H đồng
-            # thuận và KHÔNG có tín hiệu HTF nào ngược chiều mới cho qua.
+            # -- 3a. HTF TREND GATE: chỉ chặn khi 3/4 tín hiệu 1H+4H NGƯỢC
+            # chiều và không có tín hiệu nào ủng hộ (nới từ 2/4 lên 3/4).
             ms_4h_htf = res_4h.get("market_structure") or {}
             ms_1h_struct = ms_1h.get("structure", "SIDEWAYS")
             ms_4h_struct = ms_4h_htf.get("structure", "SIDEWAYS")
@@ -632,20 +637,22 @@ class SignalEngine:
                 ms_4h_struct == "DOWNTREND",
             ])
 
-            if final == "LONG" and htf_bear_votes >= 2 and htf_bull_votes == 0:
+            HTF_BLOCK_VOTES = 3  # nới từ 2 -> 3: cần đa số áp đảo mới chặn
+            if final == "LONG" and htf_bear_votes >= HTF_BLOCK_VOTES and htf_bull_votes == 0:
                 log.warning("  ⛔ [HTF GATE] LONG bị chặn: 1H/4H nghiêng giảm (%d/4 phiếu) -> WAIT", htf_bear_votes)
                 final = "WAIT"
-                conf = round(conf * 0.8, 1)
-            elif final == "SHORT" and htf_bull_votes >= 2 and htf_bear_votes == 0:
+                conf = round(conf * 0.85, 1)
+            elif final == "SHORT" and htf_bull_votes >= HTF_BLOCK_VOTES and htf_bear_votes == 0:
                 log.warning("  ⛔ [HTF GATE] SHORT bị chặn: 1H/4H nghiêng tăng (%d/4 phiếu) -> WAIT", htf_bull_votes)
                 final = "WAIT"
-                conf = round(conf * 0.8, 1)
+                conf = round(conf * 0.85, 1)
 
         if final in ("LONG", "SHORT"):
-            # -- 3b. 15M ENTRY TRIGGER: nến 15m hiện tại phải xác nhận cùng
-            # chiều thì mới vào lệnh ngay; nếu 15m đang đi ngược, hạ về
-            # WAIT để chờ nến 15m kế tiếp xác nhận (tránh vào lệnh đúng
-            # lúc momentum ngắn hạn vừa đảo chiều — cải thiện tỉ lệ WR).
+            # -- 3b. 15M ENTRY TRIGGER: đổi từ "bắt buộc cả 4 tín hiệu 15m
+            # đồng thuận" sang biểu quyết theo đa số — chỉ hạ về WAIT khi
+            # số tín hiệu 15m NGƯỢC chiều nhiều hơn số tín hiệu THUẬN chiều
+            # (tránh vào lệnh đúng lúc momentum ngắn hạn đã đảo hẳn), thay
+            # vì chặn cả khi chỉ 1 tín hiệu phụ lệch nhịp.
             res_15m = results.get("15m") or {}
             if res_15m:
                 cvd_tr_15m = (res_15m.get("cvd") or {}).get("trend", "NEUTRAL")
@@ -654,24 +661,39 @@ class SignalEngine:
                 ema_15m = res_15m.get("ema") or {}
 
                 if final == "LONG":
-                    entry_confirm = (
-                        cvd_tr_15m in ("BULLISH", "BULLISH_DIV", "NEUTRAL") and
-                        bo_15m.get("type") != "BREAKOUT_DOWN" and
-                        not candle_15m.get("confirm_short") and
-                        not ema_15m.get("bear", False)
-                    )
+                    confirm_votes = sum([
+                        cvd_tr_15m in ("BULLISH", "BULLISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_UP",
+                        bool(candle_15m.get("confirm_long", False)),
+                        bool(ema_15m.get("bull", False)),
+                    ])
+                    oppose_votes = sum([
+                        cvd_tr_15m in ("BEARISH", "BEARISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_DOWN",
+                        bool(candle_15m.get("confirm_short", False)),
+                        bool(ema_15m.get("bear", False)),
+                    ])
                 else:
-                    entry_confirm = (
-                        cvd_tr_15m in ("BEARISH", "BEARISH_DIV", "NEUTRAL") and
-                        bo_15m.get("type") != "BREAKOUT_UP" and
-                        not candle_15m.get("confirm_long") and
-                        not ema_15m.get("bull", False)
-                    )
+                    confirm_votes = sum([
+                        cvd_tr_15m in ("BEARISH", "BEARISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_DOWN",
+                        bool(candle_15m.get("confirm_short", False)),
+                        bool(ema_15m.get("bear", False)),
+                    ])
+                    oppose_votes = sum([
+                        cvd_tr_15m in ("BULLISH", "BULLISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_UP",
+                        bool(candle_15m.get("confirm_long", False)),
+                        bool(ema_15m.get("bull", False)),
+                    ])
+
+                entry_confirm = oppose_votes == 0 or confirm_votes > oppose_votes
 
                 if not entry_confirm:
-                    log.info("  ⏳ [15M TRIGGER] %s chưa được nến 15m xác nhận -> chờ (WAIT).", final)
+                    log.info("  ⏳ [15M TRIGGER] %s bị nến 15m áp đảo ngược chiều (%d thuận/%d nghịch) -> chờ (WAIT).",
+                             final, confirm_votes, oppose_votes)
                     final = "WAIT"
-                    conf = round(conf * 0.85, 1)
+                    conf = round(conf * 0.9, 1)
 
         # ══════════════════════════════════════════════════════════
         # 2.5. ATR-BASED SL/TP (THÁO TRẦN STOP LOSS)
@@ -868,27 +890,6 @@ class SignalEngine:
             "ev_ratio": round(ev_ratio, 2),
             "likelihood": round(likelihood, 2)
         }
-        # ══════════════════════════════════════════════════════════
-        # [TINH CHỈNH] KALMAN ENTRY GATE: Chỉ vào lệnh khi giá đồng pha Kalman
-        # ══════════════════════════════════════════════════════════
-        if final in ("LONG", "SHORT") and kalman_data.get("detected"):
-            k_price = kalman_data.get("price", price)
-            k_trend = kalman_data.get("trend", "NEUTRAL")
-            
-            # Logic: LONG chỉ khi Trend Kalman là BULLISH và giá > Kalman
-            if final == "LONG":
-                if k_trend != "BULLISH" or price < k_price:
-                    log.warning("  ⛔ [KALMAN GATE] LONG bị chặn: Trend/Giá không hỗ trợ (Trend: %s, Price: %.4f vs K: %.4f)", k_trend, price, k_price)
-                    final = "WAIT"
-                    conf = round(conf * 0.7, 1)
-            
-            # Logic: SHORT chỉ khi Trend Kalman là BEARISH và giá < Kalman
-            elif final == "SHORT":
-                if k_trend != "BEARISH" or price > k_price:
-                    log.warning("  ⛔ [KALMAN GATE] SHORT bị chặn: Trend/Giá không hỗ trợ (Trend: %s, Price: %.4f vs K: %.4f)", k_trend, price, k_price)
-                    final = "WAIT"
-                    conf = round(conf * 0.7, 1)
-
         
         return {
             "symbol": symbol, "asset_type": atype,
