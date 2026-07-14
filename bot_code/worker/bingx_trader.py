@@ -459,8 +459,15 @@ class BingXExchange:
         #     cú quét thanh khoản, tương tự cơ chế hủy lệnh mới ở SignalEngine.
         #   - Giá đang ở GẦN vùng nguy hiểm (gần swing_high nếu LONG, gần
         #     swing_low nếu SHORT, trong phạm vi SWEEP_PROXIMITY_PCT) nhưng
-        #     sweep CHƯA xảy ra -> dời SL sớm về sát giá hiện tại để giảm
-        #     thiệt hại nếu bị quét, chỉ làm 1 lần cho tới khi sang chặng mới.
+        #     sweep CHƯA xảy ra -> dời SL sớm về sát giá hiện tại.
+        #   [FIX] Trước đây dùng cờ nhớ trong RAM (stage["sweep_sl_tightened"])
+        #   để chỉ dời SL 1 lần — nhưng nếu process restart (Render free-tier
+        #   hay tự sleep) hoặc BingXExchange bị khởi tạo lại mỗi vòng quét,
+        #   biến RAM này mất, cờ về False, và mỗi lần quét lại thấy "gần vùng
+        #   nguy hiểm" nên dời SL lại -> SL nhảy liên tục trên sàn. Giờ so
+        #   sánh trực tiếp với SL ĐANG THỰC SỰ NẰM TRÊN SÀN (get_trigger_orders)
+        #   — chỉ dời khi mức mới thực sự chặt hơn ít nhất MIN_SL_IMPROVEMENT_PCT,
+        #   nên đúng ngữ nghĩa "chỉ 1 lần" bất kể trạng thái RAM còn hay mất.
         # ------------------------------------------------------------------
         sweep_info = analysis_result.get("liquidity_sweep", {}) or {}
         ms_1h_info = analysis_result.get("market_structure_1h", {}) or {}
@@ -480,17 +487,28 @@ class BingXExchange:
             self._position_stage.pop(symbol, None)
             return {"action": "CLOSE", "type": "LIQUIDITY_SWEEP", "sweep_type": sweep_type, "roe": roe}
 
-        SWEEP_PROXIMITY_PCT = 0.5  # % khoảng cách coi là "gần" vùng quét
-        if not stage.get("sweep_sl_tightened"):
-            near_danger_zone = False
-            if direction == "LONG" and swing_high > 0 and current_price <= swing_high:
-                near_danger_zone = (swing_high - current_price) / current_price * 100 <= SWEEP_PROXIMITY_PCT
-            elif direction == "SHORT" and swing_low > 0 and current_price >= swing_low:
-                near_danger_zone = (current_price - swing_low) / current_price * 100 <= SWEEP_PROXIMITY_PCT
+        SWEEP_PROXIMITY_PCT = 0.5      # % khoảng cách coi là "gần" vùng quét
+        MIN_SL_IMPROVEMENT_PCT = 0.05  # % cải thiện tối thiểu mới coi là đáng dời SL
 
-            if near_danger_zone:
-                tightened_sl = round(current_price * (0.997 if direction == "LONG" else 1.003), 2)
-                log.info(f"🛡️ {symbol} đang tiến gần vùng quét thanh khoản. Dời SL sớm về {tightened_sl}.")
+        near_danger_zone = False
+        if direction == "LONG" and swing_high > 0 and current_price <= swing_high:
+            near_danger_zone = (swing_high - current_price) / current_price * 100 <= SWEEP_PROXIMITY_PCT
+        elif direction == "SHORT" and swing_low > 0 and current_price >= swing_low:
+            near_danger_zone = (current_price - swing_low) / current_price * 100 <= SWEEP_PROXIMITY_PCT
+
+        if near_danger_zone:
+            tightened_sl = round(current_price * (0.997 if direction == "LONG" else 1.003), 2)
+            current_live_sl = float(self.get_trigger_orders().get(symbol, {}).get("sl", 0) or 0)
+
+            if current_live_sl <= 0:
+                needs_update = True  # Không lấy được SL hiện tại trên sàn -> đặt cho chắc
+            elif direction == "LONG":
+                needs_update = (tightened_sl - current_live_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
+            else:
+                needs_update = (current_live_sl - tightened_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
+
+            if needs_update:
+                log.info(f"🛡️ {symbol} đang tiến gần vùng quét thanh khoản. Dời SL sớm {current_live_sl} -> {tightened_sl}.")
                 self.cancel_all_orders(symbol)
                 target_tp = tp2_price if stage["leg"] == 2 else tp1_price
                 self._place_sl_tp(symbol, "BUY" if direction == "LONG" else "SELL", current_qty, tightened_sl, target_tp)
