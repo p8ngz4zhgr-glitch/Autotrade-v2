@@ -4,8 +4,10 @@ import time
 import requests
 import urllib.parse
 import logging
+import json
+import os
 
-# Thử import QuantRiskManager, nếu bạn để cùng thư mục hoặc thư mục cha
+# Thử import QuantRiskManager
 try:
     from .quant_math import QuantRiskManager
 except ImportError:
@@ -19,16 +21,31 @@ log = logging.getLogger("BingXExchange")
 class BingXExchange:
     BASE_URL = "https://open-api.bingx.com"
 
-    def __init__(self, api_key: str, api_secret: str):
+    def __init__(self, api_key: str, api_secret: str, state_file="bot_state.json"):
         self.api_key    = str(api_key).strip() if api_key else ""
         self.api_secret = str(api_secret).strip() if api_secret else ""
-        # Trạng thái nhiều chặng (leg) chốt lời từng phần cho mỗi symbol.
-        # leg=1  : chặng Entry -> TP1
-        # leg=2  : chặng TP1 -> TP2
-        # mid_done: đã chốt 1 phần ở mốc 50% của chặng hiện tại hay chưa
-        # LƯU Ý: trạng thái này chỉ tồn tại trong bộ nhớ của process. Nếu bot bị
-        # restart giữa chừng, trạng thái sẽ về mặc định (leg=1, mid_done=False).
-        self._position_stage = {}
+        self.state_file = state_file
+        
+        # Load trạng thái từ file cứng để chống mất dữ liệu khi restart
+        self._position_stage = self._load_state()
+
+    def _load_state(self) -> dict:
+        """Đọc trạng thái bot từ file cứng."""
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                log.error("Lỗi đọc file state: %s", e)
+        return {}
+
+    def _save_state(self):
+        """Lưu trạng thái bot ra file cứng."""
+        try:
+            with open(self.state_file, "w", encoding="utf-8") as f:
+                json.dump(self._position_stage, f, indent=4)
+        except Exception as e:
+            log.error("Lỗi ghi file state: %s", e)
 
     def _sign(self, params: dict) -> str:
         query_string = urllib.parse.urlencode(sorted(params.items()))
@@ -175,14 +192,6 @@ class BingXExchange:
         triggers = {}
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
-            # [FIX] BingX thường trả "data" là DICT bọc list bên trong khóa
-            # "orders" (vd: {"data": {"orders": [...]}}), không phải list
-            # thẳng. Code cũ chỉ xử lý trường hợp list nên khi gặp dict thì
-            # vòng for không bao giờ chạy -> triggers luôn rỗng cho MỌI
-            # symbol, MỌI lần gọi -> mọi nơi dựa vào SL/TP hiện tại trên sàn
-            # (như cơ chế dời SL sớm khi gần liquidity sweep) tưởng nhầm là
-            # "chưa có lệnh nào" -> cứ đặt lại SL mỗi vòng quét. Giờ xử lý cả
-            # 2 dạng để không phụ thuộc đúng/sai cấu trúc trả về.
             if isinstance(data, list):
                 order_list = data
             elif isinstance(data, dict):
@@ -303,8 +312,19 @@ class BingXExchange:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
-            # Reset trạng thái nhiều chặng cho lệnh mới này
-            self._position_stage[symbol] = {"leg": 1, "mid_done": False, "original_qty": safe_qty, "peak_roe": 0.0}
+            
+            # Reset trạng thái nhiều chặng cho lệnh mới này và lưu ra file
+            self._position_stage[symbol] = {
+                "leg": 1, 
+                "mid_done": False, 
+                "original_qty": safe_qty, 
+                "peak_roe": 0.0,
+                "sweep_sl_tightened": False,
+                "last_sl_price": sl_price,
+                "sweep_sl_updated_at": 0
+            }
+            self._save_state()
+            
             return {"ok": True, "order_id": order_id}
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
@@ -381,42 +401,11 @@ class BingXExchange:
         )
         return {"ok": True}
 
-    # ════════════════════════════════════════════════════════════════════
-    # CƠ CHẾ QUẢN LÝ ĐỘNG: BẢO VỆ VỐN/LỢI NHUẬN SỚM + GỒNG LÃI NHIỀU CHẶNG
-    # (ENTRY -> TP1 -> TP2) + ĐẢO CHIỀU TỨC THÌ + BẢO VỆ LIQUIDITY SWEEP
-    # ════════════════════════════════════════════════════════════════════
-    #
-    # Thứ tự ưu tiên kiểm tra mỗi lần gọi (cái nào khớp trước sẽ return luôn):
-    #   BƯỚC 1 - Đảo chiều mạnh      -> đóng toàn bộ NGAY, bất kể đang ở giai đoạn nào.
-    #   BƯỚC 2 - Bảo vệ Liquidity    -> giá đang GẦN swing_high (nếu LONG) / swing_low
-    #             Sweep (quét đáy/     (nếu SHORT) -> dời SL sớm về sát giá hiện tại.
-    #             đỉnh thanh khoản)    Nếu SignalEngine đã XÁC NHẬN sweep xảy ra NGƯỢC
-    #                                  hướng lệnh (Bullish Sweep khi đang SHORT / Bearish
-    #                                  Sweep khi đang LONG) -> đóng toàn bộ NGAY.
-    #   BƯỚC 3 - Chốt lời sớm        -> đạt ngưỡng ROE (PROFIT_ARM_ROE) thì "arm" trailing;
-    #             (bảo vệ lợi nhuận)    sau đó nếu ROE hồi lại quá PROFIT_TRAIL_GIVEBACK
-    #                                   điểm % so với đỉnh đã đạt -> chốt toàn bộ, khóa lời.
-    #   BƯỚC 4 - SL sớm              -> chỉ khi CHƯA chốt phần nào ở Chặng 1 (SL gốc vẫn
-    #             (bảo vệ vốn)          đang giữ), nếu ROE âm chạm EARLY_SL_ROE_THRESHOLD
-    #                                   VÀ xu hướng đang yếu (is_trending=False) cùng lúc
-    #                                   -> đóng toàn bộ sớm để bảo toàn vốn.
-    #   BƯỚC 5 - Lọc nhiễu WAIT       -> tín hiệu WAIT + ROE chạm ngưỡng (SL 12% / TP 8%)
-    #                                   + thị trường đi ngang -> đóng toàn bộ.
-    #   BƯỚC 6 - Gồng lãi nhiều chặng:
-    #     Chặng 1 (Entry -> TP1):
-    #       - Đi được 50% quãng đường tới TP1  -> chốt 1 phần nhỏ (MID_CLOSE_RATIO),
-    #         dời SL về Entry (hòa vốn), giữ TP ở TP1.
-    #       - Chạm TP1                         -> chốt thêm 1 phần (TP1_CLOSE_RATIO).
-    #         + Nếu xu hướng vẫn tiếp diễn      -> chuyển sang Chặng 2, SL dời lên TP1,
-    #           TP mới = TP2 (gồng lãi tiếp).
-    #         + Nếu xu hướng yếu/không rõ       -> chốt toàn bộ phần còn lại, kết thúc lệnh.
-    #     Chặng 2 (TP1 -> TP2):
-    #       - Đi được 50% quãng đường tới TP2  -> lặp lại: chốt 1 phần nhỏ, dời SL lên TP1.
-    #       - Chạm TP2                         -> chốt toàn bộ phần còn lại, kết thúc lệnh.
     def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5) -> dict:
         open_positions = self.get_open_positions(symbol)
         if not open_positions:
             self._position_stage.pop(symbol, None)
+            self._save_state()
             return {"action": "NONE", "msg": "Không có vị thế mở."}
             
         pos = open_positions[0]
@@ -428,12 +417,10 @@ class BingXExchange:
         if entry_price <= 0 or current_price <= 0:
             return {"action": "NONE", "msg": "Giá bị lỗi."}
 
-        # Lấy kế hoạch giá từ AI
         plan = analysis_result.get("plan", {})
         tp1_price = float(plan.get("tp1", 0))
         tp2_price = float(plan.get("tp2", 0))
         
-        # Tính toán tỷ lệ % ROE
         if direction == "LONG":
             roe = ((current_price - entry_price) / entry_price) * 100 * leverage
         else:
@@ -442,52 +429,39 @@ class BingXExchange:
         new_signal = analysis_result.get("final", "WAIT")
         is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
 
-        # ------------------------------------------------------------------
-        # BƯỚC 1: XỬ LÝ ĐẢO CHIỀU (REVERSAL) — áp dụng cho MỌI chặng
-        # ------------------------------------------------------------------
+        # BƯỚC 1: XỬ LÝ ĐẢO CHIỀU (REVERSAL)
         if (direction == "LONG" and new_signal == "SHORT") or \
            (direction == "SHORT" and new_signal == "LONG"):
             log.warning(f"🚨 Xu hướng đảo chiều ({direction} -> {new_signal}). Đóng toàn bộ lệnh cũ!")
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
             self._position_stage.pop(symbol, None)
-            # Trả về tín hiệu để vòng lặp chính (main loop) mở lệnh mới theo new_signal
+            self._save_state()
             return {
                 "action": "REVERSE", 
                 "msg": f"Đã đóng vị thế {direction}.",
                 "new_direction": new_signal
             }
 
-        # Lấy/khởi tạo trạng thái nhiều chặng + cập nhật đỉnh ROE (peak_roe) —
-        # cần làm trước vì các cơ chế bảo vệ sớm bên dưới đều dựa vào đây.
         stage = self._position_stage.get(symbol)
         if stage is None:
-            stage = {"leg": 1, "mid_done": False, "original_qty": current_qty, "peak_roe": roe,
-                      "sweep_sl_tightened": False}
+            stage = {
+                "leg": 1, 
+                "mid_done": False, 
+                "original_qty": current_qty, 
+                "peak_roe": roe,
+                "sweep_sl_tightened": False, 
+                "last_sl_price": 0,
+                "sweep_sl_updated_at": 0
+            }
             self._position_stage[symbol] = stage
+            self._save_state()
         else:
             stage["peak_roe"] = max(stage.get("peak_roe", roe), roe)
+            self._position_stage[symbol] = stage
+            self._save_state()
 
-        # ------------------------------------------------------------------
-        # BƯỚC 2: BẢO VỆ TRƯỚC LIQUIDITY SWEEP (QUÉT ĐÁY/ĐỈNH THANH KHOẢN)
-        # Dùng swing_high/swing_low (market_structure_1h) + sweep đã được
-        # SignalEngine xác nhận (liquidity_sweep) để bảo vệ vị thế ĐANG MỞ:
-        #   - Sweep đã XÁC NHẬN xảy ra NGƯỢC hướng lệnh đang giữ (Bullish
-        #     Sweep khi đang SHORT / Bearish Sweep khi đang LONG) -> đóng
-        #     toàn bộ NGAY — đây thường là tín hiệu đảo chiều mạnh ngay sau
-        #     cú quét thanh khoản, tương tự cơ chế hủy lệnh mới ở SignalEngine.
-        #   - Giá đang ở GẦN vùng nguy hiểm (gần swing_high nếu LONG, gần
-        #     swing_low nếu SHORT, trong phạm vi SWEEP_PROXIMITY_PCT) nhưng
-        #     sweep CHƯA xảy ra -> dời SL sớm về sát giá hiện tại.
-        #   [FIX] Trước đây dùng cờ nhớ trong RAM (stage["sweep_sl_tightened"])
-        #   để chỉ dời SL 1 lần — nhưng nếu process restart (Render free-tier
-        #   hay tự sleep) hoặc BingXExchange bị khởi tạo lại mỗi vòng quét,
-        #   biến RAM này mất, cờ về False, và mỗi lần quét lại thấy "gần vùng
-        #   nguy hiểm" nên dời SL lại -> SL nhảy liên tục trên sàn. Giờ so
-        #   sánh trực tiếp với SL ĐANG THỰC SỰ NẰM TRÊN SÀN (get_trigger_orders)
-        #   — chỉ dời khi mức mới thực sự chặt hơn ít nhất MIN_SL_IMPROVEMENT_PCT,
-        #   nên đúng ngữ nghĩa "chỉ 1 lần" bất kể trạng thái RAM còn hay mất.
-        # ------------------------------------------------------------------
+        # BƯỚC 2: BẢO VỆ TRƯỚC LIQUIDITY SWEEP
         sweep_info = analysis_result.get("liquidity_sweep", {}) or {}
         ms_1h_info = analysis_result.get("market_structure_1h", {}) or {}
         swing_high = float(ms_1h_info.get("last_swing_high", 0) or 0)
@@ -504,14 +478,12 @@ class BingXExchange:
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
             self._position_stage.pop(symbol, None)
+            self._save_state()
             return {"action": "CLOSE", "type": "LIQUIDITY_SWEEP", "sweep_type": sweep_type, "roe": roe}
 
-        SWEEP_PROXIMITY_PCT = 0.5      # % khoảng cách coi là "gần" vùng quét
-        MIN_SL_IMPROVEMENT_PCT = 0.05  # % cải thiện tối thiểu mới coi là đáng dời SL
-        SWEEP_SL_COOLDOWN_SEC = 180    # tối thiểu 3 phút giữa 2 lần dời SL do sweep —
-                                        # lớp an toàn dự phòng, chặn spam lên sàn ngay cả
-                                        # khi get_trigger_orders() lỡ đọc sai lần nữa vì
-                                        # lý do khác; không thay thế cho việc đọc đúng ở trên.
+        SWEEP_PROXIMITY_PCT = 0.5      
+        MIN_SL_IMPROVEMENT_PCT = 0.1  
+        SWEEP_SL_COOLDOWN_SEC = 180   
 
         near_danger_zone = False
         if direction == "LONG" and swing_high > 0 and current_price <= swing_high:
@@ -523,10 +495,15 @@ class BingXExchange:
 
         if near_danger_zone and cooldown_ok:
             tightened_sl = round(current_price * (0.997 if direction == "LONG" else 1.003), 2)
-            current_live_sl = float(self.get_trigger_orders().get(symbol, {}).get("sl", 0) or 0)
+            
+            # Ưu tiên lấy SL từ file State
+            current_live_sl = stage.get("last_sl_price", 0)
+            
+            if current_live_sl == 0:
+                current_live_sl = float(self.get_trigger_orders().get(symbol, {}).get("sl", 0) or 0)
 
             if current_live_sl <= 0:
-                needs_update = True  # Không lấy được SL hiện tại trên sàn -> đặt cho chắc
+                needs_update = True  
             elif direction == "LONG":
                 needs_update = (tightened_sl - current_live_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
             else:
@@ -536,20 +513,22 @@ class BingXExchange:
                 log.info(f"🛡️ {symbol} đang tiến gần vùng quét thanh khoản. Dời SL sớm {current_live_sl} -> {tightened_sl}.")
                 self.cancel_all_orders(symbol)
                 target_tp = tp2_price if stage["leg"] == 2 else tp1_price
+                
                 self._place_sl_tp(symbol, "BUY" if direction == "LONG" else "SELL", current_qty, tightened_sl, target_tp)
+                
                 stage["sweep_sl_tightened"] = True
                 stage["sweep_sl_updated_at"] = time.time()
+                stage["last_sl_price"] = tightened_sl 
+                self._position_stage[symbol] = stage
+                self._save_state() 
+                
                 return {
                     "action": "UPDATE_SL_TP",
                     "type": "SWEEP_PROXIMITY",
                     "msg": f"Gần vùng quét thanh khoản, dời SL sớm về {tightened_sl}"
                 }
 
-        # ------------------------------------------------------------------
-        # BƯỚC 3: CHỐT LỜI SỚM BẢO VỆ LỢI NHUẬN (kết hợp ngưỡng + trailing)
-        # Đạt PROFIT_ARM_ROE thì "arm" cơ chế; sau đó nếu ROE hồi lại quá
-        # PROFIT_TRAIL_GIVEBACK điểm % so với đỉnh -> khóa lời, chốt toàn bộ.
-        # ------------------------------------------------------------------
+        # BƯỚC 3: CHỐT LỜI SỚM BẢO VỆ LỢI NHUẬN
         PROFIT_ARM_ROE = 6.0
         PROFIT_TRAIL_GIVEBACK = 4.0
         peak_roe = stage.get("peak_roe", roe)
@@ -558,26 +537,21 @@ class BingXExchange:
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
             self._position_stage.pop(symbol, None)
+            self._save_state()
             return {"action": "CLOSE", "type": "PROFIT_LOCK", "roe": roe, "peak_roe": peak_roe}
 
-        # ------------------------------------------------------------------
-        # BƯỚC 4: SL SỚM BẢO VỆ VỐN (chỉ khi SL gốc còn đang giữ, tức Chặng 1
-        # và CHƯA chốt phần nào ở mốc 50%) — cần cả 2 điều kiện cùng lúc:
-        # ROE âm chạm ngưỡng nhỏ + xu hướng đang yếu đi.
-        # ------------------------------------------------------------------
+        # BƯỚC 4: SL SỚM BẢO VỆ VỐN
         EARLY_SL_ROE_THRESHOLD = -5.0
-        if stage["leg"] == 1 and not stage["mid_done"]:
+        if stage["leg"] == 1 and not stage.get("mid_done"):
             if roe <= EARLY_SL_ROE_THRESHOLD and not is_trending:
                 log.info(f"🛑 {symbol} cắt lỗ sớm bảo vệ vốn: ROE={roe:.2f}% <= {EARLY_SL_ROE_THRESHOLD}% và xu hướng yếu.")
                 self.close_position(symbol, current_qty, direction)
                 self.cancel_all_orders(symbol)
                 self._position_stage.pop(symbol, None)
+                self._save_state()
                 return {"action": "CLOSE", "type": "EARLY_SL", "roe": roe}
 
-        # ------------------------------------------------------------------
         # BƯỚC 5: XỬ LÝ LỌC NHIỄU KHÔNG RÕ XU HƯỚNG (WAIT REGIME)
-        # Phân cấp riêng: chiều lỗ (SL) 12% | chiều lãi (TP) 8%
-        # ------------------------------------------------------------------
         if new_signal == "WAIT":
             SL_THRESHOLD = 12.0
             TP_THRESHOLD = 8.0
@@ -587,17 +561,16 @@ class BingXExchange:
                     self.close_position(symbol, current_qty, direction)
                     self.cancel_all_orders(symbol)
                     self._position_stage.pop(symbol, None)
+                    self._save_state()
                     return {"action": "CLOSE", "type": "WAIT_REGIME", "roe": roe}
 
-        # ------------------------------------------------------------------
-        # BƯỚC 6: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
-        # ------------------------------------------------------------------
+        # BƯỚC 6: GỒNG LÃI NHIỀU CHẶNG
         original_side = "BUY" if direction == "LONG" else "SELL"
         trend_continues = (direction == "LONG" and new_signal == "LONG") or \
                           (direction == "SHORT" and new_signal == "SHORT")
 
-        MID_CLOSE_RATIO = 0.3   # % vị thế hiện tại chốt ở mốc 50% mỗi chặng
-        TP1_CLOSE_RATIO = 0.5   # % vị thế hiện tại chốt khi chạm TP1
+        MID_CLOSE_RATIO = 0.3
+        TP1_CLOSE_RATIO = 0.5
 
         # ================= CHẶNG 1: ENTRY -> TP1 =================
         if stage["leg"] == 1:
@@ -615,8 +588,8 @@ class BingXExchange:
 
             progress = (curr_dist / dist_to_tp1) if dist_to_tp1 > 0 else 0
 
-            # -- Mốc 50% quãng đường tới TP1: chốt 1 ít, dời SL về Entry --
-            if not stage["mid_done"]:
+            # -- Mốc 50% quãng đường tới TP1 --
+            if not stage.get("mid_done"):
                 if progress >= 0.5:
                     partial_qty = float(int((current_qty * MID_CLOSE_RATIO) * 10000) / 10000)
                     partial_qty = min(partial_qty, current_qty)
@@ -625,7 +598,12 @@ class BingXExchange:
                     remaining_qty = float(int((current_qty - partial_qty) * 10000) / 10000)
                     self.cancel_all_orders(symbol)
                     self._place_sl_tp(symbol, original_side, remaining_qty, entry_price, tp1_price)
+                    
                     stage["mid_done"] = True
+                    stage["last_sl_price"] = entry_price
+                    self._position_stage[symbol] = stage
+                    self._save_state()
+                    
                     log.info(f"🛡️ {symbol} đạt 50% quãng đường tới TP1. Chốt {partial_qty}, dời SL về Entry, chờ TP1={tp1_price}.")
                     return {
                         "action": "SCALE_OUT",
@@ -634,7 +612,7 @@ class BingXExchange:
                     }
                 return {"action": "HOLD", "msg": "Đang chờ 50% quãng đường tới TP1."}
 
-            # -- Đã qua mốc 50%, chờ chạm TP1 để chốt thêm và xét gồng tiếp --
+            # -- Đã qua mốc 50%, chờ chạm TP1 --
             if tp1_hit:
                 close_qty = float(int((current_qty * TP1_CLOSE_RATIO) * 10000) / 10000)
                 close_qty = min(close_qty, current_qty)
@@ -644,11 +622,15 @@ class BingXExchange:
                 remaining_qty = float(int((current_qty - close_qty) * 10000) / 10000)
 
                 if trend_continues and tp2_price > 0 and remaining_qty > 0:
-                    # Xu hướng còn mạnh -> gồng lãi tiếp sang Chặng 2 (TP1 -> TP2)
                     self._place_sl_tp(symbol, original_side, remaining_qty, tp1_price, tp2_price)
+                    
                     stage["leg"] = 2
                     stage["mid_done"] = False
                     stage["sweep_sl_tightened"] = False
+                    stage["last_sl_price"] = tp1_price
+                    self._position_stage[symbol] = stage
+                    self._save_state()
+                    
                     log.info(f"📈 {symbol} chạm TP1. Chốt {close_qty}, gồng {remaining_qty} tới TP2={tp2_price}.")
                     return {
                         "action": "SCALE_OUT",
@@ -657,11 +639,12 @@ class BingXExchange:
                         "next_leg": 2
                     }
                 else:
-                    # Xu hướng yếu/không rõ -> chốt toàn bộ phần còn lại tại TP1
                     if remaining_qty > 0:
                         self.close_position(symbol, remaining_qty, direction)
                     self.cancel_all_orders(symbol)
                     self._position_stage.pop(symbol, None)
+                    self._save_state()
+                    
                     log.info(f"💰 {symbol} chạm TP1, xu hướng yếu -> chốt toàn bộ.")
                     return {"action": "CLOSE", "type": "TP1_FINAL", "msg": "Chạm TP1, xu hướng yếu, đóng toàn bộ."}
 
@@ -683,8 +666,8 @@ class BingXExchange:
 
             progress2 = (curr_dist2 / dist_to_tp2) if dist_to_tp2 > 0 else 0
 
-            # -- Mốc 50% quãng đường tới TP2: lặp lại — chốt 1 ít, dời SL lên TP1 --
-            if not stage["mid_done"]:
+            # -- Mốc 50% quãng đường tới TP2 --
+            if not stage.get("mid_done"):
                 if progress2 >= 0.5:
                     partial_qty = float(int((current_qty * MID_CLOSE_RATIO) * 10000) / 10000)
                     partial_qty = min(partial_qty, current_qty)
@@ -693,7 +676,12 @@ class BingXExchange:
                     remaining_qty = float(int((current_qty - partial_qty) * 10000) / 10000)
                     self.cancel_all_orders(symbol)
                     self._place_sl_tp(symbol, original_side, remaining_qty, tp1_price, tp2_price)
+                    
                     stage["mid_done"] = True
+                    stage["last_sl_price"] = tp1_price
+                    self._position_stage[symbol] = stage
+                    self._save_state()
+                    
                     log.info(f"🛡️ {symbol} đạt 50% quãng đường tới TP2. Chốt {partial_qty}, dời SL lên TP1={tp1_price}, chờ TP2={tp2_price}.")
                     return {
                         "action": "SCALE_OUT",
@@ -702,12 +690,14 @@ class BingXExchange:
                     }
                 return {"action": "HOLD", "msg": "Đang chờ 50% quãng đường tới TP2."}
 
-            # -- Chạm TP2: chốt toàn bộ phần còn lại, kết thúc lệnh --
+            # -- Chạm TP2 --
             if tp2_hit:
                 self.cancel_all_orders(symbol)
                 if current_qty > 0:
                     self.close_position(symbol, current_qty, direction)
                 self._position_stage.pop(symbol, None)
+                self._save_state()
+                
                 log.info(f"🎯 {symbol} đạt TP2. Chốt toàn bộ lệnh.")
                 return {"action": "CLOSE", "type": "TP2_FINAL", "msg": "Đạt TP2, chốt toàn bộ lệnh."}
 
