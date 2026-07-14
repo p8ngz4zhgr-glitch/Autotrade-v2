@@ -175,18 +175,37 @@ class BingXExchange:
         triggers = {}
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
+            # [FIX] BingX thường trả "data" là DICT bọc list bên trong khóa
+            # "orders" (vd: {"data": {"orders": [...]}}), không phải list
+            # thẳng. Code cũ chỉ xử lý trường hợp list nên khi gặp dict thì
+            # vòng for không bao giờ chạy -> triggers luôn rỗng cho MỌI
+            # symbol, MỌI lần gọi -> mọi nơi dựa vào SL/TP hiện tại trên sàn
+            # (như cơ chế dời SL sớm khi gần liquidity sweep) tưởng nhầm là
+            # "chưa có lệnh nào" -> cứ đặt lại SL mỗi vòng quét. Giờ xử lý cả
+            # 2 dạng để không phụ thuộc đúng/sai cấu trúc trả về.
             if isinstance(data, list):
-                for o in data:
-                    if isinstance(o, dict):
-                        sym = o.get("symbol")
-                        normalized_sym = sym.replace("-", "") if sym else ""
-                        if normalized_sym not in triggers:
-                            triggers[normalized_sym] = {}
-                        otype = o.get("type", "")
-                        if "STOP_MARKET" in otype or "STOP" in otype:
-                            triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
-                        elif "TAKE_PROFIT" in otype or "LIMIT" in otype:
-                            triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
+                order_list = data
+            elif isinstance(data, dict):
+                order_list = data.get("orders") or data.get("order") or []
+            else:
+                order_list = []
+
+            for o in order_list:
+                if isinstance(o, dict):
+                    sym = o.get("symbol")
+                    normalized_sym = sym.replace("-", "") if sym else ""
+                    if normalized_sym not in triggers:
+                        triggers[normalized_sym] = {}
+                    otype = o.get("type", "")
+                    if "STOP_MARKET" in otype or "STOP" in otype:
+                        triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
+                    elif "TAKE_PROFIT" in otype or "LIMIT" in otype:
+                        triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
+
+            if not order_list:
+                log.debug("get_trigger_orders: không thấy order nào trong data=%r", data)
+        else:
+            log.warning("get_trigger_orders: API lỗi hoặc code != 0: %r", res)
         return triggers
 
     def _safe_order(self, params: dict) -> dict:
@@ -489,6 +508,10 @@ class BingXExchange:
 
         SWEEP_PROXIMITY_PCT = 0.5      # % khoảng cách coi là "gần" vùng quét
         MIN_SL_IMPROVEMENT_PCT = 0.05  # % cải thiện tối thiểu mới coi là đáng dời SL
+        SWEEP_SL_COOLDOWN_SEC = 180    # tối thiểu 3 phút giữa 2 lần dời SL do sweep —
+                                        # lớp an toàn dự phòng, chặn spam lên sàn ngay cả
+                                        # khi get_trigger_orders() lỡ đọc sai lần nữa vì
+                                        # lý do khác; không thay thế cho việc đọc đúng ở trên.
 
         near_danger_zone = False
         if direction == "LONG" and swing_high > 0 and current_price <= swing_high:
@@ -496,7 +519,9 @@ class BingXExchange:
         elif direction == "SHORT" and swing_low > 0 and current_price >= swing_low:
             near_danger_zone = (current_price - swing_low) / current_price * 100 <= SWEEP_PROXIMITY_PCT
 
-        if near_danger_zone:
+        cooldown_ok = (time.time() - stage.get("sweep_sl_updated_at", 0)) >= SWEEP_SL_COOLDOWN_SEC
+
+        if near_danger_zone and cooldown_ok:
             tightened_sl = round(current_price * (0.997 if direction == "LONG" else 1.003), 2)
             current_live_sl = float(self.get_trigger_orders().get(symbol, {}).get("sl", 0) or 0)
 
@@ -513,6 +538,7 @@ class BingXExchange:
                 target_tp = tp2_price if stage["leg"] == 2 else tp1_price
                 self._place_sl_tp(symbol, "BUY" if direction == "LONG" else "SELL", current_qty, tightened_sl, target_tp)
                 stage["sweep_sl_tightened"] = True
+                stage["sweep_sl_updated_at"] = time.time()
                 return {
                     "action": "UPDATE_SL_TP",
                     "type": "SWEEP_PROXIMITY",
