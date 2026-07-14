@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════
-# 5. SIGNAL ENGINE — v6.1 (Parallel TF + Smart Confidence)
+# 5. SIGNAL ENGINE — v6.2 (Parallel TF + Smart Confidence + 15m Trigger)
 # ═══════════════════════════════════════════════════════════
 import time
 import logging
@@ -450,8 +450,11 @@ class SignalEngine:
 
         log.info("  TF=%.1f Smart=%+.1f Combined=%.1f L:%d S:%d", avg_score, smart, combined, longs, shorts)
 
-        min_long_tfs  = min(3, tf_count - 1)
-        min_short_tfs = min(3, tf_count - 1)
+        # [NỚI LỎNG - TEST MODE] Hạ số TF cần đồng thuận từ 3 xuống 2/4,
+        # hạ ngưỡng combined và nới biên độ smart để bot dễ ra tín hiệu
+        # LONG/SHORT hơn thay vì kẹt ở WAIT ngay từ bước gốc này.
+        min_long_tfs  = min(2, tf_count - 1)
+        min_short_tfs = min(2, tf_count - 1)
 
         final, conf = None, 50.0
         for tf_n, bo in [("1H", bo_1h), ("4H", bo_4h)]:
@@ -462,29 +465,35 @@ class SignalEngine:
                 break
 
         if final is None:
-            long_ok  = longs >= min_long_tfs  and combined >= 62 and smart >= -10
-            short_ok = shorts >= min_short_tfs and combined <= 38 and smart <= 10
-            if   long_ok  or combined >= 68: final = "LONG";  conf = round(min(95, combined), 1)
-            elif short_ok or combined <= 32: final = "SHORT"; conf = round(min(95, 100-combined), 1)
+            long_ok  = longs >= min_long_tfs  and combined >= 58 and smart >= -15
+            short_ok = shorts >= min_short_tfs and combined <= 42 and smart <= 15
+            if   long_ok  or combined >= 64: final = "LONG";  conf = round(min(95, combined), 1)
+            elif short_ok or combined <= 36: final = "SHORT"; conf = round(min(95, 100-combined), 1)
             else:                             final = "WAIT";  conf = round(min(95, max(30, combined)), 1)
             
             if cvd_tr in ("BEARISH_DIV","BULLISH_DIV") and abs(smart) < 20:
-                conf = round(conf * 0.85, 1)
-                if conf < 55: final = "WAIT"
+                conf = round(conf * 0.9, 1)
+                if conf < 45: final = "WAIT"
 
         # ══════════════════════════════════════════════════════════
-        # [MACRO FILTER] CHỐNG ĐÁNH NGƯỢC XU HƯỚNG LỚN (TINH CHỈNH)
+        # [MACRO FILTER] CHỐNG ĐÁNH NGƯỢC XU HƯỚNG LỚN (NỚI LỎNG - TEST MODE)
+        # Đổi OR -> AND: cần CẢ HMM regime lẫn xu hướng Fibo 4H cùng xác
+        # nhận UPTREND mới chặn SHORT, thay vì chỉ 1 trong 2 đã đủ chặn.
         # ══════════════════════════════════════════════════════════
         if final == "SHORT" and atype == "CRYPTO":
-            if hmm_regime == "UPTREND" or fibo4h_trend == "UPTREND":
-                log.warning("  ⛔ [MACRO] Cấm SHORT Crypto khi xu hướng lớn (HMM/4H) đang TĂNG -> Ép về WAIT")
+            if hmm_regime == "UPTREND" and fibo4h_trend == "UPTREND":
+                log.warning("  ⛔ [MACRO] Cấm SHORT Crypto khi xu hướng lớn (HMM VÀ 4H) đang TĂNG -> Ép về WAIT")
                 final = "WAIT"
 
         if tf_penalty > 0:
             conf = round(max(30, conf - tf_penalty), 1)
 
         # ══════════════════════════════════════════════════════════
-        # [SMC] BỘ LỌC CHỐNG FOMO (PREMIUM & DISCOUNT ZONES)
+        # [SMC] BỘ LỌC CHỐNG FOMO (PREMIUM & DISCOUNT ZONES) — NỚI LỎNG (TEST MODE)
+        # Trước đây chia đôi 50/50 nên gần như luôn có 1 nửa số lệnh bị
+        # chặn tùy theo giá đang ở nửa nào. Giờ chỉ coi là PREMIUM/DISCOUNT
+        # khi giá thực sự nằm ở vùng biên 30% trên/dưới của biên độ sóng;
+        # khoảng giữa 30-70% coi là NEUTRAL, không bị chặn.
         # ══════════════════════════════════════════════════════════
         ms_1h = res_1h.get("market_structure") or {}
         swing_high = ms_1h.get("last_swing_high", 0)
@@ -495,11 +504,16 @@ class SignalEngine:
             equilibrium = (swing_high + swing_low) / 2
             wave_range = swing_high - swing_low
             price_pos = (price - swing_low) / wave_range
-            smc_zone = "PREMIUM" if price_pos >= 0.5 else "DISCOUNT"
+            if price_pos >= 0.7:
+                smc_zone = "PREMIUM"
+            elif price_pos <= 0.3:
+                smc_zone = "DISCOUNT"
+            else:
+                smc_zone = "NEUTRAL"
                 
             log.info("  [SMC Filter] Eq: %.4f | Vị trí: %s", equilibrium, smc_zone)
 
-            is_extreme_breakout = (bo_1h.get("strength", 0) >= 85 or bo_4h.get("strength", 0) >= 85)
+            is_extreme_breakout = (bo_1h.get("strength", 0) >= 65 or bo_4h.get("strength", 0) >= 65)
             
             if not is_extreme_breakout:
                 if final == "LONG" and smc_zone == "PREMIUM":
@@ -599,6 +613,101 @@ class SignalEngine:
                         log.info(f"🎯 TRIGGER (SMC): Phá đỉnh giả ở Premium (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
                         final = "SHORT"
                         conf = round(min(95, conf + 15.0), 1)
+
+        # ══════════════════════════════════════════════════════════
+        # [v6.2] BỘ LỌC CUỐI: HTF TREND GATE (1H+4H) + 15M ENTRY TRIGGER
+        # Bot quét 15 phút/lần -> nến 15m đóng vai trò tín hiệu kích hoạt
+        # (entry trigger) đúng theo nhịp quét thực tế, còn 1H/4H tiếp tục
+        # giữ vai trò xác định xu hướng tổng thể để không vào lệnh ngược
+        # dòng. Đặt SAU CÙNG (sau macro filter, SMC zone, liquidity sweep)
+        # để chốt lại mọi thay đổi hướng lệnh trước khi tính SL/TP — cả 2
+        # bước chỉ được phép HẠ final xuống WAIT, KHÔNG được tự nâng WAIT
+        # thành LONG/SHORT, nên không phá vỡ hiệu chỉnh (calibration) của
+        # phần smart-score/combined phía trên.
+        # [NỚI LỎNG] Cả 2 bước dùng kiểu "biểu quyết đa số" thay vì bắt
+        # buộc TẤT CẢ tín hiệu phải đồng thuận — chỉ chặn khi số tín hiệu
+        # ngược chiều thực sự áp đảo, để không bỏ lỡ lệnh tốt vì 1 tín
+        # hiệu phụ lệch nhịp, nhưng vẫn giữ được hàng rào chống vào lệnh
+        # ngược dòng rõ ràng.
+        # ══════════════════════════════════════════════════════════
+        if final in ("LONG", "SHORT"):
+            # -- 3a. HTF TREND GATE: chỉ chặn khi 3/4 tín hiệu 1H+4H NGƯỢC
+            # chiều và không có tín hiệu nào ủng hộ (nới từ 2/4 lên 3/4).
+            ms_4h_htf = res_4h.get("market_structure") or {}
+            ms_1h_struct = ms_1h.get("structure", "SIDEWAYS")
+            ms_4h_struct = ms_4h_htf.get("structure", "SIDEWAYS")
+            ema_1h_htf = res_1h.get("ema") or {}
+
+            htf_bull_votes = sum([
+                bool(ema_1h_htf.get("bull", False)),
+                ms_1h_struct == "UPTREND",
+                fibo4h_trend == "UPTREND",
+                ms_4h_struct == "UPTREND",
+            ])
+            htf_bear_votes = sum([
+                bool(ema_1h_htf.get("bear", False)),
+                ms_1h_struct == "DOWNTREND",
+                fibo4h_trend == "DOWNTREND",
+                ms_4h_struct == "DOWNTREND",
+            ])
+
+            HTF_BLOCK_VOTES = 3  # nới từ 2 -> 3: cần đa số áp đảo mới chặn
+            if final == "LONG" and htf_bear_votes >= HTF_BLOCK_VOTES and htf_bull_votes == 0:
+                log.warning("  ⛔ [HTF GATE] LONG bị chặn: 1H/4H nghiêng giảm (%d/4 phiếu) -> WAIT", htf_bear_votes)
+                final = "WAIT"
+                conf = round(conf * 0.85, 1)
+            elif final == "SHORT" and htf_bull_votes >= HTF_BLOCK_VOTES and htf_bear_votes == 0:
+                log.warning("  ⛔ [HTF GATE] SHORT bị chặn: 1H/4H nghiêng tăng (%d/4 phiếu) -> WAIT", htf_bull_votes)
+                final = "WAIT"
+                conf = round(conf * 0.85, 1)
+
+        if final in ("LONG", "SHORT"):
+            # -- 3b. 15M ENTRY TRIGGER: đổi từ "bắt buộc cả 4 tín hiệu 15m
+            # đồng thuận" sang biểu quyết theo đa số — chỉ hạ về WAIT khi
+            # số tín hiệu 15m NGƯỢC chiều nhiều hơn số tín hiệu THUẬN chiều
+            # (tránh vào lệnh đúng lúc momentum ngắn hạn đã đảo hẳn), thay
+            # vì chặn cả khi chỉ 1 tín hiệu phụ lệch nhịp.
+            res_15m = results.get("15m") or {}
+            if res_15m:
+                cvd_tr_15m = (res_15m.get("cvd") or {}).get("trend", "NEUTRAL")
+                bo_15m = res_15m.get("breakout") or {}
+                candle_15m = res_15m.get("candle") or {}
+                ema_15m = res_15m.get("ema") or {}
+
+                if final == "LONG":
+                    confirm_votes = sum([
+                        cvd_tr_15m in ("BULLISH", "BULLISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_UP",
+                        bool(candle_15m.get("confirm_long", False)),
+                        bool(ema_15m.get("bull", False)),
+                    ])
+                    oppose_votes = sum([
+                        cvd_tr_15m in ("BEARISH", "BEARISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_DOWN",
+                        bool(candle_15m.get("confirm_short", False)),
+                        bool(ema_15m.get("bear", False)),
+                    ])
+                else:
+                    confirm_votes = sum([
+                        cvd_tr_15m in ("BEARISH", "BEARISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_DOWN",
+                        bool(candle_15m.get("confirm_short", False)),
+                        bool(ema_15m.get("bear", False)),
+                    ])
+                    oppose_votes = sum([
+                        cvd_tr_15m in ("BULLISH", "BULLISH_DIV"),
+                        bo_15m.get("type") == "BREAKOUT_UP",
+                        bool(candle_15m.get("confirm_long", False)),
+                        bool(ema_15m.get("bull", False)),
+                    ])
+
+                entry_confirm = oppose_votes == 0 or confirm_votes > oppose_votes
+
+                if not entry_confirm:
+                    log.info("  ⏳ [15M TRIGGER] %s bị nến 15m áp đảo ngược chiều (%d thuận/%d nghịch) -> chờ (WAIT).",
+                             final, confirm_votes, oppose_votes)
+                    final = "WAIT"
+                    conf = round(conf * 0.9, 1)
 
         # ══════════════════════════════════════════════════════════
         # 2.5. ATR-BASED SL/TP (THÁO TRẦN STOP LOSS)
@@ -782,9 +891,11 @@ class SignalEngine:
             log.info("  [Bayes EV] %s %s: P(win)=%.1f%%, EV_Ratio=%.2f (Likelihood=%.2f)",
                      final, symbol, p_win * 100, ev_ratio, likelihood)
             
-            # [TINH CHỈNH 3] Nâng ngưỡng EV cắt nhiễu từ 0.15 lên 0.25 để bỏ qua các lệnh 50/50
-            if ev_ratio < 0.25:
-                log.warning("  ⚠️ EV(%.2f) quá thấp (cần >= 0.25), hạ cấp thành WAIT", ev_ratio)
+            # [NỚI LỎNG - TEST MODE] Hạ ngưỡng EV cắt nhiễu từ 0.25 về lại 0.15
+            # (giá trị gốc trước lần "TINH CHỈNH 3") để bớt loại các lệnh có
+            # EV vừa phải, cho hệ thống vào lệnh nhiều hơn để quan sát.
+            if ev_ratio < 0.15:
+                log.warning("  ⚠️ EV(%.2f) quá thấp (cần >= 0.15), hạ cấp thành WAIT", ev_ratio)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
             elif ev_ratio > 0.5:
@@ -820,8 +931,3 @@ class SignalEngine:
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
-
-
-
-
-
