@@ -364,21 +364,26 @@ class BingXExchange:
 
     # ════════════════════════════════════════════════════════════════════
     # CƠ CHẾ QUẢN LÝ ĐỘNG: BẢO VỆ VỐN/LỢI NHUẬN SỚM + GỒNG LÃI NHIỀU CHẶNG
-    # (ENTRY -> TP1 -> TP2) + ĐẢO CHIỀU TỨC THÌ
+    # (ENTRY -> TP1 -> TP2) + ĐẢO CHIỀU TỨC THÌ + BẢO VỆ LIQUIDITY SWEEP
     # ════════════════════════════════════════════════════════════════════
     #
     # Thứ tự ưu tiên kiểm tra mỗi lần gọi (cái nào khớp trước sẽ return luôn):
     #   BƯỚC 1 - Đảo chiều mạnh      -> đóng toàn bộ NGAY, bất kể đang ở giai đoạn nào.
-    #   BƯỚC 2 - Chốt lời sớm        -> đạt ngưỡng ROE (PROFIT_ARM_ROE) thì "arm" trailing;
+    #   BƯỚC 2 - Bảo vệ Liquidity    -> giá đang GẦN swing_high (nếu LONG) / swing_low
+    #             Sweep (quét đáy/     (nếu SHORT) -> dời SL sớm về sát giá hiện tại.
+    #             đỉnh thanh khoản)    Nếu SignalEngine đã XÁC NHẬN sweep xảy ra NGƯỢC
+    #                                  hướng lệnh (Bullish Sweep khi đang SHORT / Bearish
+    #                                  Sweep khi đang LONG) -> đóng toàn bộ NGAY.
+    #   BƯỚC 3 - Chốt lời sớm        -> đạt ngưỡng ROE (PROFIT_ARM_ROE) thì "arm" trailing;
     #             (bảo vệ lợi nhuận)    sau đó nếu ROE hồi lại quá PROFIT_TRAIL_GIVEBACK
     #                                   điểm % so với đỉnh đã đạt -> chốt toàn bộ, khóa lời.
-    #   BƯỚC 3 - SL sớm              -> chỉ khi CHƯA chốt phần nào ở Chặng 1 (SL gốc vẫn
+    #   BƯỚC 4 - SL sớm              -> chỉ khi CHƯA chốt phần nào ở Chặng 1 (SL gốc vẫn
     #             (bảo vệ vốn)          đang giữ), nếu ROE âm chạm EARLY_SL_ROE_THRESHOLD
     #                                   VÀ xu hướng đang yếu (is_trending=False) cùng lúc
     #                                   -> đóng toàn bộ sớm để bảo toàn vốn.
-    #   BƯỚC 4 - Lọc nhiễu WAIT       -> tín hiệu WAIT + ROE chạm ngưỡng (SL 12% / TP 8%)
+    #   BƯỚC 5 - Lọc nhiễu WAIT       -> tín hiệu WAIT + ROE chạm ngưỡng (SL 12% / TP 8%)
     #                                   + thị trường đi ngang -> đóng toàn bộ.
-    #   BƯỚC 5 - Gồng lãi nhiều chặng:
+    #   BƯỚC 6 - Gồng lãi nhiều chặng:
     #     Chặng 1 (Entry -> TP1):
     #       - Đi được 50% quãng đường tới TP1  -> chốt 1 phần nhỏ (MID_CLOSE_RATIO),
     #         dời SL về Entry (hòa vốn), giữ TP ở TP1.
@@ -435,16 +440,69 @@ class BingXExchange:
             }
 
         # Lấy/khởi tạo trạng thái nhiều chặng + cập nhật đỉnh ROE (peak_roe) —
-        # cần làm trước vì cả 2 cơ chế bảo vệ sớm bên dưới đều dựa vào đây.
+        # cần làm trước vì các cơ chế bảo vệ sớm bên dưới đều dựa vào đây.
         stage = self._position_stage.get(symbol)
         if stage is None:
-            stage = {"leg": 1, "mid_done": False, "original_qty": current_qty, "peak_roe": roe}
+            stage = {"leg": 1, "mid_done": False, "original_qty": current_qty, "peak_roe": roe,
+                      "sweep_sl_tightened": False}
             self._position_stage[symbol] = stage
         else:
             stage["peak_roe"] = max(stage.get("peak_roe", roe), roe)
 
         # ------------------------------------------------------------------
-        # BƯỚC 2: CHỐT LỜI SỚM BẢO VỆ LỢI NHUẬN (kết hợp ngưỡng + trailing)
+        # BƯỚC 2: BẢO VỆ TRƯỚC LIQUIDITY SWEEP (QUÉT ĐÁY/ĐỈNH THANH KHOẢN)
+        # Dùng swing_high/swing_low (market_structure_1h) + sweep đã được
+        # SignalEngine xác nhận (liquidity_sweep) để bảo vệ vị thế ĐANG MỞ:
+        #   - Sweep đã XÁC NHẬN xảy ra NGƯỢC hướng lệnh đang giữ (Bullish
+        #     Sweep khi đang SHORT / Bearish Sweep khi đang LONG) -> đóng
+        #     toàn bộ NGAY — đây thường là tín hiệu đảo chiều mạnh ngay sau
+        #     cú quét thanh khoản, tương tự cơ chế hủy lệnh mới ở SignalEngine.
+        #   - Giá đang ở GẦN vùng nguy hiểm (gần swing_high nếu LONG, gần
+        #     swing_low nếu SHORT, trong phạm vi SWEEP_PROXIMITY_PCT) nhưng
+        #     sweep CHƯA xảy ra -> dời SL sớm về sát giá hiện tại để giảm
+        #     thiệt hại nếu bị quét, chỉ làm 1 lần cho tới khi sang chặng mới.
+        # ------------------------------------------------------------------
+        sweep_info = analysis_result.get("liquidity_sweep", {}) or {}
+        ms_1h_info = analysis_result.get("market_structure_1h", {}) or {}
+        swing_high = float(ms_1h_info.get("last_swing_high", 0) or 0)
+        swing_low  = float(ms_1h_info.get("last_swing_low", 0) or 0)
+
+        sweep_type = sweep_info.get("type") if sweep_info.get("detected") else None
+        sweep_against_position = (
+            (direction == "SHORT" and sweep_type == "BULLISH_SWEEP") or
+            (direction == "LONG" and sweep_type == "BEARISH_SWEEP")
+        )
+
+        if sweep_against_position:
+            log.warning(f"🚨 {symbol} bị quét thanh khoản ngược hướng lệnh ({sweep_type}). Đóng sớm để bảo vệ vốn!")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
+            self._position_stage.pop(symbol, None)
+            return {"action": "CLOSE", "type": "LIQUIDITY_SWEEP", "sweep_type": sweep_type, "roe": roe}
+
+        SWEEP_PROXIMITY_PCT = 0.5  # % khoảng cách coi là "gần" vùng quét
+        if not stage.get("sweep_sl_tightened"):
+            near_danger_zone = False
+            if direction == "LONG" and swing_high > 0 and current_price <= swing_high:
+                near_danger_zone = (swing_high - current_price) / current_price * 100 <= SWEEP_PROXIMITY_PCT
+            elif direction == "SHORT" and swing_low > 0 and current_price >= swing_low:
+                near_danger_zone = (current_price - swing_low) / current_price * 100 <= SWEEP_PROXIMITY_PCT
+
+            if near_danger_zone:
+                tightened_sl = round(current_price * (0.997 if direction == "LONG" else 1.003), 2)
+                log.info(f"🛡️ {symbol} đang tiến gần vùng quét thanh khoản. Dời SL sớm về {tightened_sl}.")
+                self.cancel_all_orders(symbol)
+                target_tp = tp2_price if stage["leg"] == 2 else tp1_price
+                self._place_sl_tp(symbol, "BUY" if direction == "LONG" else "SELL", current_qty, tightened_sl, target_tp)
+                stage["sweep_sl_tightened"] = True
+                return {
+                    "action": "UPDATE_SL_TP",
+                    "type": "SWEEP_PROXIMITY",
+                    "msg": f"Gần vùng quét thanh khoản, dời SL sớm về {tightened_sl}"
+                }
+
+        # ------------------------------------------------------------------
+        # BƯỚC 3: CHỐT LỜI SỚM BẢO VỆ LỢI NHUẬN (kết hợp ngưỡng + trailing)
         # Đạt PROFIT_ARM_ROE thì "arm" cơ chế; sau đó nếu ROE hồi lại quá
         # PROFIT_TRAIL_GIVEBACK điểm % so với đỉnh -> khóa lời, chốt toàn bộ.
         # ------------------------------------------------------------------
@@ -459,7 +517,7 @@ class BingXExchange:
             return {"action": "CLOSE", "type": "PROFIT_LOCK", "roe": roe, "peak_roe": peak_roe}
 
         # ------------------------------------------------------------------
-        # BƯỚC 3: SL SỚM BẢO VỆ VỐN (chỉ khi SL gốc còn đang giữ, tức Chặng 1
+        # BƯỚC 4: SL SỚM BẢO VỆ VỐN (chỉ khi SL gốc còn đang giữ, tức Chặng 1
         # và CHƯA chốt phần nào ở mốc 50%) — cần cả 2 điều kiện cùng lúc:
         # ROE âm chạm ngưỡng nhỏ + xu hướng đang yếu đi.
         # ------------------------------------------------------------------
@@ -473,7 +531,7 @@ class BingXExchange:
                 return {"action": "CLOSE", "type": "EARLY_SL", "roe": roe}
 
         # ------------------------------------------------------------------
-        # BƯỚC 4: XỬ LÝ LỌC NHIỄU KHÔNG RÕ XU HƯỚNG (WAIT REGIME)
+        # BƯỚC 5: XỬ LÝ LỌC NHIỄU KHÔNG RÕ XU HƯỚNG (WAIT REGIME)
         # Phân cấp riêng: chiều lỗ (SL) 12% | chiều lãi (TP) 8%
         # ------------------------------------------------------------------
         if new_signal == "WAIT":
@@ -488,7 +546,7 @@ class BingXExchange:
                     return {"action": "CLOSE", "type": "WAIT_REGIME", "roe": roe}
 
         # ------------------------------------------------------------------
-        # BƯỚC 5: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
+        # BƯỚC 6: GỒNG LÃI NHIỀU CHẶNG (ENTRY -> TP1 -> TP2)
         # ------------------------------------------------------------------
         original_side = "BUY" if direction == "LONG" else "SELL"
         trend_continues = (direction == "LONG" and new_signal == "LONG") or \
@@ -546,6 +604,7 @@ class BingXExchange:
                     self._place_sl_tp(symbol, original_side, remaining_qty, tp1_price, tp2_price)
                     stage["leg"] = 2
                     stage["mid_done"] = False
+                    stage["sweep_sl_tightened"] = False
                     log.info(f"📈 {symbol} chạm TP1. Chốt {close_qty}, gồng {remaining_qty} tới TP2={tp2_price}.")
                     return {
                         "action": "SCALE_OUT",
