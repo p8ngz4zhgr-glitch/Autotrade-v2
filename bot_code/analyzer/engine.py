@@ -450,9 +450,44 @@ class SignalEngine:
 
         log.info("  TF=%.1f Smart=%+.1f Combined=%.1f L:%d S:%d", avg_score, smart, combined, longs, shorts)
 
-        # [NỚI LỎNG - TEST MODE] Hạ số TF cần đồng thuận từ 3 xuống 2/4,
-        # hạ ngưỡng combined và nới biên độ smart để bot dễ ra tín hiệu
-        # LONG/SHORT hơn thay vì kẹt ở WAIT ngay từ bước gốc này.
+        # ══════════════════════════════════════════════════════════
+        # [v6.3] XÁC ĐỊNH XU HƯỚNG CHÍNH TỪ KHUNG 4H (MAIN TREND)
+        # Đây là bước quyết định hướng ưu tiên: xu hướng chính TĂNG thì ưu
+        # tiên BUY (SHORT chỉ được vào dưới dạng lệnh ngược dòng/scalping
+        # ngắn hạn với tiêu chí chặt hơn), xu hướng chính GIẢM thì ưu tiên
+        # SHORT (BUY chỉ scalping). Điểm vào lệnh cụ thể vẫn do combined/
+        # smart (đã tính ở trên, dựa trên 15m/1h/CVD/volume/candle...) tìm
+        # ra — KHÔNG bắt buộc mọi khung giờ phải cùng pha mới được xét.
+        # ══════════════════════════════════════════════════════════
+        ema_4h_trend = res_4h.get("ema") or {}
+        ms_4h_trend  = (res_4h.get("market_structure") or {}).get("structure", "SIDEWAYS")
+
+        bull_votes_4h = sum([
+            bool(ema_4h_trend.get("bull", False)),
+            ms_4h_trend == "UPTREND",
+            fibo4h_trend == "UPTREND",
+            wy_4h.get("bias") == "BULLISH",
+            hmm_regime == "UPTREND",
+        ])
+        bear_votes_4h = sum([
+            bool(ema_4h_trend.get("bear", False)),
+            ms_4h_trend == "DOWNTREND",
+            fibo4h_trend == "DOWNTREND",
+            wy_4h.get("bias") == "BEARISH",
+            hmm_regime == "DOWNTREND",
+        ])
+
+        if bull_votes_4h >= 2 and bull_votes_4h > bear_votes_4h:
+            main_trend = "UP"
+        elif bear_votes_4h >= 2 and bear_votes_4h > bull_votes_4h:
+            main_trend = "DOWN"
+        else:
+            main_trend = "SIDEWAYS"
+
+        log.info("  [MAIN TREND 4H] %s (bull=%d/bear=%d phiếu)", main_trend, bull_votes_4h, bear_votes_4h)
+
+        # NORMAL = lệnh thuận xu hướng chính | SCALP = ngược xu hướng, chỉ lướt sóng ngắn
+        trade_mode = "NORMAL"
         min_long_tfs  = min(2, tf_count - 1)
         min_short_tfs = min(2, tf_count - 1)
 
@@ -461,29 +496,48 @@ class SignalEngine:
             if bo.get("type") in ("BREAKOUT_UP","BREAKOUT_DOWN") and bo.get("strength", 0) >= 70:
                 final = "LONG" if bo.get("type") == "BREAKOUT_UP" else "SHORT"
                 conf  = min(95, 70 + bo.get("strength", 0) * 0.25)
-                log.info("🚨 Breakout override [%s]", tf_n)
+                if (final == "LONG" and main_trend == "DOWN") or (final == "SHORT" and main_trend == "UP"):
+                    trade_mode = "SCALP"
+                log.info("🚨 Breakout override [%s] (%s)", tf_n, trade_mode)
                 break
 
         if final is None:
-            long_ok  = longs >= min_long_tfs  and combined >= 58 and smart >= -15
-            short_ok = shorts >= min_short_tfs and combined <= 42 and smart <= 15
-            if   long_ok  or combined >= 64: final = "LONG";  conf = round(min(95, combined), 1)
-            elif short_ok or combined <= 36: final = "SHORT"; conf = round(min(95, 100-combined), 1)
-            else:                             final = "WAIT";  conf = round(min(95, max(30, combined)), 1)
-            
+            if main_trend == "UP":
+                # Thuận xu hướng (BUY) -> ngưỡng dễ hơn, là hướng được ưu tiên
+                long_ok  = longs >= min_long_tfs and combined >= 54 and smart >= -20
+                # Ngược xu hướng (SHORT) -> chỉ cho vào dạng SCALP, cần tín hiệu giảm rõ ràng
+                short_ok = shorts >= min_short_tfs and combined <= 30 and smart <= -15
+
+                if long_ok or combined >= 60:
+                    final = "LONG"; conf = round(min(95, combined + 5), 1)
+                elif short_ok:
+                    final = "SHORT"; trade_mode = "SCALP"; conf = round(min(90, 100 - combined), 1)
+                else:
+                    final = "WAIT"; conf = round(min(95, max(30, combined)), 1)
+
+            elif main_trend == "DOWN":
+                # Thuận xu hướng (SHORT) -> ngưỡng dễ hơn, là hướng được ưu tiên
+                short_ok = shorts >= min_short_tfs and combined <= 46 and smart <= 20
+                # Ngược xu hướng (BUY) -> chỉ cho vào dạng SCALP
+                long_ok  = longs >= min_long_tfs and combined >= 70 and smart >= 15
+
+                if short_ok or combined <= 40:
+                    final = "SHORT"; conf = round(min(95, 100 - combined + 5), 1)
+                elif long_ok:
+                    final = "LONG"; trade_mode = "SCALP"; conf = round(min(90, combined), 1)
+                else:
+                    final = "WAIT"; conf = round(min(95, max(30, combined)), 1)
+
+            else:  # SIDEWAYS - chưa rõ xu hướng chính -> đối xứng, mức vừa phải
+                long_ok  = longs >= min_long_tfs  and combined >= 58 and smart >= -15
+                short_ok = shorts >= min_short_tfs and combined <= 42 and smart <= 15
+                if   long_ok  or combined >= 64: final = "LONG";  conf = round(min(95, combined), 1)
+                elif short_ok or combined <= 36: final = "SHORT"; conf = round(min(95, 100-combined), 1)
+                else:                             final = "WAIT";  conf = round(min(95, max(30, combined)), 1)
+
             if cvd_tr in ("BEARISH_DIV","BULLISH_DIV") and abs(smart) < 20:
                 conf = round(conf * 0.9, 1)
                 if conf < 45: final = "WAIT"
-
-        # ══════════════════════════════════════════════════════════
-        # [MACRO FILTER] CHỐNG ĐÁNH NGƯỢC XU HƯỚNG LỚN (NỚI LỎNG - TEST MODE)
-        # Đổi OR -> AND: cần CẢ HMM regime lẫn xu hướng Fibo 4H cùng xác
-        # nhận UPTREND mới chặn SHORT, thay vì chỉ 1 trong 2 đã đủ chặn.
-        # ══════════════════════════════════════════════════════════
-        if final == "SHORT" and atype == "CRYPTO":
-            if hmm_regime == "UPTREND" and fibo4h_trend == "UPTREND":
-                log.warning("  ⛔ [MACRO] Cấm SHORT Crypto khi xu hướng lớn (HMM VÀ 4H) đang TĂNG -> Ép về WAIT")
-                final = "WAIT"
 
         if tf_penalty > 0:
             conf = round(max(30, conf - tf_penalty), 1)
@@ -599,6 +653,8 @@ class SignalEngine:
                 elif final in ("LONG", "WAIT") and combined >= 45 and smc_zone == "DISCOUNT": 
                     log.info(f"🎯 TRIGGER (SMC): Phá đáy giả ở Discount (Bullish Sweep @ {sw_price}) -> VÀO LỆNH LONG")
                     final = "LONG"
+                    if main_trend == "DOWN":
+                        trade_mode = "SCALP"
                     conf = round(min(95, conf + 15.0), 1) 
                     
             elif sw_type == "BEARISH_SWEEP":
@@ -606,67 +662,31 @@ class SignalEngine:
                     log.warning(f"⛔ FILTER: Cá mập quét đỉnh (Bearish Sweep @ {sw_price}) -> HỦY LỆNH LONG")
                     final = "WAIT"
                     
-                # [TINH CHỈNH 1] Chỉ kích hoạt SHORT khi quét đỉnh VÀ giá ở vùng PREMIUM
-                elif final in ("SHORT", "WAIT") and combined <= 55 and smc_zone == "PREMIUM": 
-                    # Đảm bảo Macro trend không ngăn cấm Short
-                    if not (atype == "CRYPTO" and (hmm_regime == "UPTREND" or fibo4h_trend == "UPTREND")):
-                        log.info(f"🎯 TRIGGER (SMC): Phá đỉnh giả ở Premium (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
-                        final = "SHORT"
-                        conf = round(min(95, conf + 15.0), 1)
+                # [TINH CHỈNH 1] Chỉ kích hoạt SHORT khi quét đỉnh VÀ giá ở vùng PREMIUM.
+                # [v6.3] Bỏ chặn cứng theo Macro trend — SHORT ngược xu hướng chính vẫn
+                # được vào, chỉ gắn nhãn SCALP để quản lý rủi ro chặt hơn ở bước sau.
+                elif final in ("SHORT", "WAIT") and combined <= 55 and smc_zone == "PREMIUM":
+                    log.info(f"🎯 TRIGGER (SMC): Phá đỉnh giả ở Premium (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
+                    final = "SHORT"
+                    if main_trend == "UP":
+                        trade_mode = "SCALP"
+                    conf = round(min(95, conf + 15.0), 1)
+
 
         # ══════════════════════════════════════════════════════════
-        # [v6.2] BỘ LỌC CUỐI: HTF TREND GATE (1H+4H) + 15M ENTRY TRIGGER
-        # Bot quét 15 phút/lần -> nến 15m đóng vai trò tín hiệu kích hoạt
-        # (entry trigger) đúng theo nhịp quét thực tế, còn 1H/4H tiếp tục
-        # giữ vai trò xác định xu hướng tổng thể để không vào lệnh ngược
-        # dòng. Đặt SAU CÙNG (sau macro filter, SMC zone, liquidity sweep)
-        # để chốt lại mọi thay đổi hướng lệnh trước khi tính SL/TP — cả 2
-        # bước chỉ được phép HẠ final xuống WAIT, KHÔNG được tự nâng WAIT
-        # thành LONG/SHORT, nên không phá vỡ hiệu chỉnh (calibration) của
-        # phần smart-score/combined phía trên.
-        # [NỚI LỎNG] Cả 2 bước dùng kiểu "biểu quyết đa số" thay vì bắt
-        # buộc TẤT CẢ tín hiệu phải đồng thuận — chỉ chặn khi số tín hiệu
-        # ngược chiều thực sự áp đảo, để không bỏ lỡ lệnh tốt vì 1 tín
-        # hiệu phụ lệch nhịp, nhưng vẫn giữ được hàng rào chống vào lệnh
-        # ngược dòng rõ ràng.
+        # [v6.3] 15M ENTRY TRIGGER — tìm điểm vào lệnh chính xác theo nhịp
+        # quét 15 phút, KHÔNG còn yêu cầu 1H/4H phải "cùng pha" mới được
+        # xét (xu hướng chính đã quyết định ở bước MAIN TREND phía trên).
+        # Độ chặt phụ thuộc trade_mode:
+        #   - NORMAL (thuận xu hướng chính): biểu quyết đa số — chỉ chặn
+        #     khi nến 15m NGƯỢC chiều áp đảo (tránh bỏ lỡ lệnh tốt vì 1
+        #     tín hiệu phụ lệch nhịp).
+        #   - SCALP (ngược xu hướng chính): chặt hơn hẳn — chỉ cho vào khi
+        #     15m KHÔNG có bất kỳ tín hiệu ngược chiều nào (0 phiếu nghịch),
+        #     vì đây là lệnh rủi ro cao hơn, cần độ đồng thuận cao hơn.
+        # Chỉ được phép HẠ final xuống WAIT, không tự nâng WAIT->LONG/SHORT.
         # ══════════════════════════════════════════════════════════
         if final in ("LONG", "SHORT"):
-            # -- 3a. HTF TREND GATE: chỉ chặn khi 3/4 tín hiệu 1H+4H NGƯỢC
-            # chiều và không có tín hiệu nào ủng hộ (nới từ 2/4 lên 3/4).
-            ms_4h_htf = res_4h.get("market_structure") or {}
-            ms_1h_struct = ms_1h.get("structure", "SIDEWAYS")
-            ms_4h_struct = ms_4h_htf.get("structure", "SIDEWAYS")
-            ema_1h_htf = res_1h.get("ema") or {}
-
-            htf_bull_votes = sum([
-                bool(ema_1h_htf.get("bull", False)),
-                ms_1h_struct == "UPTREND",
-                fibo4h_trend == "UPTREND",
-                ms_4h_struct == "UPTREND",
-            ])
-            htf_bear_votes = sum([
-                bool(ema_1h_htf.get("bear", False)),
-                ms_1h_struct == "DOWNTREND",
-                fibo4h_trend == "DOWNTREND",
-                ms_4h_struct == "DOWNTREND",
-            ])
-
-            HTF_BLOCK_VOTES = 3  # nới từ 2 -> 3: cần đa số áp đảo mới chặn
-            if final == "LONG" and htf_bear_votes >= HTF_BLOCK_VOTES and htf_bull_votes == 0:
-                log.warning("  ⛔ [HTF GATE] LONG bị chặn: 1H/4H nghiêng giảm (%d/4 phiếu) -> WAIT", htf_bear_votes)
-                final = "WAIT"
-                conf = round(conf * 0.85, 1)
-            elif final == "SHORT" and htf_bull_votes >= HTF_BLOCK_VOTES and htf_bear_votes == 0:
-                log.warning("  ⛔ [HTF GATE] SHORT bị chặn: 1H/4H nghiêng tăng (%d/4 phiếu) -> WAIT", htf_bull_votes)
-                final = "WAIT"
-                conf = round(conf * 0.85, 1)
-
-        if final in ("LONG", "SHORT"):
-            # -- 3b. 15M ENTRY TRIGGER: đổi từ "bắt buộc cả 4 tín hiệu 15m
-            # đồng thuận" sang biểu quyết theo đa số — chỉ hạ về WAIT khi
-            # số tín hiệu 15m NGƯỢC chiều nhiều hơn số tín hiệu THUẬN chiều
-            # (tránh vào lệnh đúng lúc momentum ngắn hạn đã đảo hẳn), thay
-            # vì chặn cả khi chỉ 1 tín hiệu phụ lệch nhịp.
             res_15m = results.get("15m") or {}
             if res_15m:
                 cvd_tr_15m = (res_15m.get("cvd") or {}).get("trend", "NEUTRAL")
@@ -701,11 +721,14 @@ class SignalEngine:
                         bool(ema_15m.get("bull", False)),
                     ])
 
-                entry_confirm = oppose_votes == 0 or confirm_votes > oppose_votes
+                if trade_mode == "SCALP":
+                    entry_confirm = oppose_votes == 0
+                else:
+                    entry_confirm = oppose_votes == 0 or confirm_votes > oppose_votes
 
                 if not entry_confirm:
-                    log.info("  ⏳ [15M TRIGGER] %s bị nến 15m áp đảo ngược chiều (%d thuận/%d nghịch) -> chờ (WAIT).",
-                             final, confirm_votes, oppose_votes)
+                    log.info("  ⏳ [15M TRIGGER] %s (%s) bị nến 15m áp đảo ngược chiều (%d thuận/%d nghịch) -> chờ (WAIT).",
+                             final, trade_mode, confirm_votes, oppose_votes)
                     final = "WAIT"
                     conf = round(conf * 0.9, 1)
 
@@ -891,11 +914,13 @@ class SignalEngine:
             log.info("  [Bayes EV] %s %s: P(win)=%.1f%%, EV_Ratio=%.2f (Likelihood=%.2f)",
                      final, symbol, p_win * 100, ev_ratio, likelihood)
             
-            # [NỚI LỎNG - TEST MODE] Hạ ngưỡng EV cắt nhiễu từ 0.25 về lại 0.15
-            # (giá trị gốc trước lần "TINH CHỈNH 3") để bớt loại các lệnh có
-            # EV vừa phải, cho hệ thống vào lệnh nhiều hơn để quan sát.
-            if ev_ratio < 0.15:
-                log.warning("  ⚠️ EV(%.2f) quá thấp (cần >= 0.15), hạ cấp thành WAIT", ev_ratio)
+            # [v6.3] Ngưỡng EV theo trade_mode: NORMAL (thuận xu hướng chính)
+            # giữ ngưỡng nới lỏng 0.15; SCALP (ngược xu hướng chính) cần EV
+            # cao hơn hẳn (0.30) vì rủi ro cao hơn — đây là nơi bảo vệ WR
+            # thay vì chặn cứng toàn bộ lệnh ngược dòng như trước.
+            ev_threshold = 0.30 if trade_mode == "SCALP" else 0.15
+            if ev_ratio < ev_threshold:
+                log.warning("  ⚠️ EV(%.2f) quá thấp cho lệnh %s (cần >= %.2f), hạ cấp thành WAIT", ev_ratio, trade_mode, ev_threshold)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
             elif ev_ratio > 0.5:
@@ -910,6 +935,7 @@ class SignalEngine:
         return {
             "symbol": symbol, "asset_type": atype,
             "price": price, "final": final, "confidence": conf,
+            "trade_mode": trade_mode, "main_trend": main_trend,
             "longs": longs, "shorts": shorts, "timeframes": results,
             "plan": {"entry": price, "sl": sl, "tp1": tp1, "tp2": tp2},
             "wyckoff": wy_4h, "fibo": fi_1h, "cvd": cvd_1h,
