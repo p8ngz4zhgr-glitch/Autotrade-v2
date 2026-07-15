@@ -218,8 +218,10 @@ def _tp1_monitor():
                     if not sym or not cur_price or not tp1 or qty <= 0:
                         continue
                         
-                    # Tránh trigger nhiều lần
-                    redis_key = f"TP1_HIT:{user_id}:{sym}:{direction}"
+                    # [FIX v6.2] Dùng CHUNG 1 khoá Redis với nhánh SCALE_OUT chính
+                    # trong evaluate_reversal_for_position (sync_bingx_positions, 30s)
+                    # để 2 vòng lặp độc lập (15s vs 30s) không cùng chốt 1 vị thế 2 lần.
+                    redis_key = f"SCALE_OUT_{user_id}_{sym}_{direction}"
                     if redis_client and redis_client.exists(redis_key):
                         continue
                         
@@ -238,7 +240,7 @@ def _tp1_monitor():
                                 REGISTER_TOKEN, user_id,
                                 f"🎯 <b>TP1 HIT: {sym}</b>\n"
                                 f"📈 Đã chốt 50% vị thế tại ${tp1:.4f}\n"
-                                f"🛡️ Đã dời SL về Entry (${entry:.4f}) để bảo toàn vốn."
+                                f"🛡️ Đã dời SL về Breakeven+phí để bảo toàn vốn."
                             )
             db.close()
         except Exception as e:
@@ -485,14 +487,19 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             tp_dist = abs(tp1 - entry)
                             tp2 = entry + (tp_dist * 2) if direction == "LONG" else entry - (tp_dist * 2)
                             
-                        # Đặt lệnh phần còn lại: Stoploss hòa vốn (Entry), chốt lời TP2
-                        bx.place_order(sym, "BUY" if direction == "SHORT" else "SELL", half_qty, entry, tp2)
+                        # [FIX v6.2] BẢN VÁ LỖI NGHIÊM TRỌNG: đoạn cũ gọi bx.place_order() với
+                        # side NGƯỢC hướng lệnh đang giữ -> vô tình MỞ MỘT LỆNH MARKET MỚI
+                        # ngược chiều thay vì chỉ đặt SL/TP bảo vệ cho nửa còn lại. Dùng
+                        # set_runner_sl_tp (chỉ đặt lệnh chờ, không mở vị thế mới) + breakeven
+                        # có đệm phí để "hoà vốn" không vô tình thành lỗ nhẹ sau phí.
+                        be_price = bx.breakeven_price(direction, entry)
+                        bx.set_runner_sl_tp(sym, direction, half_qty, be_price, tp2)
                         
                         _tg_send(
                             REGISTER_TOKEN, user.telegram_id,
                             f"{emoji} <b>{action_type}: {sym}</b>\n\n"
                             f"📊 Đã chốt: 1/2 vị thế {direction} (PnL: {pnl_pct:+.2f}%)\n"
-                            f"🔒 SL phần còn lại: Dời về Entry (<code>${entry:.4f}</code>)\n"
+                            f"🔒 SL phần còn lại: Dời về Breakeven+phí (<code>${be_price:.4f}</code>)\n"
                             f"🎯 Target tiếp theo (TP2): <code>${tp2:.4f}</code>\n"
                             f"🔍 Lý do: <i>{reason}</i>"
                         )
@@ -539,8 +546,11 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             new_qty = round(risk_amt / (new_entry * sl_pct), 4)
                             
                             if new_qty > 0:
+                                new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
+                                new_rr    = analysis.get("rr_ratio", 1.5)
                                 bx.set_leverage(sym, leverage=user.leverage)
-                                bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2)
+                                bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2,
+                                               leverage=user.leverage, p_win=new_p_win, rr_ratio=new_rr)
                                 
                                 _tg_send(
                                     REGISTER_TOKEN, user.telegram_id,
@@ -893,7 +903,9 @@ def _execute_for_user(user: User, signal: dict):
         side = "BUY" if direction == "LONG" else "SELL"
         bx.set_leverage(sym, leverage=user.leverage)
         bx.cancel_all_orders(sym)
-        res = bx.place_order(sym, side, qty, sl, tp2)
+        sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
+        sig_rr    = signal.get("rr_ratio", 1.5)
+        res = bx.place_order(sym, side, qty, sl, tp2, leverage=user.leverage, p_win=sig_p_win, rr_ratio=sig_rr)
 
         if res.get("ok"):
             if redis_client:
@@ -1224,6 +1236,39 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
 # STATE API
 # ══════════════════════════════════════════════════════════════════
 @app.get("/api/state")
+def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict:
+    """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
+    để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
+    try:
+        since = datetime.utcnow() - timedelta(days=days)
+        q = db.query(TradeJournal).filter(TradeJournal.timestamp >= since)
+        if user_id:
+            q = q.filter(TradeJournal.user_id == user_id)
+        rows = q.all()
+        if not rows:
+            return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
+
+        wins   = [r for r in rows if (r.pnl_pct or 0) > 0]
+        losses = [r for r in rows if (r.pnl_pct or 0) <= 0]
+        win_rate = round(len(wins) / len(rows) * 100, 1)
+
+        gross_win  = sum((r.pnl_usd or 0) for r in wins)
+        gross_loss = abs(sum((r.pnl_usd or 0) for r in losses))
+        if gross_loss > 0:
+            profit_factor = round(gross_win / gross_loss, 2)
+        else:
+            profit_factor = round(gross_win, 2) if gross_win > 0 else 0
+
+        return {
+            "win_rate": win_rate, "profit_factor": profit_factor,
+            "total_trades": len(rows), "wins": len(wins), "losses": len(losses),
+            "total_pnl_pct": round(sum((r.pnl_pct or 0) for r in rows), 2),
+        }
+    except Exception as e:
+        log.warning("_compute_win_stats error: %s", e)
+        return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
+
+
 def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
     if uid:
         user = db.query(User).filter(User.telegram_id == uid).first()
@@ -1232,12 +1277,15 @@ def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(
         with _POS_LOCK:
             positions = [p for p in LIVE_POSITIONS if str(p.get("user_id")) == uid]
         cfg = TIER_CONFIG.get(user.tier, TIER_CONFIG["TIER1"])
+        wstats = _compute_win_stats(db, user_id=uid)
         return {
             "auto_trade": user.auto_trade, "kill_switch": BOT_KILL_SWITCH,
             "tier": user.tier, "tier_label": cfg["label"],
             "min_confidence": user.min_confidence,
-            "stats": {"equity": user.capital, "total_return": 0,
-                     "daily_pnl_pct": 0, "total_pnl": user.total_pnl or 0},
+            "stats": {"equity": user.capital, "total_return": wstats["total_pnl_pct"],
+                     "daily_pnl_pct": 0, "total_pnl": user.total_pnl or 0,
+                     "win_rate": wstats["win_rate"], "profit_factor": wstats["profit_factor"],
+                     "total_trades": wstats["total_trades"]},
             "positions": positions, "signals": _get_signals(),
         }
 
@@ -1253,12 +1301,14 @@ def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(
     with _POS_LOCK:
         positions = list(LIVE_POSITIONS)
 
+    wstats = _compute_win_stats(db)
     return {
         "auto_trade": BOT_GLOBAL_AUTO, "kill_switch": BOT_KILL_SWITCH,
         "stats": {
             "equity": sum(u.capital or 0 for u in users), "total_users": len(users),
-            "total_return": 0, "daily_pnl_pct": 0, "win_rate": 0,
-            "profit_factor": 0, "drawdown_pct": 0,
+            "total_return": wstats["total_pnl_pct"], "daily_pnl_pct": 0,
+            "win_rate": wstats["win_rate"], "profit_factor": wstats["profit_factor"],
+            "total_trades": wstats["total_trades"], "drawdown_pct": 0,
         },
         "tier_summary": tier_summary, "positions": positions,
         "signals": _get_signals(), "risk_config": _redis_get("GLOBAL:RISK_CONFIG", {}),
