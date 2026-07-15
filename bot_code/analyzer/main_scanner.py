@@ -113,6 +113,10 @@ class SignalBot:
             "confidence": data["confidence"],
             "plan":      data["plan"],
             "timestamp": data.get("timestamp", now),
+            # [FIX v6.2] Truyền edge thực (p_win/rr_ratio) để lớp Kelly sizing
+            # ở main.py/bingx_trader.py không còn phải dùng số mặc định chung chung.
+            "bayes_ev":  data.get("bayes_ev", {}),
+            "rr_ratio":  data.get("rr_ratio", 1.5),
         }
         try:
             self.redis_client.lpush("TRADE_SIGNALS", json.dumps(payload))
@@ -149,6 +153,81 @@ class SignalBot:
         )
         t.start()
         self.log.info("  🔀 Pipeline %s → background thread [%s]", sym, t.name)
+
+    # ══════════════════════════════════════════════════════════════
+    # [FIX v6.3] CỔNG PHẢN BIỆN 12-AGENT TRƯỚC KHI VÀO LỆNH
+    # ──────────────────────────────────────────────────────────────
+    # Trước đây: push_to_queue() chạy TRƯỚC, pipeline 12-agent chạy song song
+    # ở luồng nền chỉ để gửi Telegram -> hội đồng phản biện không hề ảnh hưởng
+    # tới quyết định vào lệnh, trái với yêu cầu gốc ("12 agent phải tư duy
+    # phân tích để đưa ra nhận định phân tích để vào lệnh").
+    # Nay: với các tín hiệu LONG/SHORT (không phải WAIT), pipeline chạy ĐỒNG BỘ
+    # trước push_to_queue(), có timeout + fail-open (nếu LLM lỗi/treo thì GIỮ
+    # NGUYÊN quyết định gốc của engine, không để bot đứng hình vì API sập).
+    # Nếu hội đồng KHÔNG đồng thuận hướng lệnh (hoặc tự chấm WAIT) -> huỷ vào
+    # lệnh. Nếu đồng thuận -> dùng confidence đã hiệu chỉnh theo thống kê
+    # thắng/thua lịch sử (apply_statistical_overlay) thay cho confidence thô.
+    # ══════════════════════════════════════════════════════════════
+    _PIPELINE_GATE_TIMEOUT = 90  # giây — đủ cho 4 lượt gọi LLM tuần tự, có dự phòng
+
+    def _gate_with_pipeline(self, sym, data):
+        result_holder = {}
+
+        def _run():
+            with self._PIPELINE_SEMAPHORE:
+                try:
+                    result_holder["result"] = self.pipeline.run(data)
+                except Exception as e:
+                    result_holder["error"] = e
+
+        t = threading.Thread(target=_run, name=f"gate-{sym}", daemon=True)
+        t.start()
+        t.join(timeout=self._PIPELINE_GATE_TIMEOUT)
+
+        if t.is_alive():
+            self.log.warning("  ⏱️ [GATE] %s: Pipeline quá %ds -> fail-open, giữ tín hiệu gốc của engine.",
+                              sym, self._PIPELINE_GATE_TIMEOUT)
+            return data
+
+        if "result" not in result_holder:
+            self.log.warning("  ⚠️ [GATE] %s: Pipeline lỗi -> fail-open, giữ tín hiệu gốc. Lỗi: %s",
+                              sym, result_holder.get("error"))
+            return data
+
+        result = result_holder["result"]
+
+        try:
+            msgs = MultiAgentPipeline.format_telegram(result, sym)
+            for i, msg in enumerate(msgs):
+                self.tg.send(msg)
+                if i < len(msgs) - 1:
+                    time.sleep(1)
+        except Exception as e:
+            self.log.warning("  ⚠️ [GATE] format_telegram %s lỗi: %s", sym, e)
+
+        engine_dir = data.get("final", "WAIT")
+        panel_dir  = result.get("stat_direction", "WAIT")
+        panel_conf = result.get("stat_confidence")
+
+        if panel_dir == "WAIT" or panel_dir != engine_dir:
+            self.log.warning("  🧠 [VETO] %s: Engine đề xuất %s nhưng Hội đồng 12-agent = %s -> HUỶ vào lệnh.",
+                              sym, engine_dir, panel_dir)
+            self.tg.send(
+                f"🧠 <b>HỘI ĐỒNG 12-AGENT PHỦ QUYẾT: {sym}</b>\n"
+                f"Engine đề xuất <b>{engine_dir}</b> nhưng hội đồng phản biện kết luận "
+                f"<b>{panel_dir}</b> -> Đã HUỶ, không vào lệnh."
+            )
+            data["final"] = "WAIT"
+            data["veto_reason"] = f"panel={panel_dir} vs engine={engine_dir}"
+            return data
+
+        if panel_conf is not None:
+            old_conf = data.get("confidence", 0)
+            data["confidence"] = panel_conf
+            self.log.info("  🧠 [GATE] %s: Đồng thuận %s | Confidence %.1f%% -> %.1f%% (đã hiệu chỉnh lịch sử)",
+                          sym, panel_dir, old_conf, panel_conf)
+
+        return data
 
     def _scan(self, symbols, label):
         self.log.info("─── %s ───", label)
@@ -197,9 +276,14 @@ class SignalBot:
                     self.log.info("  📱 Đã gửi [%s]: %s", reason, sym)
 
                     if data["final"] != "WAIT":
-                        self.push_to_queue(sym, data)
-
-                    self._run_pipeline(sym, data)
+                        # [FIX v6.3] Phản biện 12-agent TRƯỚC khi vào lệnh (đồng bộ, fail-open)
+                        data = self._gate_with_pipeline(sym, data)
+                        self.last_signals[sym] = data  # confidence/final có thể đã đổi sau gate
+                        if data["final"] != "WAIT":
+                            self.push_to_queue(sym, data)
+                    else:
+                        # WAIT: không cần chặn lệnh, chạy pipeline nền để tham khảo như cũ
+                        self._run_pipeline(sym, data)
                 else:
                     self.log.info("  ⏭️  Bỏ qua [%s]: %s %s %.1f%%",
                                   reason, sym, data["final"], data["confidence"])
