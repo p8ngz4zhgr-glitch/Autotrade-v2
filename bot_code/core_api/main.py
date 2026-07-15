@@ -1235,8 +1235,17 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
 # ══════════════════════════════════════════════════════════════════
 # STATE API
 # ══════════════════════════════════════════════════════════════════
+from fastapi import Depends
+from datetime import datetime, timedelta
+# Giả sử hàm tạo kết nối DB của bạn tên là get_db, hãy import nó
+# from database import get_db 
+
 @app.get("/api/state")
-def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict:
+def _compute_win_stats(
+    user_id: str = None, 
+    days: int = 30,
+    db: Session = Depends(get_db)  # 👈 SỬA Ở ĐÂY: Thêm Depends(get_db)
+) -> dict:
     """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
     để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
     try:
