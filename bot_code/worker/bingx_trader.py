@@ -481,7 +481,8 @@ class BingXExchange:
             self._save_state()
             return {"action": "CLOSE", "type": "LIQUIDITY_SWEEP", "sweep_type": sweep_type, "roe": roe}
 
-        SWEEP_PROXIMITY_PCT = 0.5      
+        # [ĐÃ SỬA] Nâng vùng nhận diện lên 1.5% để tránh nhiễu
+        SWEEP_PROXIMITY_PCT = 1.5      
         MIN_SL_IMPROVEMENT_PCT = 0.1  
         SWEEP_SL_COOLDOWN_SEC = 180   
 
@@ -494,7 +495,8 @@ class BingXExchange:
         cooldown_ok = (time.time() - stage.get("sweep_sl_updated_at", 0)) >= SWEEP_SL_COOLDOWN_SEC
 
         if near_danger_zone and cooldown_ok:
-            tightened_sl = round(current_price * (0.997 if direction == "LONG" else 1.003), 2)
+            # [ĐÃ SỬA] Dời SL về đúng Entry (Hòa vốn) thay vì bóp sát giá hiện tại 0.3%
+            tightened_sl = entry_price
             
             # Ưu tiên lấy SL từ file State
             current_live_sl = stage.get("last_sl_price", 0)
@@ -510,7 +512,7 @@ class BingXExchange:
                 needs_update = (current_live_sl - tightened_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
 
             if needs_update:
-                log.info(f"🛡️ {symbol} đang tiến gần vùng quét thanh khoản. Dời SL sớm {current_live_sl} -> {tightened_sl}.")
+                log.info(f"🛡️ {symbol} đang tiến gần đỉnh/đáy thanh khoản. Dời SL an toàn về Entry: {current_live_sl} -> {tightened_sl}.")
                 self.cancel_all_orders(symbol)
                 target_tp = tp2_price if stage["leg"] == 2 else tp1_price
                 
@@ -525,7 +527,7 @@ class BingXExchange:
                 return {
                     "action": "UPDATE_SL_TP",
                     "type": "SWEEP_PROXIMITY",
-                    "msg": f"Gần vùng quét thanh khoản, dời SL sớm về {tightened_sl}"
+                    "msg": f"Gần vùng quét thanh khoản, dời SL về Entry {tightened_sl}"
                 }
 
         # BƯỚC 3: CHỐT LỜI SỚM BẢO VỆ LỢI NHUẬN
@@ -578,41 +580,14 @@ class BingXExchange:
                 return {"action": "HOLD", "msg": "Chưa có TP1 để tính toán."}
 
             if direction == "LONG":
-                dist_to_tp1 = tp1_price - entry_price if tp1_price > entry_price else 0
-                curr_dist = current_price - entry_price
                 tp1_hit = current_price >= tp1_price
             else:
-                dist_to_tp1 = entry_price - tp1_price if entry_price > tp1_price else 0
-                curr_dist = entry_price - current_price
                 tp1_hit = current_price <= tp1_price
 
-            progress = (curr_dist / dist_to_tp1) if dist_to_tp1 > 0 else 0
+            # [ĐÃ SỬA] Xóa bỏ hoàn toàn khối lệnh dời SL về Entry khi giá mới chạy được 50%
+            # Cho phép giá điều chỉnh (pullback) thoải mái miễn là chưa chạm SL gốc.
 
-            # -- Mốc 50% quãng đường tới TP1 --
-            if not stage.get("mid_done"):
-                if progress >= 0.5:
-                    partial_qty = float(int((current_qty * MID_CLOSE_RATIO) * 10000) / 10000)
-                    partial_qty = min(partial_qty, current_qty)
-                    if partial_qty > 0:
-                        self.close_position(symbol, partial_qty, direction)
-                    remaining_qty = float(int((current_qty - partial_qty) * 10000) / 10000)
-                    self.cancel_all_orders(symbol)
-                    self._place_sl_tp(symbol, original_side, remaining_qty, entry_price, tp1_price)
-                    
-                    stage["mid_done"] = True
-                    stage["last_sl_price"] = entry_price
-                    self._position_stage[symbol] = stage
-                    self._save_state()
-                    
-                    log.info(f"🛡️ {symbol} đạt 50% quãng đường tới TP1. Chốt {partial_qty}, dời SL về Entry, chờ TP1={tp1_price}.")
-                    return {
-                        "action": "SCALE_OUT",
-                        "leg": 1,
-                        "msg": f"Chốt {partial_qty} tại 50% TP1 | SL={entry_price} | chờ TP1={tp1_price}"
-                    }
-                return {"action": "HOLD", "msg": "Đang chờ 50% quãng đường tới TP1."}
-
-            # -- Đã qua mốc 50%, chờ chạm TP1 --
+            # -- Đã chạm TP1 --
             if tp1_hit:
                 close_qty = float(int((current_qty * TP1_CLOSE_RATIO) * 10000) / 10000)
                 close_qty = min(close_qty, current_qty)
@@ -622,6 +597,7 @@ class BingXExchange:
                 remaining_qty = float(int((current_qty - close_qty) * 10000) / 10000)
 
                 if trend_continues and tp2_price > 0 and remaining_qty > 0:
+                    # Chạm TP1 chốt lời xong, bây giờ mới dời SL của phần gồng lãi về Entry (tp1_price)
                     self._place_sl_tp(symbol, original_side, remaining_qty, tp1_price, tp2_price)
                     
                     stage["leg"] = 2
@@ -648,7 +624,7 @@ class BingXExchange:
                     log.info(f"💰 {symbol} chạm TP1, xu hướng yếu -> chốt toàn bộ.")
                     return {"action": "CLOSE", "type": "TP1_FINAL", "msg": "Chạm TP1, xu hướng yếu, đóng toàn bộ."}
 
-            return {"action": "HOLD", "msg": "Đã dời SL về Entry, đang chờ chạm TP1."}
+            return {"action": "HOLD", "msg": "Đang giữ SL gốc, chờ chạm TP1."}
 
         # ================= CHẶNG 2: TP1 -> TP2 =================
         else:
@@ -667,6 +643,7 @@ class BingXExchange:
             progress2 = (curr_dist2 / dist_to_tp2) if dist_to_tp2 > 0 else 0
 
             # -- Mốc 50% quãng đường tới TP2 --
+            # (Đoạn này giữ nguyên vì ở Chặng 2 lệnh đã an toàn và đang khóa lãi)
             if not stage.get("mid_done"):
                 if progress2 >= 0.5:
                     partial_qty = float(int((current_qty * MID_CLOSE_RATIO) * 10000) / 10000)
@@ -702,3 +679,4 @@ class BingXExchange:
                 return {"action": "CLOSE", "type": "TP2_FINAL", "msg": "Đạt TP2, chốt toàn bộ lệnh."}
 
             return {"action": "HOLD", "msg": "Đã dời SL lên TP1, đang chờ chạm TP2."}
+
