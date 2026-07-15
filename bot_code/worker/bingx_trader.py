@@ -417,36 +417,50 @@ class BingXExchange:
         current_price = self.get_latest_price(symbol)
         
         # Lấy thông tin SL/TP hiện tại TRÊN SÀN (quan trọng để tránh spam)
-        # Lưu ý: Hàm get_position_info hoặc get_open_orders của bạn phải trả về SL/TP hiện tại
         active_orders = self.get_trigger_orders().get(symbol, {}) 
         current_sl = float(active_orders.get("sl", 0))
         
         if entry_price <= 0 or current_price <= 0:
             return {"action": "NONE", "msg": "Giá bị lỗi."}
 
-        # Tính toán ROE và quãng đường
-        plan = analysis_result.get("plan", {})
-        tp1_price = float(plan.get("tp1", 0))
-        
+        # Tính toán ROE và quãng đường đi được
         if direction == "LONG":
             roe = ((current_price - entry_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(tp1_price - entry_price) if tp1_price > 0 else 0
             curr_dist = current_price - entry_price
         else:
             roe = ((entry_price - current_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(entry_price - tp1_price) if tp1_price > 0 else 0
             curr_dist = entry_price - current_price
 
-        # 1. EARLY BREAKEVEN: 50% chặng đường -> Dời SL về Entry
+        # 1. EARLY BREAKEVEN: Xử lý khoảng cách TP1
+        plan = analysis_result.get("plan", {})
+        tp1_price = float(plan.get("tp1", 0))
+        
+        dist_to_tp1 = 0
+        if tp1_price > 0:
+            dist_to_tp1 = abs(tp1_price - entry_price)
+        else:
+            # FALLBACK: Nếu không có TP1, giả định mức TP1 an toàn tương đương ROE 20%
+            dist_to_tp1 = (0.2 / leverage) * entry_price
+
+        # Kiểm tra logic dời SL (Tránh spam API)
+        be_price = self.breakeven_price(direction, entry_price)
+        needs_be_move = False
+        
+        if current_sl == 0:
+            needs_be_move = True
+        else:
+            # Chỉ dời nếu SL hiện tại đang kém an toàn hơn giá Breakeven
+            if direction == "LONG" and current_sl < be_price:
+                needs_be_move = True
+            elif direction == "SHORT" and current_sl > be_price:
+                needs_be_move = True
+
+        # Kích hoạt Breakeven khi giá đi được 50% chặng đường đến TP1
         if dist_to_tp1 > 0 and (curr_dist / dist_to_tp1) >= 0.50:
-            # KIỂM TRA ĐIỀU KIỆN KÉO: 
-            # Chỉ kéo nếu SL hiện tại CÒN ĐANG LÀ SL CŨ (sai lệch lớn với entry)
-            # Dùng ngưỡng sai số 0.0001 (0.01%) để so sánh float
-            if abs(current_sl - entry_price) > (entry_price * 0.0001):
-                be_price = self.breakeven_price(direction, entry_price)
-                log.info(f"🛡️ {symbol} đạt 50% TP1. Kéo SL về Breakeven+phí {be_price}!")
+            if needs_be_move:
+                log.info(f"🛡️ {symbol} đạt an toàn. Kéo SL về Breakeven+phí {be_price}!")
                 self.cancel_all_orders(symbol)
-                # Dùng TP2 từ plan nếu có, không thì dùng TP1 cũ
+                
                 tp_target = float(plan.get("tp2", tp1_price))
                 self.set_runner_sl_tp(symbol, direction, current_qty, be_price, tp_target)
                 return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn (có đệm phí)."}
@@ -459,7 +473,6 @@ class BingXExchange:
             
             # Cần so sánh abs(roe) để cắt cả LONG lẫn SHORT
             if roe >= THRESHOLD or roe <= -THRESHOLD:
-                # Chỉ đóng khi trend đã mất (is_trending == False)
                 if not is_trending:
                     log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
                     self.close_position(symbol, current_qty, direction)
@@ -475,4 +488,5 @@ class BingXExchange:
             return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
 
         return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
+
 
