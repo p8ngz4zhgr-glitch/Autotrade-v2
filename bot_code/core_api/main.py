@@ -1232,19 +1232,17 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
         return {"success": False, "error": str(e)}
 
 
-# ══════════════════════════════════════════════════════════════════
+## ══════════════════════════════════════════════════════════════════
 # STATE API
 # ══════════════════════════════════════════════════════════════════
-from fastapi import Depends
+from fastapi import Depends, Query, Request
 from datetime import datetime, timedelta
-# Giả sử hàm tạo kết nối DB của bạn tên là get_db, hãy import nó
-# from database import get_db 
 
-@app.get("/api/state")
+# 1. HÀM BỔ TRỢ TÍNH TOÁN (Đã bỏ @app.get và Depends ở đây)
 def _compute_win_stats(
+    db: Session,
     user_id: str = None, 
-    days: int = 30,
-    db: Session = Depends(get_db)  # 👈 SỬA Ở ĐÂY: Thêm Depends(get_db)
+    days: int = 30
 ) -> dict:
     """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
     để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
@@ -1276,6 +1274,59 @@ def _compute_win_stats(
     except Exception as e:
         log.warning("_compute_win_stats error: %s", e)
         return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
+
+
+# 2. HÀM XỬ LÝ API CHÍNH (Đã gắn @app.get vào đúng chỗ)
+@app.get("/api/state")
+def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
+    if uid:
+        user = db.query(User).filter(User.telegram_id == uid).first()
+        if not user:
+            return {"error": "User not found"}
+        with _POS_LOCK:
+            positions = [p for p in LIVE_POSITIONS if str(p.get("user_id")) == uid]
+        cfg = TIER_CONFIG.get(user.tier, TIER_CONFIG["TIER1"])
+        
+        # Gọi hàm tính toán và truyền trực tiếp kết nối db
+        wstats = _compute_win_stats(db, user_id=uid)
+        
+        return {
+            "auto_trade": user.auto_trade, "kill_switch": BOT_KILL_SWITCH,
+            "tier": user.tier, "tier_label": cfg["label"],
+            "min_confidence": user.min_confidence,
+            "stats": {"equity": user.capital, "total_return": wstats["total_pnl_pct"],
+                     "daily_pnl_pct": 0, "total_pnl": user.total_pnl or 0,
+                     "win_rate": wstats["win_rate"], "profit_factor": wstats["profit_factor"],
+                     "total_trades": wstats["total_trades"]},
+            "positions": positions, "signals": _get_signals(),
+        }
+
+    users = db.query(User).filter(User.is_active == True).all()
+    tier_summary = {}
+    for t, cfg in TIER_CONFIG.items():
+        tier_users = [u for u in users if u.tier == t]
+        tier_summary[t] = {
+            "label": cfg["label"], "count": len(tier_users),
+            "capital": sum(u.capital or 0 for u in tier_users),
+            "min_confidence": cfg["min_confidence"],
+        }
+    with _POS_LOCK:
+        positions = list(LIVE_POSITIONS)
+
+    # Gọi hàm tính toán tổng quan
+    wstats = _compute_win_stats(db)
+    
+    return {
+        "auto_trade": BOT_GLOBAL_AUTO, "kill_switch": BOT_KILL_SWITCH,
+        "stats": {
+            "equity": sum(u.capital or 0 for u in users), "total_users": len(users),
+            "total_return": wstats["total_pnl_pct"], "daily_pnl_pct": 0,
+            "win_rate": wstats["win_rate"], "profit_factor": wstats["profit_factor"],
+            "total_trades": wstats["total_trades"], "drawdown_pct": 0,
+        },
+        "tier_summary": tier_summary, "positions": positions,
+        "signals": _get_signals(), "risk_config": _redis_get("GLOBAL:RISK_CONFIG", {}),
+    }
 
 
 def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
