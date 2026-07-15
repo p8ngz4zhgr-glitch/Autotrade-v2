@@ -494,7 +494,7 @@ class BingXExchange:
 
         cooldown_ok = (time.time() - stage.get("sweep_sl_updated_at", 0)) >= SWEEP_SL_COOLDOWN_SEC
 
-                if near_danger_zone and cooldown_ok:
+        if near_danger_zone and cooldown_ok:
             # 1. Xác định điều kiện an toàn để dời SL về Entry (Phải đang lãi ít nhất 0.2%)
             is_safe_to_move = False
             if direction == "LONG" and current_price > (entry_price * 1.002):
