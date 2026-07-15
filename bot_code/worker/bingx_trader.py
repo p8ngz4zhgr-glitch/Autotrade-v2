@@ -494,23 +494,34 @@ class BingXExchange:
 
         cooldown_ok = (time.time() - stage.get("sweep_sl_updated_at", 0)) >= SWEEP_SL_COOLDOWN_SEC
 
-        if near_danger_zone and cooldown_ok:
-            # [ĐÃ SỬA] Dời SL về đúng Entry (Hòa vốn) thay vì bóp sát giá hiện tại 0.3%
-            tightened_sl = entry_price
-            
-            # Ưu tiên lấy SL từ file State
+                if near_danger_zone and cooldown_ok:
+            # 1. Xác định điều kiện an toàn để dời SL về Entry (Phải đang lãi ít nhất 0.2%)
+            is_safe_to_move = False
+            if direction == "LONG" and current_price > (entry_price * 1.002):
+                is_safe_to_move = True
+            elif direction == "SHORT" and current_price < (entry_price * 0.998):
+                is_safe_to_move = True
+
+            # 2. Xử lý dựa trên trạng thái an toàn
             current_live_sl = stage.get("last_sl_price", 0)
-            
             if current_live_sl == 0:
                 current_live_sl = float(self.get_trigger_orders().get(symbol, {}).get("sl", 0) or 0)
 
-            if current_live_sl <= 0:
-                needs_update = True  
-            elif direction == "LONG":
-                needs_update = (tightened_sl - current_live_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
-            else:
-                needs_update = (current_live_sl - tightened_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
+            needs_update = False
+            tightened_sl = current_live_sl
 
+            if is_safe_to_move:
+                tightened_sl = entry_price
+                if current_live_sl <= 0:
+                    needs_update = True  
+                elif direction == "LONG":
+                    needs_update = (tightened_sl - current_live_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
+                else:
+                    needs_update = (current_live_sl - tightened_sl) / current_price * 100 > MIN_SL_IMPROVEMENT_PCT
+            else:
+                log.info(f"⚠️ {symbol} gần vùng quét nhưng đang lỗ/chưa đủ lãi (Giá: {current_price} | Entry: {entry_price}). Giữ nguyên SL gốc bảo vệ.")
+
+            # 3. Gửi lệnh cập nhật nếu hợp lệ
             if needs_update:
                 log.info(f"🛡️ {symbol} đang tiến gần đỉnh/đáy thanh khoản. Dời SL an toàn về Entry: {current_live_sl} -> {tightened_sl}.")
                 self.cancel_all_orders(symbol)
@@ -529,6 +540,7 @@ class BingXExchange:
                     "type": "SWEEP_PROXIMITY",
                     "msg": f"Gần vùng quét thanh khoản, dời SL về Entry {tightened_sl}"
                 }
+
 
         # BƯỚC 3: CHỐT LỜI SỚM BẢO VỆ LỢI NHUẬN
         PROFIT_ARM_ROE = 6.0
