@@ -468,22 +468,37 @@ class BingXExchange:
             is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
             THRESHOLD = 12.0
             
-            # Cần so sánh abs(roe) để cắt cả LONG lẫn SHORT
             if roe >= THRESHOLD or roe <= -THRESHOLD:
-                # Chỉ đóng khi trend đã mất (is_trending == False)
                 if not is_trending:
-                    log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
-                    self.close_position(symbol, current_qty, direction)
-                    self.cancel_all_orders(symbol)
-                    return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
+                    log.info(f"💰 Thử chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime)...")
+                    # ✅ FIX: Bắt lấy kết quả trả về từ sàn
+                    close_res = self.close_position(symbol, current_qty, direction)
+                    
+                    if close_res.get("ok"):
+                        log.info(f"✅ Đóng lệnh thành công, đang hủy SL/TP cũ.")
+                        self.cancel_all_orders(symbol)
+                        return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
+                    else:
+                        # 🚨 Báo lỗi, giữ nguyên lệnh gốc và SL/TP
+                        err_msg = close_res.get("msg", "Unknown error")
+                        log.error(f"❌ BingX từ chối lệnh đóng {symbol}: {err_msg}")
+                        return {"action": "ERROR", "msg": f"Không thể đóng lệnh: {err_msg}"}
         
         # 3. ĐẢO CHIỀU HOÀN TOÀN
         elif (direction == "LONG" and new_signal == "SHORT") or \
              (direction == "SHORT" and new_signal == "LONG"):
-            log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
-            self.close_position(symbol, current_qty, direction)
-            self.cancel_all_orders(symbol)
-            return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
+            log.warning(f"🚨 Tín hiệu đảo ngược. Thử đóng lệnh {direction} cũ...")
+            
+            # ✅ FIX: Bắt lấy kết quả
+            close_res = self.close_position(symbol, current_qty, direction)
+            
+            if close_res.get("ok"):
+                self.cancel_all_orders(symbol)
+                return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
+            else:
+                err_msg = close_res.get("msg", "Unknown error")
+                log.error(f"❌ BingX từ chối đóng vị thế đảo chiều {symbol}: {err_msg}")
+                return {"action": "ERROR", "msg": f"Lỗi đóng lệnh đảo chiều: {err_msg}"}
 
         return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
 
