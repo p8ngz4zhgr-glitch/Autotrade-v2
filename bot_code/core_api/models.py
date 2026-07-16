@@ -19,10 +19,16 @@ if "sqlite" in DATABASE_URL:
 else:
     engine_kwargs = {
         "pool_pre_ping": True,     # Ping kiểm tra trước khi query
-        "pool_recycle": 1800,      # Tự động reset kết nối mỗi 30 phút (Chặn lỗi Cloud ngắt SSL)
+        "pool_recycle": 1800,      # Tự động reset kết nối mỗi 30 phút
         "pool_size": 10,           # Kích thước Pool tối ưu cho Render
         "max_overflow": 20,
-        "pool_use_lifo": True      # Luôn tái sử dụng các đường truyền mới nhất
+        "pool_use_lifo": True,     # Luôn tái sử dụng các đường truyền mới nhất
+        "connect_args": {          # BỔ SUNG: TCP Keepalives để chống rớt SSL trên Cloud
+            "keepalives": 1,
+            "keepalives_idle": 30,      # Gửi gói keepalive nếu rảnh 30s
+            "keepalives_interval": 10,  # Khoảng cách giữa các lần gửi 10s
+            "keepalives_count": 5       # Thử tối đa 5 lần
+        }
     }
 
 engine = create_engine(DATABASE_URL, **engine_kwargs)
