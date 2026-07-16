@@ -164,6 +164,17 @@ def _tg_send_inline(token: str, chat_id: str, text: str, reply_markup: dict):
         _req.post(url, json=payload, timeout=5)
     except Exception as e:
         log.warning("_tg_send_inline error: %s", e)
+        
+def notify_admin(text: str):
+    try:
+        # Nếu có cài đặt ID của Admin thì gửi tin nhắn, nếu không thì in ra log
+        if ADMIN_CHAT_ID:
+            _tg_send(REGISTER_TOKEN, ADMIN_CHAT_ID, text)
+        else:
+            log.info(f"[ADMIN_NOTIFY] {text}")
+    except Exception as e:
+        log.warning(f"Lỗi gửi thông báo cho admin: {e}")
+
 
 
 def _save_journal(uid: str, sym: str, direction: str, pnl_pct: float, qty: float):
