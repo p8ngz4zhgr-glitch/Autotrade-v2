@@ -1,29 +1,3 @@
-# ═══════════════════════════════════════════════════════════
-# META-LABELING FILTER — worker/meta_labeling.py
-# ═══════════════════════════════════════════════════════════
-"""
-Lớp lọc "có nên vào lệnh này không", tách biệt khỏi việc đoán HƯỚNG lệnh.
-
-Tinh thần Triple-Barrier / Meta-labeling (López de Prado): engine.py và hội
-đồng 12-agent đã trả lời "nên LONG hay SHORT". Nhãn thắng/thua thực tế của
-mỗi lệnh trong TradeJournal (WIN nếu pnl_pct>0, LOSS nếu ngược lại) CHÍNH LÀ
-kết quả chạm rào TP/SL/breakeven/reversal đang chạy live — không cần dựng
-lại "triple barrier" từ giá thô, vì bot đã tự làm việc đó rồi mỗi khi đóng
-lệnh. Ở đây chỉ cần: với đúng bối cảnh (confidence, p_win, regime, OI,
-funding...) tại lúc vào lệnh, LỊCH SỬ THỰC TẾ cho thấy loại setup này có hay
-thắng không? Nếu không — lọc bớt, dù nhìn "đẹp" trên giấy.
-
-QUAN TRỌNG — vì sao KHÔNG lưu model xuống file:
-Free web service trên Render có filesystem tạm thời, mất sạch mỗi lần
-restart/redeploy (xem ghi chú hạ tầng đã trao đổi). Nên module này RETRAIN
-LẠI TỪ DATABASE mỗi khi cần (cache RAM 1 giờ) thay vì pickle model ra đĩa.
-Với vài chục–vài trăm dòng dữ liệu, Logistic Regression fit trong vài chục ms
-nên retrain thường xuyên không phải vấn đề hiệu năng.
-
-Fail-open TUYỆT ĐỐI: thiếu scikit-learn, thiếu dữ liệu, hoặc bất kỳ lỗi nào
-khác đều trả về allow=True — không bao giờ để lớp lọc này làm treo hoặc chặn
-nhầm toàn bộ hệ thống vì lý do hạ tầng.
-"""
 import json
 import logging
 from datetime import datetime, timedelta
