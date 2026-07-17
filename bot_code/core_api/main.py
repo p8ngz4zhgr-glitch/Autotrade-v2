@@ -877,6 +877,7 @@ def _execute_for_user(user: User, signal: dict):
         if redis_client:
             try:
                 if redis_client.get(pending_key):
+                    log.info("Cooldown %s %s - skip", user.telegram_id, sym)
                     return
             except Exception:
                 pass
@@ -885,19 +886,22 @@ def _execute_for_user(user: User, signal: dict):
             already = [p for p in LIVE_POSITIONS
                        if str(p.get("user_id")) == user.telegram_id and p.get("symbol") == sym]
         if already:
+            log.info("Da co vi the %s (user %s) - bo qua", sym, user.telegram_id)
             return
 
         try:
             bx_live = get_bx(user)
             live    = bx_live.get_open_positions()
             if any(p.get("symbol") == sym for p in live):
+                log.info("BingX xac nhan da co vi the %s - bo qua", sym)
                 return
         except Exception as e:
-            pass
+            log.warning("BingX realtime check: %s - tiep tuc", e)
 
         with _POS_LOCK:
             total_pos = sum(1 for p in LIVE_POSITIONS if str(p.get("user_id")) == user.telegram_id)
         if total_pos >= (user.max_positions or 2):
+            log.info("Max positions %d da dat (user %s)", user.max_positions, user.telegram_id)
             return
 
         entry = float(signal["plan"]["entry"])
@@ -912,69 +916,21 @@ def _execute_for_user(user: User, signal: dict):
 
         sl_pct = abs(entry - sl) / entry
         if sl_pct < 0.001:
+            log.warning("SL qua gan entry (%.4f%%) - bo qua", sl_pct * 100)
             return
 
-        # ==================================================================
-        # 1. TÍNH TOÁN RỦI RO (GIỮ NGUYÊN TOÁN HỌC CỦA BẠN)
-        # ==================================================================
-        theoretical_risk = user.capital * (user.max_risk_pct / 100)
-        raw_qty = theoretical_risk / (entry * sl_pct)
-        if raw_qty <= 0:
+        risk_amt = user.capital * (user.max_risk_pct / 100)
+        qty      = round(risk_amt / (entry * sl_pct), 4)
+        if qty <= 0:
             return
 
-        # ==================================================================
-        # 2. SCALE XUỐNG NẾU THIẾU KÝ QUỸ
-        # ==================================================================
-        leverage = user.leverage or 5
-        required_margin = (raw_qty * entry) / leverage
-        max_allowed_margin = user.capital * 0.85 
-        
-        actual_qty = raw_qty
-        actual_risk = theoretical_risk
-
-        if required_margin > max_allowed_margin:
-            actual_qty = (max_allowed_margin * leverage) / entry
-            actual_risk = actual_qty * entry * sl_pct
-            required_margin = max_allowed_margin
-
-        # ==================================================================
-        # 3. ÉP CHUẨN SỐ THẬP PHÂN BINGX (CHẶN ĐỨNG LỖI INVALID PRICE)
-        # ==================================================================
-        sym_upper = sym.upper()
-        if "BTC" in sym_upper:
-            actual_qty = round(actual_qty, 4)
-        elif "ETH" in sym_upper:
-            actual_qty = round(actual_qty, 3)
-        elif any(x in sym_upper for x in ["BNB", "SOL"]):
-            actual_qty = round(actual_qty, 2)
-        elif "HYPE" in sym_upper or any(x in sym_upper for x in ["XRP", "ADA", "DOGE"]):
-            # KHÔNG ĐƯỢC CÓ SỐ LẺ. Ví dụ: 4.8 -> Thành 4
-            actual_qty = int(actual_qty) 
-        else:
-            actual_qty = int(actual_qty) # Mặc định các Altcoin lạ đưa về số nguyên cho an toàn
-            
-        if actual_qty <= 0:
-            log.warning(f"⚠️ User {user.telegram_id}: Khối lượng {sym} bị ép về 0. Bỏ qua.")
-            return
-
-        if (actual_qty * entry) < 5.0:
-            log.info(f"⏭️ Lệnh {sym} quá bé (Giá trị < 5 USDT). Sàn sẽ từ chối -> Bỏ qua.")
-            return
-
-        # IN LOG BẮT BỆNH RA MÀN HÌNH
-        log.info(f"🚀 [FIX BINGX TRỊỆT ĐỂ] {sym} | Khối lượng: {actual_qty} | Ký quỹ: ${required_margin:.2f}")
-
-        # ==================================================================
-        # ĐẨY LỆNH LÊN SÀN
-        # ==================================================================
         bx   = get_bx(user)
         side = "BUY" if direction == "LONG" else "SELL"
         bx.set_leverage(sym, leverage=user.leverage)
         bx.cancel_all_orders(sym)
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
         sig_rr    = signal.get("rr_ratio", 1.5)
-        
-        res = bx.place_order(sym, side, actual_qty, sl, tp2, leverage=user.leverage, p_win=sig_p_win, rr_ratio=sig_rr)
+        res = bx.place_order(sym, side, qty, sl, tp2, leverage=user.leverage, p_win=sig_p_win, rr_ratio=sig_rr)
 
         if res.get("ok"):
             if redis_client:
@@ -983,22 +939,20 @@ def _execute_for_user(user: User, signal: dict):
                 except Exception:
                     pass
 
-            log.info(f"✅ OK {sym} | Qty={actual_qty} | Margin=${required_margin:.2f}")
+            log.info("OK %s: %s %s qty=%.4f lev=%dx", user.telegram_id, direction, sym, qty, user.leverage)
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
                 f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
                 f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
-                f"💰 Qty: {actual_qty} | Lev: {user.leverage}x\n"
-                f"🛡️ Ký quỹ: ~${required_margin:.2f} | Risk: ${actual_risk:.2f}\n"
-                f"🛑 SL: <code>${sl:.4f}</code>\n"
-                f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50%\n"
-                f"🏆 TP2: <code>${tp2:.4f}</code> → đích")
+                f"💰 Qty: {qty:.4f} | Lev: {user.leverage}x\n"
+                f"🛑 SL: <code>${sl:.4f}</code> | Risk: ${risk_amt:.2f}\n"
+                f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
+                f"🏆 TP2: <code>${tp2:.4f}</code> → đích 50% còn lại")
         else:
             log.error("BingX loi %s: %s", user.telegram_id, res.get("msg"))
 
     except Exception as e:
         log.error("_execute_for_user %s: %s", user.telegram_id, e)
-
 def run_trade_worker():
     asyncio.run(_trade_worker_async())
 
