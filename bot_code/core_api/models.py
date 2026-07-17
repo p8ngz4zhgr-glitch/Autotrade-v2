@@ -3,34 +3,21 @@
 # ═══════════════════════════════════════════════════════════
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, create_engine, Index
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.pool import NullPool  # <-- Thư viện bắt buộc cho Supabase
 from datetime import datetime
 import os
+import logging
+
+log = logging.getLogger("Models")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trading_bot.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# Phân tách cấu hình riêng cho SQLite (Local) và Postgres (Cloud/Render)
-if "sqlite" in DATABASE_URL:
-    engine_kwargs = {
-        "connect_args": {"check_same_thread": False},
-        "pool_pre_ping": True,
-    }
-else:
-    # CẤU HÌNH DÀNH RIÊNG CHO SUPABASE (CỔNG 6543 PGBOUNCER)
-    engine_kwargs = {
-        "poolclass": NullPool,  # Tắt Pool cục bộ, nhường toàn quyền cho Supabase PgBouncer
-        "connect_args": {
-            "sslmode": "require",       # Bắt buộc của Supabase
-            "keepalives": 1,
-            "keepalives_idle": 30,
-            "keepalives_interval": 10,
-            "keepalives_count": 5
-        }
-    }
-
-engine = create_engine(DATABASE_URL, **engine_kwargs)
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
+    pool_pre_ping=True,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
