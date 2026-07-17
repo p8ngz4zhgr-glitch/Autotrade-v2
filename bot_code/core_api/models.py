@@ -3,6 +3,7 @@
 # ═══════════════════════════════════════════════════════════
 from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, Text, create_engine, Index
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool  # <-- Thư viện bắt buộc cho Supabase
 from datetime import datetime
 import os
 
@@ -17,23 +18,24 @@ if "sqlite" in DATABASE_URL:
         "pool_pre_ping": True,
     }
 else:
+    # CẤU HÌNH DÀNH RIÊNG CHO SUPABASE (CỔNG 6543 PGBOUNCER)
     engine_kwargs = {
-        "pool_pre_ping": True,     # Ping kiểm tra trước khi query
-        "pool_recycle": 1800,      # Tự động reset kết nối mỗi 30 phút
-        "pool_size": 10,           # Kích thước Pool tối ưu cho Render
-        "max_overflow": 20,
-        "pool_use_lifo": True,     # Luôn tái sử dụng các đường truyền mới nhất
-        "connect_args": {          # BỔ SUNG: TCP Keepalives để chống rớt SSL trên Cloud
+        "poolclass": NullPool,  # Tắt Pool cục bộ, nhường toàn quyền cho Supabase PgBouncer
+        "connect_args": {
+            "sslmode": "require",       # Bắt buộc của Supabase
             "keepalives": 1,
-            "keepalives_idle": 30,      # Gửi gói keepalive nếu rảnh 30s
-            "keepalives_interval": 10,  # Khoảng cách giữa các lần gửi 10s
-            "keepalives_count": 5       # Thử tối đa 5 lần
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5
         }
     }
 
 engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+
 
 class User(Base):
     __tablename__ = "users"
