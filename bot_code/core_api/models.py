@@ -22,8 +22,6 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-
-
 class User(Base):
     __tablename__ = "users"
     id                    = Column(Integer,  primary_key=True, index=True)
@@ -63,6 +61,11 @@ class TradeJournal(Base):
     pnl_usd            = Column(Float,    default=0.0)
     lesson             = Column(Text,     default="")
     context            = Column(String,   nullable=True)
+    # [NEW v6.5] Snapshot JSON các feature tại thời điểm VÀO lệnh (confidence,
+    # p_win, ev_ratio, hmm regime, oi_signal, funding...) — dùng để huấn luyện
+    # lớp Meta-labeling (xem worker/meta_labeling.py). Không đổi ý nghĩa các
+    # cột cũ, chỉ thêm mới nên an toàn với dữ liệu đã có.
+    entry_features     = Column(Text,     nullable=True)
     timestamp          = Column(DateTime, default=datetime.utcnow)
 
 
@@ -96,3 +99,28 @@ class MarketRegime(Base):
 
 # Tạo bảng
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_schema_migrations():
+    """
+    [FIX v6.5] create_all() CHỈ tạo bảng còn thiếu, KHÔNG thêm cột còn thiếu
+    vào bảng đã tồn tại. Hệ thống đã chạy live nên bảng trade_journal đã có
+    sẵn trên DB thật -> cột entry_features mới thêm ở trên sẽ không tự xuất
+    hiện, mọi INSERT sau này sẽ lỗi "column does not exist" nếu không chạy
+    ALTER TABLE. Hàm này kiểm tra rồi tự vá, an toàn để gọi lại nhiều lần.
+    """
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        if "trade_journal" not in inspector.get_table_names():
+            return
+        existing_cols = {c["name"] for c in inspector.get_columns("trade_journal")}
+        if "entry_features" not in existing_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE trade_journal ADD COLUMN entry_features TEXT"))
+            log.info("✅ [Migration] Đã thêm cột trade_journal.entry_features")
+    except Exception as e:
+        log.warning("⚠️ [Migration] entry_features lỗi (bỏ qua, không chặn khởi động): %s", e)
+
+
+_ensure_schema_migrations()
