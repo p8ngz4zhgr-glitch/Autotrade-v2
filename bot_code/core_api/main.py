@@ -26,6 +26,7 @@ from core_api.models import SessionLocal, User, TradeJournal
 from core_api.security import encrypt_api_secret, decrypt_api_secret
 from analyzer.main_scanner import SignalBot
 from worker.bingx_trader import BingXExchange
+from worker.meta_labeling import MetaLabelFilter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("MainAPI")
@@ -54,8 +55,8 @@ _LAST_REVERSAL_EVAL = {}
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 74.0, "max_risk_pct": 2.0,
-        "max_positions": 3, "leverage": 5, "target_monthly": "5-8%",
+        "min_confidence": 68.0, "max_risk_pct": 2.0,
+        "max_positions": 2, "leverage": 5, "target_monthly": "5-8%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
@@ -151,31 +152,6 @@ def _tg_send(token: str, chat_id: str, text: str):
         _req.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=5)
     except Exception as e:
         log.warning("_tg_send error: %s", e)
-    
-def _tg_send_inline(token: str, chat_id: str, text: str, reply_markup: dict):
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "reply_markup": reply_markup
-        }
-        _req.post(url, json=payload, timeout=5)
-    except Exception as e:
-        log.warning("_tg_send_inline error: %s", e)
-        
-def notify_admin(text: str):
-    try:
-        # Nếu có cài đặt ID của Admin thì gửi tin nhắn, nếu không thì in ra log
-        if ADMIN_CHAT_ID:
-            _tg_send(REGISTER_TOKEN, ADMIN_CHAT_ID, text)
-        else:
-            log.info(f"[ADMIN_NOTIFY] {text}")
-    except Exception as e:
-        log.warning(f"Lỗi gửi thông báo cho admin: {e}")
-
-
 
 def _save_journal(uid: str, sym: str, direction: str, pnl_pct: float, qty: float):
     try:
@@ -747,11 +723,25 @@ def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty
                          else "Kiểm tra CVD, volume, Wyckoff trước khi vào tiếp."))
             outcome = "TP" if pnl_pct > 0 else "SL"
 
+            # [NEW v6.5] Đính kèm feature snapshot lúc vào lệnh (nếu còn trong Redis)
+            # để nuôi dữ liệu cho Meta-labeling filter (worker/meta_labeling.py).
+            # KHÔNG xoá key sau khi đọc: lệnh MỚI cùng symbol+direction sẽ tự ghi
+            # đè key này lúc vào lệnh tiếp theo, nên không cần dọn thủ công; TTL 7
+            # ngày lo phần dọn rác nếu vì lý do gì đó không có lệnh mới.
+            entry_features_json = None
+            if redis_client:
+                try:
+                    raw = redis_client.get(f"ENTRY_FEATURES_{user_id}_{symbol}_{direction}")
+                    if raw:
+                        entry_features_json = raw.decode() if isinstance(raw, bytes) else raw
+                except Exception:
+                    pass
+
             db.add(TradeJournal(
                 symbol=symbol, user_id=user_id, tier=tier, direction=direction,
                 outcome=outcome, pnl_pct=pnl_pct, pnl_usd=pnl_usd,
                 context=f"{symbol} {direction} @ {datetime.now().strftime('%d/%m %H:%M')}",
-                lesson=lesson))
+                lesson=lesson, entry_features=entry_features_json))
             if user:
                 user.total_pnl = (user.total_pnl or 0) + pnl_usd
 
@@ -924,6 +914,35 @@ def _execute_for_user(user: User, signal: dict):
         if qty <= 0:
             return
 
+        entry_features = {
+            "symbol": sym, "direction": direction,
+            "confidence": signal.get("confidence", 70),
+            "bayes_ev": signal.get("bayes_ev", {}),
+            "rr_ratio": signal.get("rr_ratio", 1.5),
+            "hmm": signal.get("hmm", {}),
+            "oi_signal": signal.get("oi_signal", "N/A"),
+            "funding": signal.get("funding", 0),
+        }
+
+        # [NEW v6.5] CỔNG META-LABELING: lọc dựa trên thắng/thua THỰC TẾ đã
+        # tích luỹ trong TradeJournal cho đúng loại bối cảnh này — độc lập
+        # với việc engine/12-agent đã chọn hướng. Fail-open tuyệt đối: lỗi
+        # hoặc chưa đủ dữ liệu (< 30 lệnh có nhãn) -> KHÔNG chặn gì cả.
+        meta_db = SessionLocal()
+        try:
+            meta = MetaLabelFilter.evaluate(meta_db, entry_features)
+        finally:
+            meta_db.close()
+
+        if not meta["allow"]:
+            log.warning("🧠 [META-VETO] %s %s: %s", sym, direction, meta["reason"])
+            _tg_send(
+                REGISTER_TOKEN, user.telegram_id,
+                f"🧠 <b>META-FILTER HUỶ LỆNH: {sym}</b>\n"
+                f"{direction} bị lọc: {meta['reason']} (dựa trên {meta['n_samples']} lệnh lịch sử)."
+            )
+            return
+
         bx   = get_bx(user)
         side = "BUY" if direction == "LONG" else "SELL"
         bx.set_leverage(sym, leverage=user.leverage)
@@ -936,6 +955,11 @@ def _execute_for_user(user: User, signal: dict):
             if redis_client:
                 try:
                     redis_client.setex(pending_key, 60, "1")
+                    # Lưu snapshot feature để _save_journal gắn vào TradeJournal khi đóng lệnh
+                    redis_client.setex(
+                        f"ENTRY_FEATURES_{user.telegram_id}_{sym}_{direction}",
+                        7 * 86400, json.dumps(entry_features)
+                    )
                 except Exception:
                     pass
 
@@ -1257,18 +1281,11 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
         return {"success": False, "error": str(e)}
 
 
-## ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
 # STATE API
 # ══════════════════════════════════════════════════════════════════
-from fastapi import Depends, Query, Request
-from datetime import datetime, timedelta
-
-# 1. HÀM BỔ TRỢ TÍNH TOÁN (Đã bỏ @app.get và Depends ở đây)
-def _compute_win_stats(
-    db: Session,
-    user_id: str = None, 
-    days: int = 30
-) -> dict:
+@app.get("/api/state")
+def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict:
     """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
     để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
     try:
@@ -1299,59 +1316,6 @@ def _compute_win_stats(
     except Exception as e:
         log.warning("_compute_win_stats error: %s", e)
         return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
-
-
-# 2. HÀM XỬ LÝ API CHÍNH (Đã gắn @app.get vào đúng chỗ)
-@app.get("/api/state")
-def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
-    if uid:
-        user = db.query(User).filter(User.telegram_id == uid).first()
-        if not user:
-            return {"error": "User not found"}
-        with _POS_LOCK:
-            positions = [p for p in LIVE_POSITIONS if str(p.get("user_id")) == uid]
-        cfg = TIER_CONFIG.get(user.tier, TIER_CONFIG["TIER1"])
-        
-        # Gọi hàm tính toán và truyền trực tiếp kết nối db
-        wstats = _compute_win_stats(db, user_id=uid)
-        
-        return {
-            "auto_trade": user.auto_trade, "kill_switch": BOT_KILL_SWITCH,
-            "tier": user.tier, "tier_label": cfg["label"],
-            "min_confidence": user.min_confidence,
-            "stats": {"equity": user.capital, "total_return": wstats["total_pnl_pct"],
-                     "daily_pnl_pct": 0, "total_pnl": user.total_pnl or 0,
-                     "win_rate": wstats["win_rate"], "profit_factor": wstats["profit_factor"],
-                     "total_trades": wstats["total_trades"]},
-            "positions": positions, "signals": _get_signals(),
-        }
-
-    users = db.query(User).filter(User.is_active == True).all()
-    tier_summary = {}
-    for t, cfg in TIER_CONFIG.items():
-        tier_users = [u for u in users if u.tier == t]
-        tier_summary[t] = {
-            "label": cfg["label"], "count": len(tier_users),
-            "capital": sum(u.capital or 0 for u in tier_users),
-            "min_confidence": cfg["min_confidence"],
-        }
-    with _POS_LOCK:
-        positions = list(LIVE_POSITIONS)
-
-    # Gọi hàm tính toán tổng quan
-    wstats = _compute_win_stats(db)
-    
-    return {
-        "auto_trade": BOT_GLOBAL_AUTO, "kill_switch": BOT_KILL_SWITCH,
-        "stats": {
-            "equity": sum(u.capital or 0 for u in users), "total_users": len(users),
-            "total_return": wstats["total_pnl_pct"], "daily_pnl_pct": 0,
-            "win_rate": wstats["win_rate"], "profit_factor": wstats["profit_factor"],
-            "total_trades": wstats["total_trades"], "drawdown_pct": 0,
-        },
-        "tier_summary": tier_summary, "positions": positions,
-        "signals": _get_signals(), "risk_config": _redis_get("GLOBAL:RISK_CONFIG", {}),
-    }
 
 
 def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
