@@ -281,7 +281,9 @@ class LLMChain:
         tfs   = data.get("timeframes", {})
         lvls  = fibo.get("levels", {})
         atype = data.get("asset_type", "CRYPTO")
-        fund  = data.get("funding", 0)
+        fund     = data.get("funding", 0)
+        oi_sig   = data.get("oi_signal", "N/A")
+        oi_desc  = data.get("oi_desc", "")
 
         tf1h   = tfs.get("1h", {})
         tf4h   = tfs.get("4h", {})
@@ -294,6 +296,12 @@ class LLMChain:
         stoch_1h = tf1h.get("stoch", {})
 
         tech_points = []
+        if atype == "CRYPTO" and oi_sig not in ("N/A", "NEUTRAL"):
+            tech_points.append("OI: " + oi_sig + " (" + oi_desc + "), funding=" + str(fund) + "%/8h")
+        elif atype == "CRYPTO" and abs(fund) >= 0.05:
+            tech_points.append("Funding=" + str(fund) + "%/8h — " +
+                                ("phe Long đang trả phí cao, hơi đông" if fund > 0 else "phe Short đang trả phí cao, hơi đông"))
+
         if rsi_1h < 30:
             tech_points.append("RSI 1H=" + str(rsi_1h) + " — vùng oversold mạnh, áp lực mua tăng")
         elif rsi_1h < 45:
