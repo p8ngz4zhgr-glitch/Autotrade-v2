@@ -117,6 +117,10 @@ class SignalBot:
             # ở main.py/bingx_trader.py không còn phải dùng số mặc định chung chung.
             "bayes_ev":  data.get("bayes_ev", {}),
             "rr_ratio":  data.get("rr_ratio", 1.5),
+            # [NEW v6.5] Thêm context cho Meta-labeling filter (worker/meta_labeling.py)
+            "hmm":       data.get("hmm", {}),
+            "oi_signal": data.get("oi_signal", "N/A"),
+            "funding":   data.get("funding", 0),
         }
         try:
             self.redis_client.lpush("TRADE_SIGNALS", json.dumps(payload))
