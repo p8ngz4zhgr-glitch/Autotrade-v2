@@ -16,6 +16,11 @@ class _CircuitBreaker:
     def __init__(self):
         self._fails    : dict[str, int]   = {}
         self._down_until: dict[str, float] = {}
+        # [NEW v6.7] Bộ nhớ MỀM riêng: chỉ ghi lần thử GẦN NHẤT + thời điểm, KHÔNG
+        # phụ thuộc/không reset theo _fails (bộ đếm cứng dễ bị reset về 0 mỗi khi
+        # có 1 lần thành công xen kẽ, nên circuit breaker cứng gần như không bao
+        # giờ mở nổi trong 1 đợt rate-limit chập chờn — xem giải thích ở _call()).
+        self._recent_fail_at: dict[str, float] = {}
 
     def is_up(self, name: str) -> bool:
         t = self._down_until.get(name, 0)
@@ -30,13 +35,21 @@ class _CircuitBreaker:
     def ok(self, name: str):
         self._fails[name] = 0
         self._down_until.pop(name, None)
+        self._recent_fail_at.pop(name, None)
 
     def fail(self, name: str):
         n = self._fails.get(name, 0) + 1
         self._fails[name] = n
+        self._recent_fail_at[name] = time.time()
         if n >= self.MAX_FAILS:
             self._down_until[name] = time.time() + self.COOLDOWN
             log.warning("🔴 [%s] Circuit breaker OPEN — skip %ds", name, self.COOLDOWN)
+
+    def recently_failed(self, name: str, window: float = 90) -> bool:
+        """[NEW v6.7] Có thất bại trong window giây gần nhất không — dùng để XẾP
+        SAU trong thứ tự thử, không phải để CHẶN hẳn như is_up()."""
+        t = self._recent_fail_at.get(name, 0)
+        return bool(t) and (time.time() - t) < window
 
     def status(self) -> dict:
         now = time.time()
@@ -164,6 +177,20 @@ class LLMChain:
         names = {0: "Groq", 1: "Mistral", 2: "NVIDIA NIM", 3: "Rule-based"}
         log.info("Chiếu slot AI: %d → %s", m, names[s])
         return s
+
+    def _ordered(self, rotation_list):
+        """
+        [NEW v6.7] _slot() gán 1 provider "chính" cho CẢ khung 15 phút theo giờ
+        đồng hồ — không biết/không quan tâm provider đó có đang rate-limit ngay
+        lúc này hay không. Khi provider đó dính 429, breaker CỨNG (3 lần liên
+        tiếp) khó mở vì hay có 1 lần thành công xen kẽ làm reset bộ đếm — nên
+        gần như MỌI lệnh gọi trong cả 15 phút đó vẫn thử nó ĐẦU TIÊN rồi mới
+        rơi xuống provider dự phòng, tốn thời gian lặp lại vô ích.
+        Sửa: xếp SAU (không chặn hẳn) provider vừa thất bại trong 90s gần nhất,
+        ưu tiên thử các provider "có vẻ khoẻ" trước — độc lập với breaker cứng
+        (breaker cứng vẫn giữ nguyên để chặn hẳn khi thật sự down lâu).
+        """
+        return sorted(rotation_list, key=lambda item: _cb.recently_failed(item[0]))
 
     def _prompt(self, data):
         fibo  = data.get("fibo", {})
@@ -437,7 +464,7 @@ class LLMChain:
                 ("Gemini",  lambda p: self._gemini(p))],
         }
 
-        for name, fn in rotation.get(slot, rotation[0]):
+        for name, fn in self._ordered(rotation.get(slot, rotation[0])):
             if not _cb.is_up(name):
                 log.info("  ⏭️  [%s] circuit open — skip", name)
                 continue
@@ -531,7 +558,7 @@ class LLMChain:
                 ("Gemini",  lambda p: self._gemini(p))],
         }
 
-        for name, fn in rotation.get(slot, rotation[0]):
+        for name, fn in self._ordered(rotation.get(slot, rotation[0])):
             if not _cb.is_up(name):
                 log.info("  ⏭️  [%s] circuit open — skip", name)
                 continue
