@@ -973,7 +973,10 @@ def _execute_for_user(user: User, signal: dict):
                 f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
                 f"🏆 TP2: <code>${tp2:.4f}</code> → đích 50% còn lại")
         else:
-            log.error("BingX loi %s: %s", user.telegram_id, res.get("msg"))
+            # [FIX v6.6] TRƯỚC: "BingX loi %s: %s" với %s đầu = user.telegram_id
+            # -> trông giống mã lỗi BingX nhưng thực ra là ID người dùng, gây hiểu
+            # nhầm khi debug (số trong log tưởng là error code, thực ra là Telegram ID).
+            log.error("❌ Đặt lệnh %s thất bại cho user %s: %s", sym, user.telegram_id, res.get("msg"))
 
     except Exception as e:
         log.error("_execute_for_user %s: %s", user.telegram_id, e)
@@ -1284,7 +1287,7 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
 # ══════════════════════════════════════════════════════════════════
 # STATE API
 # ══════════════════════════════════════════════════════════════════
-
+@app.get("/api/state")
 def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict:
     """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
     để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
@@ -1317,7 +1320,7 @@ def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict
         log.warning("_compute_win_stats error: %s", e)
         return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
 
-@app.get("/api/state")
+
 def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
     if uid:
         user = db.query(User).filter(User.telegram_id == uid).first()
