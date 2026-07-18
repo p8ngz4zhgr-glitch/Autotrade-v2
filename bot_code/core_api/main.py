@@ -1301,7 +1301,7 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
 # ══════════════════════════════════════════════════════════════════
 # STATE API
 # ══════════════════════════════════════════════════════════════════
-@app.get("/api/state")
+
 def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict:
     """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
     để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
@@ -1334,7 +1334,7 @@ def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict
         log.warning("_compute_win_stats error: %s", e)
         return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
 
-
+@app.get("/api/state")
 def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
     if uid:
         user = db.query(User).filter(User.telegram_id == uid).first()
