@@ -152,6 +152,20 @@ def _tg_send(token: str, chat_id: str, text: str):
         _req.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=5)
     except Exception as e:
         log.warning("_tg_send error: %s", e)
+        
+def _tg_send_inline(token: str, chat_id: str, text: str, reply_markup: dict):
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "reply_markup": reply_markup
+        }
+        _req.post(url, json=payload, timeout=5)
+    except Exception as e:
+        log.warning("_tg_send_inline error: %s", e)
+
 
 def _save_journal(uid: str, sym: str, direction: str, pnl_pct: float, qty: float):
     try:
