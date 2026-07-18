@@ -764,8 +764,24 @@ class SignalEngine:
             
             log.info("  [Bayes EV] %s %s: P(win)=%.1f%%, EV_Ratio=%.2f (Likelihood=%.2f)",
                      final, symbol, p_win * 100, ev_ratio, likelihood)
-            
-            if ev_ratio < 0.15:
+
+            # [NEW v6.7] NGUYÊN NHÂN CHÍNH của "SL vẫn nhiều": EV_ratio dùng
+            # avg_reward_ratio ~2.25 (trung bình TP1=1.5x và TP2=3.0x so với SL),
+            # nên p_win < 50% VẪN qua được ngưỡng EV nếu R:R đẹp trên giấy — nhưng
+            # muốn chốt được TP1 (nửa vị thế) trước khi SL, giá phải đi ĐỦ XA
+            # theo hướng thuận (1.5x SL) TRƯỚC. Với p_win<50%, phần lớn lệnh thua
+            # sẽ dính SL TOÀN BỘ (chưa kịp chốt gì) chứ không phải thua sau khi đã
+            # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
+            # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
+            # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
+            MIN_P_WIN = 0.55   # có biên an toàn trên 50% vì bản thân p_win cũng chỉ là ước lượng
+            if p_win < MIN_P_WIN:
+                log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT (EV đẹp trên giấy không đủ, "
+                            "cần xác suất thắng thật > 50%% mới giữ đúng mục tiêu winrate).",
+                            p_win * 100, MIN_P_WIN * 100)
+                final = "WAIT"
+                conf = round(conf * 0.8, 1)
+            elif ev_ratio < 0.15:
                 log.warning("  ⚠️ EV(%.2f) quá thấp, hạ cấp thành WAIT", ev_ratio)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
