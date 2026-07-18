@@ -104,6 +104,17 @@ class BingXExchange:
                     for item in balances:
                         if isinstance(item, dict) and item.get("asset") == "USDT":
                             return float(item.get("balance", 0))
+            # code==0 nhưng không tìm thấy asset USDT trong response -> log rõ để phân biệt
+            # với "tài khoản thật sự có 0 USDT"
+            log.error("⚠️ get_balance: code=0 nhưng không thấy USDT trong response: %s", res)
+            return 0.0
+        # [FIX v6.6] TRƯỚC ĐÂY: bất kỳ lỗi gì (rate limit, sai quyền API key Futures,
+        # lỗi xác thực, mất mạng...) đều bị nuốt im lặng thành 0.0 -> log downstream
+        # chỉ thấy "Lỗi số dư" chung chung, không biết vì sao, dù tài khoản có tiền
+        # thật. Log rõ code/msg thật từ BingX ở đây để lần sau biết ngay nguyên nhân.
+        log.error("⚠️ get_balance thất bại — BingX trả về: code=%s msg=%s",
+                   res.get("code") if isinstance(res, dict) else "?",
+                   res.get("msg") if isinstance(res, dict) else res)
         return 0.0
 
     def get_latest_price(self, symbol: str) -> float:
@@ -111,7 +122,16 @@ class BingXExchange:
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
             if isinstance(data, dict):
-                return float(data.get("price", 0))
+                price = float(data.get("price", 0))
+                if price <= 0:
+                    log.error("⚠️ get_latest_price(%s): code=0 nhưng price=%s trong response: %s",
+                              symbol, data.get("price"), res)
+                return price
+        # [FIX v6.6] Log rõ nguyên nhân thật thay vì trả 0.0 im lặng — xem giải thích
+        # ở get_balance() phía trên, áp dụng tương tự.
+        log.error("⚠️ get_latest_price(%s) thất bại — BingX trả về: code=%s msg=%s",
+                   symbol, res.get("code") if isinstance(res, dict) else "?",
+                   res.get("msg") if isinstance(res, dict) else res)
         return 0.0
 
     def set_leverage(self, symbol: str, leverage: int, side: str = "ALL") -> dict:
@@ -226,8 +246,17 @@ class BingXExchange:
         current_price = self.get_latest_price(symbol)
         
         if available_balance <= 0 or current_price <= 0:
-            log.error(f"⛔ Lỗi số dư hoặc giá cho {symbol}.")
-            return {"ok": False, "msg": "Invalid balance or price"}
+            # [FIX v6.6] Chỉ rõ CÁI NÀO fail (get_balance/get_latest_price đã tự log
+            # code/msg thật của BingX ở trên rồi) — trước đây msg trả về chung chung
+            # "Invalid balance or price" khiến log ở main.py không biết đường nào mà lần.
+            reason = []
+            if available_balance <= 0:
+                reason.append(f"balance={available_balance}")
+            if current_price <= 0:
+                reason.append(f"price={current_price}")
+            msg = f"Invalid balance or price ({', '.join(reason)}) — xem log get_balance/get_latest_price phía trên để biết lý do thật từ BingX"
+            log.error(f"⛔ {symbol}: {msg}")
+            return {"ok": False, "msg": msg}
 
         # ══════════════════════════════════════════════════════════════
         # [FIX v6.2] Qty truyền vào (nếu có) đã được caller tính đúng theo
@@ -468,37 +497,22 @@ class BingXExchange:
             is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
             THRESHOLD = 12.0
             
+            # Cần so sánh abs(roe) để cắt cả LONG lẫn SHORT
             if roe >= THRESHOLD or roe <= -THRESHOLD:
+                # Chỉ đóng khi trend đã mất (is_trending == False)
                 if not is_trending:
-                    log.info(f"💰 Thử chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime)...")
-                    # ✅ FIX: Bắt lấy kết quả trả về từ sàn
-                    close_res = self.close_position(symbol, current_qty, direction)
-                    
-                    if close_res.get("ok"):
-                        log.info(f"✅ Đóng lệnh thành công, đang hủy SL/TP cũ.")
-                        self.cancel_all_orders(symbol)
-                        return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
-                    else:
-                        # 🚨 Báo lỗi, giữ nguyên lệnh gốc và SL/TP
-                        err_msg = close_res.get("msg", "Unknown error")
-                        log.error(f"❌ BingX từ chối lệnh đóng {symbol}: {err_msg}")
-                        return {"action": "ERROR", "msg": f"Không thể đóng lệnh: {err_msg}"}
+                    log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
+                    self.close_position(symbol, current_qty, direction)
+                    self.cancel_all_orders(symbol)
+                    return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
         
         # 3. ĐẢO CHIỀU HOÀN TOÀN
         elif (direction == "LONG" and new_signal == "SHORT") or \
              (direction == "SHORT" and new_signal == "LONG"):
-            log.warning(f"🚨 Tín hiệu đảo ngược. Thử đóng lệnh {direction} cũ...")
-            
-            # ✅ FIX: Bắt lấy kết quả
-            close_res = self.close_position(symbol, current_qty, direction)
-            
-            if close_res.get("ok"):
-                self.cancel_all_orders(symbol)
-                return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
-            else:
-                err_msg = close_res.get("msg", "Unknown error")
-                log.error(f"❌ BingX từ chối đóng vị thế đảo chiều {symbol}: {err_msg}")
-                return {"action": "ERROR", "msg": f"Lỗi đóng lệnh đảo chiều: {err_msg}"}
+            log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
+            return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
 
         return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
 
