@@ -699,6 +699,7 @@ class SignalEngine:
             # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
             if hmm_regime == "UPTREND": likelihood *= 1.4
             elif hmm_regime == "DOWNTREND": likelihood *= 0.5
+            elif hmm_regime == "SIDEWAYS": likelihood *= 0.6
 
             # 6. [NEW v6.5] TÍCH HỢP OPEN INTEREST + FUNDING RATE
             # (oi_signal/funding đã được fetch từ trước nhưng chỉ nằm trong report,
@@ -740,6 +741,7 @@ class SignalEngine:
             # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
             if hmm_regime == "DOWNTREND": likelihood *= 1.4
             elif hmm_regime == "UPTREND": likelihood *= 0.5
+            elif hmm_regime == "SIDEWAYS": likelihood *= 0.6
 
             # 6. [NEW v6.5] TÍCH HỢP OPEN INTEREST + FUNDING RATE
             if oi_signal == "SHORT_BUILD": likelihood *= 1.25
@@ -799,6 +801,34 @@ class SignalEngine:
                 log.warning("  ⛔ [FUNDING QUÁ ĐÔNG] Short funding=%.3f%%/8h <= -%.2f%% -> hạ về WAIT.",
                             funding, FUNDING_DANGER_PCT)
                 final = "WAIT"
+
+            # [NEW v6.8] CHẶN CỨNG SAU CHUỖI THUA LIÊN TIẾP — bổ sung cho
+            # apply_statistical_overlay (llm_agents.py), vốn CHỈ giảm confidence
+            # tối đa ~30% (không bao giờ chặn hẳn) và CHỈ chạy SAU KHI đã tốn 4
+            # lượt gọi LLM của pipeline 12-agent. Ở đây chặn NGAY tại engine,
+            # trước khi vào pipeline — vừa tiết kiệm LLM call cho lệnh nhiều khả
+            # năng bị lọc, vừa đảm bảo chuỗi thua thật sự tạm dừng thay vì chỉ bị
+            # trừ điểm confidence (có thể vẫn đủ qua min_confidence của user).
+            if final in ("LONG", "SHORT") and db is not None:
+                STREAK_N = 3
+                STREAK_COOLDOWN_HOURS = 4
+                try:
+                    from core_api.models import TradeJournal
+                    recent = (db.query(TradeJournal)
+                              .filter(TradeJournal.symbol == symbol,
+                                      TradeJournal.direction == final)
+                              .order_by(TradeJournal.timestamp.desc())
+                              .limit(STREAK_N)
+                              .all())
+                    if len(recent) >= STREAK_N and all((r.pnl_pct or 0) <= 0 for r in recent):
+                        hours_since = (datetime.utcnow() - recent[0].timestamp).total_seconds() / 3600
+                        if hours_since < STREAK_COOLDOWN_HOURS:
+                            log.warning("  ⛔ [COOLDOWN] %s %s: %d lệnh thua liên tiếp gần nhất "
+                                        "(lệnh cuối cách %.1fh) -> tạm nghỉ %dh, hạ về WAIT.",
+                                        symbol, final, STREAK_N, hours_since, STREAK_COOLDOWN_HOURS)
+                            final = "WAIT"
+                except Exception as e:
+                    log.debug("  Streak cooldown check lỗi (bỏ qua, không chặn): %s", e)
 
         ev_data = {
             "p_win": round(p_win * 100, 1),
