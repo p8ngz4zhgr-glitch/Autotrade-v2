@@ -183,31 +183,48 @@ class BingXExchange:
                         })
         return positions
 
-    def get_trigger_orders(self) -> dict:
+    def get_trigger_orders(self):
+        """
+        Trả về dict {symbol: {"sl":..,"tp2":..}} khi gọi sàn THÀNH CÔNG (kể cả
+        khi không có lệnh chờ nào — dict rỗng hợp lệ). Trả về None khi GỌI SÀN
+        THẤT BẠI (lỗi API/mạng/xác thực) — KHÁC với dict rỗng, để nơi gọi phân
+        biệt được "chắc chắn không có SL" với "không biết vì gọi sàn lỗi".
+        [FIX v6.11] Trước đây 2 trường hợp này lẫn lộn thành cùng 1 kết quả
+        ({}) — mỗi lần get_balance/get_trigger_orders lỡ gặp lỗi API (vd đúng
+        lỗi code=100413 "Incorrect apiKey" đã từng thấy trong log), current_sl
+        đọc về lại thành 0, khiến manage_position_dynamic tưởng SL CHƯA được
+        kéo về breakeven và cancel+đặt lại lệnh — dù thực ra đã kéo đúng từ
+        trước. Đây chính là nguyên nhân "gọi sàn đặt SL nhiều lần" đang hỏi.
+        """
         res = self._request("GET", "/openApi/swap/v2/trade/openOrders")
+        if not (isinstance(res, dict) and res.get("code") == 0):
+            log.error("⚠️ get_trigger_orders thất bại — BingX trả về: code=%s msg=%s",
+                       res.get("code") if isinstance(res, dict) else "?",
+                       res.get("msg") if isinstance(res, dict) else res)
+            return None
+
         triggers = {}
-        if isinstance(res, dict) and res.get("code") == 0:
-            data = res.get("data")
-            if isinstance(data, list):
-                for o in data:
-                    if isinstance(o, dict):
-                        sym = o.get("symbol")
-                        normalized_sym = sym.replace("-", "") if sym else ""
-                        if normalized_sym not in triggers:
-                            triggers[normalized_sym] = {}
-                        otype = o.get("type", "")
-                        # [FIX v6.4] TAKE_PROFIT_MARKET (đặt bởi _place_sl_tp) lưu giá kích
-                        # hoạt ở "stopPrice", KHÔNG phải "price" (đó là field của lệnh LIMIT
-                        # thường). Đọc sai field khiến tp2 luôn = 0 -> mọi nơi đọc giá trị
-                        # này (vd dashboard hiển thị vị thế) luôn rơi về số ước lượng chung
-                        # chung thay vì TP thật đang treo trên sàn.
-                        if "STOP_MARKET" in otype or ("STOP" in otype and "TAKE_PROFIT" not in otype):
-                            triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
-                        elif "TAKE_PROFIT" in otype:
-                            tp_val = o.get("stopPrice", 0) or o.get("price", 0)
-                            triggers[normalized_sym]["tp2"] = float(tp_val)
-                        elif "LIMIT" in otype:
-                            triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
+        data = res.get("data")
+        if isinstance(data, list):
+            for o in data:
+                if isinstance(o, dict):
+                    sym = o.get("symbol")
+                    normalized_sym = sym.replace("-", "") if sym else ""
+                    if normalized_sym not in triggers:
+                        triggers[normalized_sym] = {}
+                    otype = o.get("type", "")
+                    # [FIX v6.4] TAKE_PROFIT_MARKET (đặt bởi _place_sl_tp) lưu giá kích
+                    # hoạt ở "stopPrice", KHÔNG phải "price" (đó là field của lệnh LIMIT
+                    # thường). Đọc sai field khiến tp2 luôn = 0 -> mọi nơi đọc giá trị
+                    # này (vd dashboard hiển thị vị thế) luôn rơi về số ước lượng chung
+                    # chung thay vì TP thật đang treo trên sàn.
+                    if "STOP_MARKET" in otype or ("STOP" in otype and "TAKE_PROFIT" not in otype):
+                        triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
+                    elif "TAKE_PROFIT" in otype:
+                        tp_val = o.get("stopPrice", 0) or o.get("price", 0)
+                        triggers[normalized_sym]["tp2"] = float(tp_val)
+                    elif "LIMIT" in otype:
+                        triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
         return triggers
 
     def _safe_order(self, params: dict) -> dict:
@@ -454,8 +471,15 @@ class BingXExchange:
         current_price = self.get_latest_price(symbol)
         
         # Lấy thông tin SL/TP hiện tại TRÊN SÀN (quan trọng để tránh spam)
-        # Lưu ý: Hàm get_position_info hoặc get_open_orders của bạn phải trả về SL/TP hiện tại
-        active_orders = self.get_trigger_orders().get(symbol, {}) 
+        # [FIX v6.11] get_trigger_orders() giờ trả None khi GỌI SÀN THẤT BẠI
+        # (khác với {} khi gọi thành công nhưng không có lệnh). Nếu None, KHÔNG
+        # được coi current_sl=0 rồi hành động — bỏ qua chu kỳ này, đợi lần poll
+        # sau, để tránh cancel+đặt lại SL/TP một cách dư thừa mỗi khi sàn chập chờn.
+        trigger_orders = self.get_trigger_orders()
+        if trigger_orders is None:
+            log.warning("⚠️ %s: Không đọc được lệnh chờ hiện tại trên sàn -> bỏ qua chu kỳ này, không hành động.", symbol)
+            return {"action": "NONE", "msg": "Không xác thực được trạng thái SL/TP hiện tại trên sàn."}
+        active_orders = trigger_orders.get(symbol, {})
         current_sl = float(active_orders.get("sl", 0))
         
         if entry_price <= 0 or current_price <= 0:
