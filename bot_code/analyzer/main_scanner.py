@@ -121,6 +121,7 @@ class SignalBot:
             "hmm":       data.get("hmm", {}),
             "oi_signal": data.get("oi_signal", "N/A"),
             "funding":   data.get("funding", 0),
+            "news_risk": data.get("news_risk", {}),
         }
         try:
             self.redis_client.lpush("TRADE_SIGNALS", json.dumps(payload))
