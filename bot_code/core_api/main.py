@@ -55,8 +55,8 @@ _LAST_REVERSAL_EVAL = {}
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 68.0, "max_risk_pct": 2.0,
-        "max_positions": 2, "leverage": 5, "target_monthly": "5-8%",
+        "min_confidence": 72.0, "max_risk_pct": 2.0,
+        "max_positions": 5, "leverage": 5, "target_monthly": "5-8%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
