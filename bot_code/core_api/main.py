@@ -55,8 +55,8 @@ _LAST_REVERSAL_EVAL = {}
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 73.0, "max_risk_pct": 2.0,
-        "max_positions": 3, "leverage": 5, "target_monthly": "5-8%",
+        "min_confidence": 68.0, "max_risk_pct": 2.0,
+        "max_positions": 2, "leverage": 5, "target_monthly": "5-8%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
@@ -152,20 +152,6 @@ def _tg_send(token: str, chat_id: str, text: str):
         _req.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=5)
     except Exception as e:
         log.warning("_tg_send error: %s", e)
-        
-def _tg_send_inline(token: str, chat_id: str, text: str, reply_markup: dict):
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "reply_markup": reply_markup
-        }
-        _req.post(url, json=payload, timeout=5)
-    except Exception as e:
-        log.warning("_tg_send_inline error: %s", e)
-
 
 def _save_journal(uid: str, sym: str, direction: str, pnl_pct: float, qty: float):
     try:
@@ -928,6 +914,17 @@ def _execute_for_user(user: User, signal: dict):
         if qty <= 0:
             return
 
+        # [NEW v6.11] Giảm khối lượng khi đang trong vùng ảnh hưởng tin CPI/PPI/NFP
+        # (engine.py đã siết SL sẵn trong `sl`/`entry` truyền vào; đây là phần
+        # giảm KHỐI LƯỢNG theo đúng yêu cầu "giảm khối lượng gd xuống, SL chặt").
+        news_risk = signal.get("news_risk", {}) or {}
+        if news_risk.get("active"):
+            qty = round(qty * news_risk.get("size_mult", 1.0), 4)
+            log.warning("📰 %s: Đang trong vùng ảnh hưởng tin '%s' -> giảm khối lượng còn x%.1f.",
+                        sym, news_risk.get("event"), news_risk.get("size_mult", 1.0))
+            if qty <= 0:
+                return
+
         entry_features = {
             "symbol": sym, "direction": direction,
             "confidence": signal.get("confidence", 70),
@@ -1301,7 +1298,7 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
 # ══════════════════════════════════════════════════════════════════
 # STATE API
 # ══════════════════════════════════════════════════════════════════
-
+@app.get("/api/state")
 def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict:
     """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
     để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
@@ -1334,7 +1331,7 @@ def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict
         log.warning("_compute_win_stats error: %s", e)
         return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
 
-@app.get("/api/state")
+
 def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
     if uid:
         user = db.query(User).filter(User.telegram_id == uid).first()
