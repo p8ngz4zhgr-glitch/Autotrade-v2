@@ -260,6 +260,48 @@ class SignalEngine:
             "high": highs, "low": lows, "close": closes
         }
 
+    def _btc_trend_now(self) -> str:
+        """
+        [FIX v6.13] BUG THẬT vừa tìm ra: cổng tương quan BTC-altcoin trước đó
+        chỉ kích hoạt khi btc_hmm_regime (đọc từ bảng MarketRegime, do HMM
+        worker cập nhật mỗi 5 phút) == UPTREND/DOWNTREND. Nhưng nhãn đó đang
+        báo SIDEWAYS cho BTC ngay cả khi Kalman=BULLISH, xu hướng 4H=LONG, và
+        breakout override đã kích hoạt nhiều lần liên tiếp — HMM worker rõ
+        ràng đang phân loại quá thận trọng/trễ so với thực tế. Kết quả: cổng
+        chặn ngược-BTC KHÔNG BAO GIỜ kích hoạt trong điều kiện thị trường vừa
+        rồi, dù tương quan đo được có cao tới đâu.
+        Hàm này đọc xu hướng BTC TRỰC TIẾP từ chính dữ liệu giá vừa fetch cho
+        phần tương quan (EMA20 vs EMA50) — không phụ thuộc HMM worker, phản
+        ứng ngay trong cùng 1 lần quét thay vì chờ chu kỳ 5 phút của service khác.
+        """
+        try:
+            now = time.time()
+            if self._btc_cache["closes"] is None or (now - self._btc_cache["ts"]) > self._BTC_CACHE_TTL:
+                btc_data = self.crypto.klines("BTCUSDT", "1h")
+                self._btc_cache = {"closes": btc_data["close"], "ts": now}
+            closes = self._btc_cache["closes"]
+            if not closes or len(closes) < 55:
+                return "UNKNOWN"
+
+            def _ema(vals, period):
+                k = 2 / (period + 1)
+                e = vals[0]
+                for v in vals[1:]:
+                    e = v * k + e * (1 - k)
+                return e
+
+            recent = closes[-80:] if len(closes) >= 80 else closes
+            ema20 = _ema(recent, 20)
+            ema50 = _ema(recent, 50)
+            if ema20 > ema50 * 1.001:
+                return "UPTREND"
+            elif ema20 < ema50 * 0.999:
+                return "DOWNTREND"
+            return "SIDEWAYS"
+        except Exception as e:
+            log.warning("  ⚠️ Lỗi tính xu hướng BTC trực tiếp: %s", e)
+            return "UNKNOWN"
+
     def _btc_correlation(self, symbol, closes_1h, window=30):
         """
         [NEW v6.9] Đo tương quan lợi suất (returns) THẬT giữa symbol và BTC bằng
@@ -410,8 +452,12 @@ class SignalEngine:
         # [NEW v6.9] Tương quan BTC-altcoin đo bằng returns thật (Pearson),
         # không chỉ dựa vào luật cứng của HMM worker.
         btc_corr = None
-        if atype == "CRYPTO":
+        btc_trend_now = "UNKNOWN"
+        if atype == "CRYPTO" and symbol != "BTCUSDT":
             btc_corr = self._btc_correlation(symbol, results.get("1h", {}).get("close", []))
+            btc_trend_now = self._btc_trend_now()
+            log.info("  🔗 [BTC CORR] %s: corr=%s, BTC trend (EMA trực tiếp)=%s",
+                     symbol, btc_corr, btc_trend_now)
 
         # ══════════════════════════════════════════════════════════
         # 1. KHỞI TẠO VÀ CHẠY KALMAN FILTER (Lọc nhiễu tìm True Price)
@@ -848,14 +894,24 @@ class SignalEngine:
             if elliott_4h.get("trend") == "UPTREND": likelihood *= 1.15
             elif elliott_4h.get("trend") == "DOWNTREND": likelihood *= 0.85
 
-            # 9. [NEW v6.10] TƯƠNG QUAN BTC-ALTCOIN (đo thật bằng Pearson, không
-            # chỉ luật cứng). Tương quan mạnh (|corr|>=0.6) + BTC đang downtrend
-            # rõ ràng -> KHÔNG đánh LONG ngược BTC, vì phần lớn altcoin giảm theo
-            # BTC rất mạnh khi BTC gãy trend.
-            if symbol != "BTCUSDT" and btc_corr is not None and btc_corr >= 0.6 and btc_hmm_regime == "DOWNTREND":
-                likelihood *= 0.5
-                log.warning("  ⛔ [BTC CORR] %s tương quan mạnh (%.2f) với BTC đang DOWNTREND -> "
-                            "giảm mạnh độ tin cậy LONG ngược xu thế BTC.", symbol, btc_corr)
+            # 9. [FIX v6.13] TƯƠNG QUAN BTC-ALTCOIN — trước đây điều kiện xu
+            # hướng BTC dựa vào btc_hmm_regime (bảng MarketRegime, HMM worker
+            # cập nhật mỗi 5 phút) -- nhãn đó từng báo SIDEWAYS cho BTC ngay cả
+            # khi Kalman/4H/breakout đều xác nhận BTC tăng rõ ràng, khiến cổng
+            # này KHÔNG BAO GIỜ kích hoạt trong đợt vừa rồi dù tương quan cao.
+            # Đổi sang btc_trend_now (tính trực tiếp từ EMA, không phụ thuộc
+            # HMM worker). Fail-SAFE: nếu tính tương quan lỗi (btc_corr=None)
+            # nhưng xu hướng BTC đã rõ -> vẫn phạt vừa phải (giả định tương
+            # quan điển hình ~0.6 của altcoin lớn với BTC) thay vì bỏ qua hẳn.
+            if symbol != "BTCUSDT" and btc_trend_now == "DOWNTREND":
+                if btc_corr is not None and btc_corr >= 0.6:
+                    likelihood *= 0.5
+                    log.warning("  ⛔ [BTC CORR] %s tương quan mạnh (%.2f) với BTC đang DOWNTREND -> "
+                                "giảm mạnh độ tin cậy LONG ngược xu thế BTC.", symbol, btc_corr)
+                elif btc_corr is None:
+                    likelihood *= 0.7
+                    log.warning("  ⚠️ [BTC CORR] %s: không tính được tương quan nhưng BTC đang DOWNTREND rõ "
+                                "-> vẫn giảm độ tin cậy LONG theo hướng an toàn.", symbol)
 
         elif final == "SHORT":
             if cvd_tr == "BEARISH": likelihood *= 1.3
@@ -908,12 +964,21 @@ class SignalEngine:
             if elliott_4h.get("trend") == "DOWNTREND": likelihood *= 1.15
             elif elliott_4h.get("trend") == "UPTREND": likelihood *= 0.85
 
-            # 9. [NEW v6.10] TƯƠNG QUAN BTC-ALTCOIN — tương quan mạnh + BTC đang
-            # uptrend rõ ràng -> không đánh SHORT ngược BTC.
-            if symbol != "BTCUSDT" and btc_corr is not None and btc_corr >= 0.6 and btc_hmm_regime == "UPTREND":
-                likelihood *= 0.5
-                log.warning("  ⛔ [BTC CORR] %s tương quan mạnh (%.2f) với BTC đang UPTREND -> "
-                            "giảm mạnh độ tin cậy SHORT ngược xu thế BTC.", symbol, btc_corr)
+            # 9. [FIX v6.13] TƯƠNG QUAN BTC-ALTCOIN — đây chính là nhánh gây ra
+            # lỗi vừa báo (SHORT altcoin ngược lúc BTC đang tăng rõ): trước dùng
+            # btc_hmm_regime (nhãn HMM worker, từng báo SIDEWAYS dù BTC rõ ràng
+            # đang tăng theo Kalman/4H/breakout) nên KHÔNG BAO GIỜ kích hoạt.
+            # Đổi sang btc_trend_now (EMA trực tiếp, không phụ thuộc HMM worker)
+            # + fail-safe khi không tính được tương quan.
+            if symbol != "BTCUSDT" and btc_trend_now == "UPTREND":
+                if btc_corr is not None and btc_corr >= 0.6:
+                    likelihood *= 0.5
+                    log.warning("  ⛔ [BTC CORR] %s tương quan mạnh (%.2f) với BTC đang UPTREND -> "
+                                "giảm mạnh độ tin cậy SHORT ngược xu thế BTC.", symbol, btc_corr)
+                elif btc_corr is None:
+                    likelihood *= 0.7
+                    log.warning("  ⚠️ [BTC CORR] %s: không tính được tương quan nhưng BTC đang UPTREND rõ "
+                                "-> vẫn giảm độ tin cậy SHORT theo hướng an toàn.", symbol)
 
         # [NEW v6.9] VOLUME GIẢ (Z-SCORE) — vol_1h.vol_suspicious tính ở
         # indicators.py (z-score bất thường + giá không theo kịp volume, kiểu
@@ -1048,7 +1113,7 @@ class SignalEngine:
             "liquidity_sweep": sweep_data,
             "kalman": kalman_data,
             "hmm": {"regime": hmm_regime, "confidence": hmm_conf}, # Trả về dữ liệu HMM để hiển thị trên Telegram nếu cần
-            "btc_correlation": btc_corr, "btc_hmm_regime": btc_hmm_regime,
+            "btc_correlation": btc_corr, "btc_hmm_regime": btc_hmm_regime, "btc_trend_now": btc_trend_now,
             "news_risk": news_risk,
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
