@@ -737,6 +737,23 @@ class SignalEngine:
 
         rr_ratio = round(tp1_pct / sl_atr_pct, 2) if sl_atr_pct > 0 else 2.0
 
+        # ══════════════════════════════════════════════════════════
+        # 3.5 [NEW v6.12] MỞ RỘNG 4 MỐC TP (thay vì 2) — giữ NGUYÊN cách tính
+        # tp1/tp2 ở trên (kể cả nhánh ưu tiên Fibonacci khi trend 4H khớp), tp3/
+        # tp4 nối tiếp theo đúng đơn vị khoảng cách tp1->tp2 để nhất quán dù
+        # tp1/tp2 đến từ ATR hay Fibonacci — không tính lại từ đầu, tránh rủi ro
+        # phá vỡ logic tp1/tp2 đã chạy ổn định.
+        # ══════════════════════════════════════════════════════════
+        leg_12 = abs(tp2 - tp1)
+        if final == "LONG":
+            tp3 = round(tp2 + leg_12 * 0.85, 2)
+            tp4 = round(tp3 + leg_12 * 1.15, 2)
+        elif final == "SHORT":
+            tp3 = round(tp2 - leg_12 * 0.85, 2)
+            tp4 = round(tp3 - leg_12 * 1.15, 2)
+        else:
+            tp3, tp4 = tp2, tp2
+
         candle_1h = results.get("1h", {}).get("candle", {})
         candle_4h = results.get("4h", {}).get("candle", {})
         ms_1h     = results.get("1h", {}).get("market_structure", {})
@@ -989,12 +1006,32 @@ class SignalEngine:
             "ev_ratio": round(ev_ratio, 2),
             "likelihood": round(likelihood, 2)
         }
-        
+
+        # [NEW v6.12] TỈ LỆ CHỐT MỖI MỐC TP — "tự động tính toán" theo p_win:
+        # p_win càng cao (càng tự tin) -> chốt ít hơn ở mốc gần, để nhiều hơn
+        # chạy xa; p_win càng sát sàn MIN_P_WIN (kém tự tin hơn dù vẫn qua được
+        # cổng) -> chốt nhanh nhiều hơn ở mốc gần, ít rủi ro để phần lớn chạy xa.
+        if p_win >= 0.65:
+            tp_close_pcts = [0.25, 0.25, 0.25, 0.25]
+        elif p_win >= 0.60:
+            tp_close_pcts = [0.30, 0.25, 0.25, 0.20]
+        else:
+            tp_close_pcts = [0.40, 0.25, 0.20, 0.15]
+
+        tp_levels = [
+            {"level": 1, "price": tp1, "close_pct": tp_close_pcts[0]},
+            {"level": 2, "price": tp2, "close_pct": tp_close_pcts[1]},
+            {"level": 3, "price": tp3, "close_pct": tp_close_pcts[2]},
+            {"level": 4, "price": tp4, "close_pct": tp_close_pcts[3]},
+        ]
+
         return {
             "symbol": symbol, "asset_type": atype,
             "price": price, "final": final, "confidence": conf,
             "longs": longs, "shorts": shorts, "timeframes": results,
-            "plan": {"entry": price, "sl": sl, "tp1": tp1, "tp2": tp2},
+            # tp2 giữ nguyên nghĩa CŨ (mốc thứ 2) để không phá vỡ chỗ nào còn đọc
+            # trực tiếp plan["tp2"] — muốn dùng đủ 4 mốc thì đọc plan["tp_levels"].
+            "plan": {"entry": price, "sl": sl, "tp1": tp1, "tp2": tp2, "tp_levels": tp_levels},
             "wyckoff": wy_4h, "fibo": fi_1h, "cvd": cvd_1h,
             "breakout": bo_1h, "whale": wh_1h,
             "volume_1h": vol_1h, "volume_4h": vol_4h,
