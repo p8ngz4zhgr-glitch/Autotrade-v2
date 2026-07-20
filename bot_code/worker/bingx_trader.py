@@ -358,7 +358,7 @@ class BingXExchange:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
-            return {"ok": True, "order_id": order_id}
+            return {"ok": True, "order_id": order_id, "qty": safe_qty}
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
 
@@ -455,6 +455,48 @@ class BingXExchange:
             tp_price=tp2_price
         )
         return {"ok": True}
+
+    def handle_tp_level_hit(self, symbol: str, direction: str, level: int, original_qty: float,
+                             close_pct: float, entry_price: float,
+                             prev_tp_price: float, next_tp_price) -> dict:
+        """
+        [NEW v6.12] Bản tổng quát của handle_tp1_hit cho N mốc TP (không chỉ 2).
+        - Đóng close_pct * original_qty (tính trên qty GỐC lúc vào lệnh, không
+          phải qty hiện tại đang shrink dần — tránh cộng dồn sai % qua các mốc).
+        - SL phần còn lại dời lên mốc TP TRƯỚC ĐÓ (level 1 -> breakeven+phí,
+          level 2 -> giá TP1, level 3 -> giá TP2, ...) — khoá thêm lời mỗi lần
+          thay vì chỉ khoá 1 lần duy nhất ở breakeven như bản 2-TP cũ.
+        - next_tp_price=None nghĩa là đây là mốc CUỐI -> đóng hết, không đặt
+          lệnh chờ nào thêm.
+        """
+        self.cancel_all_orders(symbol)
+
+        open_pos = self.get_open_positions(symbol)
+        if not open_pos:
+            return {"ok": False, "msg": f"Không còn vị thế {symbol} để xử lý TP{level}"}
+        current_qty = float(open_pos[0].get("qty", 0))
+        if entry_price <= 0:
+            entry_price = float(open_pos[0].get("entry", 0))
+
+        close_qty = float(int(min(current_qty, original_qty * close_pct) * 10000) / 10000)
+        if close_qty <= 0:
+            return {"ok": False, "msg": f"Qty tính ra để chốt TP{level} <= 0"}
+
+        close_res = self.close_position(symbol, close_qty, direction)
+        if not close_res.get("ok"):
+            log.error(f"Lỗi khi chốt TP{level} ({close_qty} {symbol}): {close_res.get('msg')}")
+            return close_res
+
+        remaining_qty = float(int((current_qty - close_qty) * 10000) / 10000)
+        if remaining_qty <= 0 or next_tp_price is None:
+            self.cancel_all_orders(symbol)
+            return {"ok": True, "msg": f"Đã đóng hết vị thế {symbol} tại TP{level}", "closed_all": True}
+
+        self.cancel_all_orders(symbol)
+        new_sl = self.breakeven_price(direction, entry_price) if level == 1 else prev_tp_price
+        self.set_runner_sl_tp(symbol, direction, remaining_qty, new_sl, next_tp_price)
+        return {"ok": True, "msg": f"Đã chốt TP{level}, dời SL lên {new_sl}, target tiếp theo {next_tp_price}",
+                "closed_qty": close_qty, "remaining_qty": remaining_qty, "new_sl": new_sl}
 
     # ════════════════════════════════════════════════════════════════════
     # CƠ CHẾ LỌC NHIỄU, KÉO SL HÒA VỐN SỚM (EARLY BREAKEVEN) VÀ GỒNG LÃI
