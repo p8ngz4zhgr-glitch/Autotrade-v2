@@ -219,30 +219,33 @@ def _tp1_monitor():
                     if not sym or not cur_price or not tp1 or qty <= 0:
                         continue
                         
-                    # [FIX v6.2] Dùng CHUNG 1 khoá Redis với nhánh SCALE_OUT chính
-                    # trong evaluate_reversal_for_position (sync_bingx_positions, 30s)
-                    # để 2 vòng lặp độc lập (15s vs 30s) không cùng chốt 1 vị thế 2 lần.
+                    # [FIX v6.12] RETIRE: với 4 mốc TP, duy trì 2 luồng xử lý
+                    # song song (đây + evaluate_reversal_for_position/30s) ngày
+                    # càng dễ lệch nhau — đúng kiểu lỗi double-close đã sửa
+                    # trước đây. Giờ vòng lặp này CHỈ còn vai trò cảnh báo nếu
+                    # phát hiện giá đã qua TP1 khá lâu mà luồng chính (30s) vẫn
+                    # chưa xử lý — không tự hành động để tránh trùng lặp logic.
                     redis_key = f"SCALE_OUT_{user_id}_{sym}_{direction}"
-                    if redis_client and redis_client.exists(redis_key):
+                    already_handled = bool(redis_client.exists(redis_key)) if redis_client else False
+                    if already_handled:
                         continue
-                        
+
                     is_hit = False
                     if direction == "LONG" and cur_price >= tp1 and tp1 > entry:
                         is_hit = True
                     elif direction == "SHORT" and cur_price <= tp1 and tp1 < entry:
                         is_hit = True
-                        
+
                     if is_hit:
-                        res = bx.handle_tp1_hit(sym, direction, qty, entry, tp2)
-                        if res.get("ok"):
+                        stale_key = f"TP1_STALE_WARN_{user_id}_{sym}_{direction}"
+                        already_warned = bool(redis_client.exists(stale_key)) if redis_client else False
+                        if not already_warned:
+                            log.warning("⚠️ [TP-MONITOR] %s %s đã qua TP1 (%.4f) nhưng luồng chính (30s) "
+                                        "chưa xử lý — kiểm tra sync_bingx_positions có đang chạy không.",
+                                        sym, direction, tp1)
                             if redis_client:
-                                redis_client.setex(redis_key, 86400, "1")  # Lưu 1 ngày
-                            _tg_send(
-                                REGISTER_TOKEN, user_id,
-                                f"🎯 <b>TP1 HIT: {sym}</b>\n"
-                                f"📈 Đã chốt 50% vị thế tại ${tp1:.4f}\n"
-                                f"🛡️ Đã dời SL về Breakeven+phí để bảo toàn vốn."
-                            )
+                                try: redis_client.setex(stale_key, 300, "1")  # cảnh báo tối đa 1 lần/5 phút
+                                except Exception: pass
             db.close()
         except Exception as e:
             log.error("_tp1_monitor error: %s", e)
@@ -369,31 +372,44 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # Xu thế ĐƯỢC COI LÀ CÒN ACTIVE nếu: AI đồng thuận, HOẶC (AI báo WAIT do EV thấp NHƯNG Kalman/HMM vẫn đang giữ form tăng/giảm)
         is_trend_active = ai_same_dir or (new_direction == "WAIT" and (kalman_same_dir or hmm_same_dir))
         
-        # Bóc tách mốc TP1, TP2 từ AI
+        # Bóc tách 4 mốc TP (thay cho tp1/tp2 cũ) — plan.tp_levels đến từ
+        # engine.py bản mới; nếu vì lý do gì đó chưa có (vd cache cũ) thì dựng
+        # tạm 2 mốc như trước để không vỡ luồng.
         plan = analysis.get("plan", {})
-        tp1 = float(plan.get("tp1", 0))
-        tp2 = float(plan.get("tp2", 0))
+        tp_levels_raw = plan.get("tp_levels")
+        if not tp_levels_raw:
+            tp_levels_raw = [
+                {"level": 1, "price": float(plan.get("tp1", 0)), "close_pct": 0.5},
+                {"level": 2, "price": float(plan.get("tp2", 0)), "close_pct": 0.5},
+            ]
 
         # ══════════════════════════════════════════════════════════
-        # [BẢN VÁ LỖI TOÁN HỌC]: CHẶN TP ẢO DO AI ĐẢO VIEW
+        # [BẢN VÁ LỖI TOÁN HỌC]: CHẶN TP ẢO DO AI ĐẢO VIEW — áp dụng cho MỌI mốc
         # ══════════════════════════════════════════════════════════
-        # Nếu TP do AI quét ra không hợp lý với hướng của vị thế đang giữ -> Vô hiệu hóa
-        if direction == "LONG" and tp1 <= entry:
-            tp1 = 0  
-        elif direction == "SHORT" and tp1 >= entry:
-            tp1 = 0  
+        tp_levels = []
+        for lv in tp_levels_raw:
+            p = float(lv.get("price", 0))
+            if direction == "LONG" and p <= entry:
+                p = 0
+            elif direction == "SHORT" and p >= entry:
+                p = 0
+            tp_levels.append({"level": lv.get("level"), "price": p, "close_pct": lv.get("close_pct", 0.25)})
 
-        if direction == "LONG" and tp2 <= entry:
-            tp2 = 0
-        elif direction == "SHORT" and tp2 >= entry:
-            tp2 = 0
-        
-        # Kiểm tra cờ Scale Out (Đã chốt 1/2 chưa?)
+        tp1 = tp_levels[0]["price"] if tp_levels else 0  # 1 số đoạn code cũ bên dưới vẫn dùng tên "tp1" để hiển thị
+
+        # [NEW v6.12] Đếm số mốc TP đã xử lý (0..len(tp_levels)) — TÁI DÙNG
+        # đúng key partial_key cũ để tương thích ngược: "1" từ hệ 2-TP cũ vẫn
+        # đúng nghĩa "đã xong mốc 1" trong hệ 4-TP mới.
         partial_key = f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}"
-        is_scaled_out = False
+        tp_progress = 0
         if redis_client:
-            try: is_scaled_out = bool(redis_client.get(partial_key))
-            except: pass
+            try:
+                raw_p = redis_client.get(partial_key)
+                tp_progress = int(raw_p) if raw_p else 0
+            except Exception:
+                tp_progress = 0
+        is_scaled_out = tp_progress > 0  # giữ cho các đoạn code bên dưới còn tham chiếu (phase_str, DYNAMIC_TP...)
+
 
         # ══════════════════════════════════════════════════════════
         # LOGIC GIAO DỊCH (HỆ THỐNG QUẢN LÝ TRẠNG THÁI ƯU TIÊN ĐỘNG)
@@ -433,18 +449,23 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
         # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT (CƠ CHẾ CHỐT TỪNG PHẦN & GỒNG)
         elif is_trend_active:
-            # Nếu CHƯA chốt 1/2 và giá đã chạm mốc TP1 -> Kích hoạt SCALE_OUT
-            if not is_scaled_out and tp1 > 0:
-                reached_tp1 = (direction == "LONG" and current_price >= tp1) or (direction == "SHORT" and current_price <= tp1)
-                if reached_tp1:
+            # [NEW v6.12] Kiểm tra mốc TP TIẾP THEO (không chỉ TP1) — tp_progress
+            # là chỉ số 0-based vào tp_levels cho mốc kế tiếp cần đạt.
+            next_tp = tp_levels[tp_progress] if tp_progress < len(tp_levels) else None
+            if next_tp and next_tp["price"] > 0:
+                reached = (direction == "LONG" and current_price >= next_tp["price"]) or \
+                          (direction == "SHORT" and current_price <= next_tp["price"])
+                if reached:
                     action = "SCALE_OUT"
-                    action_type = "CHỐT LỜI 1/2 @ TP1"
+                    action_type = f"CHỐT LỜI TP{next_tp['level']}"
                     emoji = "🎯"
-                    reason = f"Giá đã chạm mốc TP1 (${tp1:.4f}). Khóa 50% lợi nhuận, dời SL phần còn lại về Entry và tiếp tục thả mồi đến TP2."
-            else:
-                # Nếu ĐÃ chốt 1/2 (đang chạy TP2) HOẶC chưa tới TP1 nhưng trend đang mạnh -> Tiếp tục giữ lệnh
+                    reason = (f"Giá đã chạm mốc TP{next_tp['level']} (${next_tp['price']:.4f}). "
+                              f"Khóa {int(next_tp['close_pct']*100)}% vị thế gốc, dời SL phần còn lại lên "
+                              f"mốc trước đó và tiếp tục thả mồi.")
+            if action != "SCALE_OUT":
+                # Đã chốt hết các mốc, hoặc chưa tới mốc kế tiếp nhưng trend đang mạnh -> giữ lệnh
                 action = "KEEP"
-                phase_str = "gồng lãi tiến lên TP2" if is_scaled_out else "chờ chạm mốc TP1"
+                phase_str = f"đã qua TP{tp_progress}, tiến lên TP{tp_progress+1}" if is_scaled_out else "chờ chạm mốc TP1"
                 reason = f"Xu thế {new_direction} đang tiếp diễn thuận lợi. Trạng thái: Đang {phase_str} (PnL: {pnl_pct:+.2f}%)."
 
         # [TẦNG ƯU TIÊN 4]: THỊ TRƯỜNG MẤT ĐỘNG LƯỢNG (WAIT REGIME)
@@ -472,39 +493,58 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         if action != "KEEP" and action != "HOLD":
             # Đã khởi tạo bx ở trên, không cần get_bx(user) lại nữa
             
-            # --- CƠ CHẾ GỒNG: CHỐT 1/2 & DỜI SL ---
+            # --- CƠ CHẾ GỒNG: CHỐT TỪNG MỐC TP & DỜI SL (4 mốc) ---
             if action == "SCALE_OUT":
-                half_qty = round(qty / 2, 4)
-                if half_qty > 0:
-                    bx.cancel_all_orders(sym)
-                    res = bx.close_position(sym, half_qty, direction)
-                    
-                    if res.get("ok"):
+                lv = tp_levels[tp_progress]
+                next_lv = tp_levels[tp_progress + 1] if tp_progress + 1 < len(tp_levels) else None
+                prev_price = tp_levels[tp_progress - 1]["price"] if tp_progress > 0 else None
+
+                # [NEW v6.12] original_qty PHẢI là qty GỐC lúc vào lệnh (không
+                # phải qty hiện tại đang shrink dần), để mỗi mốc chốt đúng %
+                # đã định trên tổng ban đầu — không cộng dồn sai qua các mốc.
+                original_qty = qty
+                if redis_client:
+                    try:
+                        raw_oq = redis_client.get(f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{direction}")
+                        if raw_oq:
+                            original_qty = float(raw_oq)
+                    except Exception:
+                        pass
+
+                res = bx.handle_tp_level_hit(
+                    sym, direction, lv["level"], original_qty, lv["close_pct"], entry,
+                    prev_price, next_lv["price"] if next_lv else None
+                )
+
+                if res.get("ok"):
+                    new_progress = tp_progress + 1
+                    if redis_client:
+                        try: redis_client.setex(partial_key, 86400, str(new_progress))
+                        except: pass
+
+                    if res.get("closed_all"):
+                        _tg_send(
+                            REGISTER_TOKEN, user.telegram_id,
+                            f"{emoji} <b>{action_type} — ĐÓNG TOÀN BỘ: {sym}</b>\n\n"
+                            f"📊 Đã chốt hết vị thế {direction} tại TP{lv['level']} (PnL: {pnl_pct:+.2f}%)\n"
+                            f"🔍 Lý do: <i>{reason}</i>"
+                        )
+                        _save_journal(user.telegram_id, sym, direction, pnl_pct, original_qty)
                         if redis_client:
-                            try: redis_client.setex(partial_key, 86400, "1")
+                            try: redis_client.delete(partial_key)
                             except: pass
-                        
-                        if tp2 <= 0: 
-                            tp_dist = abs(tp1 - entry)
-                            tp2 = entry + (tp_dist * 2) if direction == "LONG" else entry - (tp_dist * 2)
-                            
-                        # [FIX v6.2] BẢN VÁ LỖI NGHIÊM TRỌNG: đoạn cũ gọi bx.place_order() với
-                        # side NGƯỢC hướng lệnh đang giữ -> vô tình MỞ MỘT LỆNH MARKET MỚI
-                        # ngược chiều thay vì chỉ đặt SL/TP bảo vệ cho nửa còn lại. Dùng
-                        # set_runner_sl_tp (chỉ đặt lệnh chờ, không mở vị thế mới) + breakeven
-                        # có đệm phí để "hoà vốn" không vô tình thành lỗ nhẹ sau phí.
-                        be_price = bx.breakeven_price(direction, entry)
-                        bx.set_runner_sl_tp(sym, direction, half_qty, be_price, tp2)
-                        
+                    else:
+                        new_sl = res.get("new_sl", 0)
+                        next_target = next_lv["price"] if next_lv else 0
                         _tg_send(
                             REGISTER_TOKEN, user.telegram_id,
                             f"{emoji} <b>{action_type}: {sym}</b>\n\n"
-                            f"📊 Đã chốt: 1/2 vị thế {direction} (PnL: {pnl_pct:+.2f}%)\n"
-                            f"🔒 SL phần còn lại: Dời về Breakeven+phí (<code>${be_price:.4f}</code>)\n"
-                            f"🎯 Target tiếp theo (TP2): <code>${tp2:.4f}</code>\n"
+                            f"📊 Đã chốt: {int(lv['close_pct']*100)}% vị thế gốc {direction} (PnL: {pnl_pct:+.2f}%)\n"
+                            f"🔒 SL phần còn lại: Dời lên <code>${new_sl:.4f}</code>\n"
+                            f"🎯 Target tiếp theo (TP{next_lv['level'] if next_lv else '-'}): <code>${next_target:.4f}</code>\n"
                             f"🔍 Lý do: <i>{reason}</i>"
                         )
-                        _save_journal(user.telegram_id, sym, direction, pnl_pct, half_qty)
+                        _save_journal(user.telegram_id, sym, direction, pnl_pct, res.get("closed_qty", 0))
             
             # --- CƠ CHẾ NGẮT: ĐÓNG TOÀN BỘ VỊ THẾ KHẨN CẤP ---
             elif action == "CLOSE_ALL":
@@ -970,6 +1010,16 @@ def _execute_for_user(user: User, signal: dict):
                     redis_client.setex(
                         f"ENTRY_FEATURES_{user.telegram_id}_{sym}_{direction}",
                         7 * 86400, json.dumps(entry_features)
+                    )
+                    # [NEW v6.12] Lưu qty THẬT ĐÃ KHỚP trên sàn (res["qty"], sau
+                    # hệ số Kelly/Markowitz bên trong place_order — thường KHÁC
+                    # qty gốc caller yêu cầu) — không phải qty trước điều chỉnh.
+                    # Dùng để mỗi mốc TP (trong 4 mốc) chốt đúng % trên tổng thật
+                    # đã vào, không cộng dồn sai khi qty hiện tại shrink dần.
+                    actual_qty = res.get("qty", qty)
+                    redis_client.setex(
+                        f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{direction}",
+                        7 * 86400, str(actual_qty)
                     )
                 except Exception:
                     pass
