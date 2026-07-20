@@ -24,6 +24,10 @@ class SignalEngine:
         self.stock  = StockFetcher()
         self.ind    = Indicators()
         self._cache = {}
+        # [NEW v6.9] Cache ngắn hạn cho closes của BTC — dùng để tính tương quan
+        # BTC-altcoin mà không phải fetch lại BTC cho mỗi altcoin trong cùng 1 vòng quét
+        self._btc_cache = {"closes": None, "ts": 0}
+        self._BTC_CACHE_TTL = 240  # giây — ngắn hơn chu kỳ quét 15p nhưng đủ tránh fetch lặp lại
 
     def _fetcher(self, symbol):
         if symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"):
@@ -256,6 +260,47 @@ class SignalEngine:
             "high": highs, "low": lows, "close": closes
         }
 
+    def _btc_correlation(self, symbol, closes_1h, window=30):
+        """
+        [NEW v6.9] Đo tương quan lợi suất (returns) THẬT giữa symbol và BTC bằng
+        Pearson trên `window` nến 1h gần nhất — thay cho việc chỉ dựa vào luật
+        cứng "BTC dẫn dắt altcoin" đã có sẵn trong HMM worker (chỉ ép về
+        SIDEWAYS khi ngược BTC, không phân biệt mức độ tương quan mạnh/yếu).
+        Trả về hệ số tương quan trong [-1, 1], hoặc None nếu không tính được.
+        """
+        if symbol == "BTCUSDT" or not closes_1h:
+            return None
+        try:
+            now = time.time()
+            if self._btc_cache["closes"] is None or (now - self._btc_cache["ts"]) > self._BTC_CACHE_TTL:
+                btc_data = self.crypto.klines("BTCUSDT", "1h")
+                self._btc_cache = {"closes": btc_data["close"], "ts": now}
+            btc_closes = self._btc_cache["closes"]
+
+            n = min(len(closes_1h), len(btc_closes), window + 1)
+            if n < 15:
+                return None
+            sym_c = closes_1h[-n:]
+            btc_c = btc_closes[-n:]
+            sym_ret = [(sym_c[i] - sym_c[i-1]) / sym_c[i-1] for i in range(1, n) if sym_c[i-1] > 0]
+            btc_ret = [(btc_c[i] - btc_c[i-1]) / btc_c[i-1] for i in range(1, n) if btc_c[i-1] > 0]
+            m = min(len(sym_ret), len(btc_ret))
+            if m < 10:
+                return None
+            sym_ret, btc_ret = sym_ret[-m:], btc_ret[-m:]
+
+            mean_s = sum(sym_ret) / m
+            mean_b = sum(btc_ret) / m
+            cov    = sum((sym_ret[i] - mean_s) * (btc_ret[i] - mean_b) for i in range(m))
+            std_s  = (sum((r - mean_s) ** 2 for r in sym_ret)) ** 0.5
+            std_b  = (sum((r - mean_b) ** 2 for r in btc_ret)) ** 0.5
+            if std_s <= 0 or std_b <= 0:
+                return None
+            return round(cov / (std_s * std_b), 3)
+        except Exception as e:
+            log.warning("  ⚠️ Lỗi tính tương quan BTC cho %s: %s", symbol, e)
+            return None
+
     def full_analysis(self, symbol, db=None):
         fetcher, atype = self._fetcher(symbol)
         log.info("📊 Phân tích %s [%s]...", symbol, atype)
@@ -266,6 +311,7 @@ class SignalEngine:
         # ══════════════════════════════════════════════════════════
         hmm_regime = "UNKNOWN"
         hmm_conf = 0.0
+        btc_hmm_regime = "UNKNOWN"
         
         if db is not None:
             try:
@@ -285,6 +331,16 @@ class SignalEngine:
                     hmm_regime = regime_data.regime_name
                     hmm_conf = regime_data.confidence
                     log.info("  🧠 [HMM Context] %s: %s (Conf: %.1f%%)", symbol, hmm_regime, hmm_conf)
+
+                # [NEW v6.9] Đọc THÊM regime CỦA RIÊNG BTC (không phải regime của
+                # symbol đang xét) để dùng cho luật tương quan BTC-altcoin bên dưới.
+                # regime_data ở trên là của symbol (đã được HMM worker mềm hoá theo
+                # BTC), còn ở đây cần bản THÔ của chính BTC để so sánh.
+                btc_hmm_regime = "UNKNOWN"
+                if symbol != "BTCUSDT":
+                    btc_regime_data = db.query(MarketRegime).filter(MarketRegime.symbol == "BTCUSDT").first()
+                    if btc_regime_data:
+                        btc_hmm_regime = btc_regime_data.regime_name
             except Exception as e:
                 db.rollback()
                 log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
@@ -345,9 +401,17 @@ class SignalEngine:
         bo_4h  = results.get("4h", {}).get("breakout", {})
         wh_1h  = results.get("1h", {}).get("whale", {})
         wy_4h  = results.get("4h", {}).get("wyckoff", {})
+        wy_1h  = results.get("1h", {}).get("wyckoff", {})
+        elliott_4h = results.get("4h", {}).get("elliott", {})
         fi_1h  = results.get("1h", {}).get("fibo", {})
         vol_1h = results.get("1h", {}).get("volume", {})
         vol_4h = results.get("4h", {}).get("volume", {})
+
+        # [NEW v6.9] Tương quan BTC-altcoin đo bằng returns thật (Pearson),
+        # không chỉ dựa vào luật cứng của HMM worker.
+        btc_corr = None
+        if atype == "CRYPTO":
+            btc_corr = self._btc_correlation(symbol, results.get("1h", {}).get("close", []))
 
         # ══════════════════════════════════════════════════════════
         # 1. KHỞI TẠO VÀ CHẠY KALMAN FILTER (Lọc nhiễu tìm True Price)
@@ -541,6 +605,31 @@ class SignalEngine:
                     log.info(f"🎯 TRIGGER (SMC): Phá vỡ giả đỉnh cũ (Bearish Sweep @ {sw_price}) -> VÀO LỆNH SHORT")
                     final = "SHORT"
                     conf = round(min(95, conf + 15.0), 1)
+
+        # ══════════════════════════════════════════════════════════
+        # 2.6. [NEW v6.11] XÁC NHẬN ĐA KHUNG: 4H QUYẾT XU HƯỚNG LỚN,
+        # 15M TÌM ĐIỂM VÀO THEO ĐÚNG XU HƯỚNG ĐÓ
+        # ──────────────────────────────────────────────────────────
+        # Trước đây avg_score/combined trộn đều cả 4 khung (15m/1h/4h/1d)
+        # cùng lúc — không có thứ tự ưu tiên rõ ràng nào giữa "xu hướng lớn"
+        # và "thời điểm vào cụ thể". Giờ tách bạch: 4H không rõ hướng hoặc
+        # ngược tín hiệu -> không vào; 4H đồng thuận nhưng chính nến 15m chưa
+        # xác nhận cùng hướng -> chờ thêm, không vội bắt đầu ngay giữa chừng.
+        # ══════════════════════════════════════════════════════════
+        trend_4h  = results.get("4h", {}).get("direction", "WAIT")
+        trend_15m = results.get("15m", {}).get("direction", "WAIT")
+
+        if final in ("LONG", "SHORT"):
+            if trend_4h in ("LONG", "SHORT") and trend_4h != final:
+                log.warning("  ⛔ [4H TREND] %s: Xu hướng lớn 4H=%s ngược với tín hiệu %s "
+                            "-> hạ về WAIT (không đánh ngược xu hướng lớn).", symbol, trend_4h, final)
+                final = "WAIT"
+            elif trend_4h == final and trend_15m != final:
+                log.info("  ⏳ [15M TRIGGER] %s: 4H đồng thuận %s nhưng nến 15m (%s) chưa xác nhận "
+                         "điểm vào -> chờ nến 15m tiếp theo.", symbol, final, trend_15m)
+                final = "WAIT"
+
+
        # ══════════════════════════════════════════════════════════
         # 2.5. ATR-BASED SL/TP (TỐI ƯU HÓA CHỐNG QUÉT RÂU - WHIPSAW)
         # ══════════════════════════════════════════════════════════
@@ -551,10 +640,23 @@ class SignalEngine:
         atr_multiplier = 2.0  # Mức chuẩn cho Crypto (Trend Following)
         if hmm_regime == "SIDEWAYS":
             atr_multiplier = 2.5  # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu
-            
+
+        # [NEW v6.11] LỊCH TIN CPI/PPI/NFP — chỉ áp dụng cho Crypto/Vàng (đúng
+        # yêu cầu, không quét toàn bộ lịch kinh tế). Trong vùng ảnh hưởng tin:
+        # SL siết gọn hơn (sl_tighten_mult<1) để nếu bị quét thanh khoản do
+        # biến động tin tức thì lỗ nhỏ, và size sẽ giảm ở bước đặt lệnh (main.py).
+        news_risk = {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
+        if atype in ("CRYPTO", "GOLD"):
+            try:
+                from worker.economic_calendar import news_risk_adjustment
+                news_risk = news_risk_adjustment()
+            except Exception as e:
+                log.debug("  Lịch tin tức lỗi (bỏ qua, không chặn): %s", e)
+
         # B. Tính % SL với trần (cap) được nâng lên 4.5% để chịu nhiệt Altcoin
         # Sàn dưới nâng lên 1.0% để tránh đặt SL quá sát khi thị trường đột ngột im ắng
         sl_atr_pct = max(1.0, min(4.5, atr_pct_1h * atr_multiplier))
+        sl_atr_pct = sl_atr_pct * news_risk["sl_tighten_mult"]
         
         # C. Tỷ lệ R:R động
         tp1_pct    = sl_atr_pct * 1.5  # Tối thiểu R:R 1:1.5 cho TP1
@@ -714,6 +816,30 @@ class SignalEngine:
             elif funding <= -FUNDING_EXTREME_PCT:
                 likelihood *= 1.2    # Short đang quá đông (funding âm sâu) -> có lợi cho kịch bản Long (short squeeze)
 
+            # 7. [NEW v6.10] WYCKOFF SPRING — wyckoff() đã phát hiện Spring trong
+            # events[] từ lâu nhưng CHƯA hề ảnh hưởng likelihood (chỉ hiển thị).
+            # Spring (đáy giả, volume thấp) là tín hiệu KẾT THÚC tích luỹ — đúng
+            # loại setup nên được THƯỞNG dù đang SIDEWAYS, khác với 1 lệnh LONG
+            # ngẫu nhiên giữa lúc sideways (đã bị phạt 0.6x ở trên).
+            if any("SPRING" in e for e in wy_1h.get("events", [])):
+                likelihood *= 1.6
+                log.info("  🌱 [WYCKOFF SPRING] %s: đáy giả volume thấp -> tăng độ tin cậy LONG", symbol)
+
+            # 8. [NEW v6.10] ELLIOTT WAVE — đã tính score_adj cho điểm kỹ thuật
+            # thô (analyze_tf) nhưng CHƯA đưa vào lớp xác suất Bayes. Bổ sung ở
+            # đây để nhất quán với các chỉ báo hướng khác (Fibonacci, Wyckoff...).
+            if elliott_4h.get("trend") == "UPTREND": likelihood *= 1.15
+            elif elliott_4h.get("trend") == "DOWNTREND": likelihood *= 0.85
+
+            # 9. [NEW v6.10] TƯƠNG QUAN BTC-ALTCOIN (đo thật bằng Pearson, không
+            # chỉ luật cứng). Tương quan mạnh (|corr|>=0.6) + BTC đang downtrend
+            # rõ ràng -> KHÔNG đánh LONG ngược BTC, vì phần lớn altcoin giảm theo
+            # BTC rất mạnh khi BTC gãy trend.
+            if symbol != "BTCUSDT" and btc_corr is not None and btc_corr >= 0.6 and btc_hmm_regime == "DOWNTREND":
+                likelihood *= 0.5
+                log.warning("  ⛔ [BTC CORR] %s tương quan mạnh (%.2f) với BTC đang DOWNTREND -> "
+                            "giảm mạnh độ tin cậy LONG ngược xu thế BTC.", symbol, btc_corr)
+
         elif final == "SHORT":
             if cvd_tr == "BEARISH": likelihood *= 1.3
             elif cvd_tr == "BEARISH_DIV": likelihood *= 1.5
@@ -753,6 +879,34 @@ class SignalEngine:
                 likelihood *= 0.75   # Short đã quá đông -> rủi ro bị squeeze ngược nếu vào thêm
             elif funding >= FUNDING_EXTREME_PCT:
                 likelihood *= 1.2    # Long đang quá đông (funding dương cao) -> có lợi cho kịch bản Short
+
+            # 7. [NEW v6.10] WYCKOFF UTAD (Upthrust After Distribution) — đỉnh
+            # giả kèm volume mở rộng, dấu hiệu kết thúc phân phối. Thưởng dù
+            # đang SIDEWAYS, đúng tinh thần "Spring/Upthrust là ngoại lệ hợp lý".
+            if any("UTAD" in e for e in wy_1h.get("events", [])):
+                likelihood *= 1.6
+                log.info("  ⛰️ [WYCKOFF UTAD] %s: đỉnh giả volume mở rộng -> tăng độ tin cậy SHORT", symbol)
+
+            # 8. [NEW v6.10] ELLIOTT WAVE
+            if elliott_4h.get("trend") == "DOWNTREND": likelihood *= 1.15
+            elif elliott_4h.get("trend") == "UPTREND": likelihood *= 0.85
+
+            # 9. [NEW v6.10] TƯƠNG QUAN BTC-ALTCOIN — tương quan mạnh + BTC đang
+            # uptrend rõ ràng -> không đánh SHORT ngược BTC.
+            if symbol != "BTCUSDT" and btc_corr is not None and btc_corr >= 0.6 and btc_hmm_regime == "UPTREND":
+                likelihood *= 0.5
+                log.warning("  ⛔ [BTC CORR] %s tương quan mạnh (%.2f) với BTC đang UPTREND -> "
+                            "giảm mạnh độ tin cậy SHORT ngược xu thế BTC.", symbol, btc_corr)
+
+        # [NEW v6.9] VOLUME GIẢ (Z-SCORE) — vol_1h.vol_suspicious tính ở
+        # indicators.py (z-score bất thường + giá không theo kịp volume, kiểu
+        # quét thanh khoản/wash volume). Đặt TRƯỚC khi likelihood -> p_win/EV để
+        # thực sự ảnh hưởng quyết định, không chỉ để hiển thị. Áp dụng chung cho
+        # cả LONG/SHORT vì đây là vấn đề CHẤT LƯỢNG tín hiệu, không phải hướng.
+        if final in ("LONG", "SHORT") and vol_1h.get("vol_suspicious"):
+            likelihood *= 0.7
+            log.warning("  ⚠️ [VOLUME GIẢ] %s 1h: z-score=%.2f bất thường nhưng giá không xác nhận "
+                        "-> giảm độ tin cậy tín hiệu.", symbol, vol_1h.get("vol_zscore", 0))
 
         if final in ("LONG", "SHORT"):
             bayes_odds = base_odds * likelihood
@@ -857,6 +1011,8 @@ class SignalEngine:
             "liquidity_sweep": sweep_data,
             "kalman": kalman_data,
             "hmm": {"regime": hmm_regime, "confidence": hmm_conf}, # Trả về dữ liệu HMM để hiển thị trên Telegram nếu cần
+            "btc_correlation": btc_corr, "btc_hmm_regime": btc_hmm_regime,
+            "news_risk": news_risk,
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
