@@ -523,6 +523,10 @@ class BingXExchange:
             return {"action": "NONE", "msg": "Không xác thực được trạng thái SL/TP hiện tại trên sàn."}
         active_orders = trigger_orders.get(symbol, {})
         current_sl = float(active_orders.get("sl", 0))
+
+        # THÊM DÒNG NÀY ĐỂ BẮT LỖI
+        log.info(f"🔍 DEBUG {symbol}: active_orders = {active_orders} | current_sl = {current_sl}")
+
         
         if entry_price <= 0 or current_price <= 0:
             return {"action": "NONE", "msg": "Giá bị lỗi."}
