@@ -512,11 +512,15 @@ class BingXExchange:
         current_qty = float(pos.get("qty", 0))
         current_price = self.get_latest_price(symbol)
         
+        # Lấy thông tin SL/TP hiện tại TRÊN SÀN (quan trọng để tránh spam)
+        # [FIX v6.11] get_trigger_orders() giờ trả None khi GỌI SÀN THẤT BẠI
+        # (khác với {} khi gọi thành công nhưng không có lệnh). Nếu None, KHÔNG
+        # được coi current_sl=0 rồi hành động — bỏ qua chu kỳ này, đợi lần poll
+        # sau, để tránh cancel+đặt lại SL/TP một cách dư thừa mỗi khi sàn chập chờn.
         trigger_orders = self.get_trigger_orders()
         if trigger_orders is None:
-            log.warning("⚠️ %s: Không đọc được lệnh chờ hiện tại trên sàn -> bỏ qua chu kỳ này.", symbol)
-            return {"action": "NONE", "msg": "Không xác thực được trạng thái SL/TP."}
-            
+            log.warning("⚠️ %s: Không đọc được lệnh chờ hiện tại trên sàn -> bỏ qua chu kỳ này, không hành động.", symbol)
+            return {"action": "NONE", "msg": "Không xác thực được trạng thái SL/TP hiện tại trên sàn."}
         active_orders = trigger_orders.get(symbol, {})
         current_sl = float(active_orders.get("sl", 0))
         
@@ -536,18 +540,22 @@ class BingXExchange:
             dist_to_tp1 = abs(entry_price - tp1_price) if tp1_price > 0 else 0
             curr_dist = entry_price - current_price
 
-        # 1. EARLY BREAKEVEN: 50% chặng đường -> Đề xuất dời SL
+        # 1. EARLY BREAKEVEN: 50% chặng đường -> Dời SL về Entry
         if dist_to_tp1 > 0 and (curr_dist / dist_to_tp1) >= 0.50:
             be_price = self.breakeven_price(direction, entry_price)
+            # [FIX v6.4] So sánh current_sl với TARGET breakeven (be_price, có đệm phí)
+            # thay vì entry_price thô. Trước đây so với entry_price + ngưỡng 0.01% trong
+            # khi be_price lệch entry ~0.06% (đệm phí) -> điều kiện "đã kéo rồi" KHÔNG BAO
+            # GIỜ đúng -> mỗi vòng poll 30s lại cancel+đặt lại SL/TP vô hạn lần dù đã kéo
+            # thành công từ vòng đầu tiên. Ngưỡng so sánh vẫn đủ hẹp (0.02%) để không bị
+            # nhầm với SL gốc (thường lệch entry vài % trở lên).
             if abs(current_sl - be_price) > (entry_price * 0.0002):
+                log.info(f"🛡️ {symbol} đạt 50% TP1. Kéo SL về Breakeven+phí {be_price}!")
+                self.cancel_all_orders(symbol)
+                # Dùng TP2 từ plan nếu có, không thì dùng TP1 cũ
                 tp_target = float(plan.get("tp2", tp1_price))
-                # CHỈ TRẢ VỀ THÔNG SỐ ĐỂ BÊN NGOÀI THỰC THI (KHÔNG GỌI SÀN)
-                return {
-                    "action": "BREAKEVEN", 
-                    "msg": "Kéo SL về hòa vốn (có đệm phí).",
-                    "be_price": be_price,
-                    "tp_target": tp_target
-                }
+                self.set_runner_sl_tp(symbol, direction, current_qty, be_price, tp_target)
+                return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn (có đệm phí)."}
 
         # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
         new_signal = analysis_result.get("final", "WAIT")
@@ -555,15 +563,22 @@ class BingXExchange:
             is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
             THRESHOLD = 12.0
             
+            # Cần so sánh abs(roe) để cắt cả LONG lẫn SHORT
             if roe >= THRESHOLD or roe <= -THRESHOLD:
+                # Chỉ đóng khi trend đã mất (is_trending == False)
                 if not is_trending:
-                    # KHÔNG GỌI SÀN TẠI ĐÂY
+                    log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
+                    self.close_position(symbol, current_qty, direction)
+                    self.cancel_all_orders(symbol)
                     return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
         
         # 3. ĐẢO CHIỀU HOÀN TOÀN
         elif (direction == "LONG" and new_signal == "SHORT") or \
              (direction == "SHORT" and new_signal == "LONG"):
-            # KHÔNG GỌI SÀN TẠI ĐÂY
+            log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
             return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
 
         return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
+
