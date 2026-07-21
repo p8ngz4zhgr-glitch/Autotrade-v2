@@ -313,37 +313,22 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             except: pass
         
         # Chạy ngầm hàm quản trị vị thế động
-                # Chạy ngầm hàm quản trị vị thế động (Hàm này giờ chỉ tính toán)
         dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage)
         
         if dynamic_status.get("action") == "BREAKEVEN":
-            # NẾU CỜ REDIS CHƯA KHÓA, THÌ MỚI ĐƯỢC GỌI API SÀN & GỬI TIN
+            # Chỉ gửi Telegram và kích hoạt nếu chưa từng làm việc này
             if not is_breakeven:
-                # 1. GỌI API THỰC THI NGAY TẠI ĐÂY
-                be_price = dynamic_status.get("be_price")
-                tp_target = dynamic_status.get("tp_target")
-                
-                bx.cancel_all_orders(sym)
-                bx.set_runner_sl_tp(sym, direction, qty, be_price, tp_target)
-                
-                # 2. THÔNG BÁO TELEGRAM
                 _tg_send(
                     REGISTER_TOKEN, user.telegram_id, 
                     f"🛡️ <b>RISK-FREE KÍCH HOẠT: {sym}</b>\n"
-                    f"Giá đã đi được 50% quãng đường đến TP1. Tự động dời Stoploss về Entry (<code>${be_price:.4f}</code>) để bảo toàn vốn!"
+                    f"Giá đã đi được 50% quãng đường đến TP1. Tự động dời Stoploss về Entry (<code>${entry:.4f}</code>) để bảo toàn vốn!"
                 )
-                
-                # 3. KHÓA CỜ 24H ĐỂ KHÔNG BAO GIỜ LẶP LẠI NỮA
+                # Đánh dấu đã dời SL thành công, khóa lại trong 24h
                 if redis_client:
                     try: redis_client.setex(be_key, 86400, "1")
                     except: pass
             
         elif dynamic_status.get("action") == "CLOSE":
-            # 1. GỌI API THỰC THI (Ngắt lệnh khẩn cấp)
-            bx.close_position(sym, float(qty), direction)
-            bx.cancel_all_orders(sym)
-            
-            # 2. XỬ LÝ DỮ LIỆU & BÁO CÁO
             roe_closed = dynamic_status.get("roe", 0)
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
@@ -354,13 +339,14 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             )
             _save_journal(user.telegram_id, sym, direction, roe_closed, qty)
             
-            # 3. XÓA CỜ
+            # Xóa sạch cờ bộ nhớ khi lệnh đã đóng
             if redis_client:
                 try: 
                     redis_client.delete(be_key)
                     redis_client.delete(f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}")
                 except: pass
             return  
+
 
         # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI (ĐƯA LÊN ĐẦU ĐỂ PHỤC VỤ QUYẾT ĐỊNH ĐỘNG)
         in_profit = False
@@ -628,7 +614,6 @@ def sync_bingx_positions():
     cleanup_counter = 0
 
     while True:
-        log.info("❤️ [MAIN LOOP] Đang quét vị thế mở..")
         try:
             db           = SessionLocal()
             active_users = db.query(User).filter(User.is_active == True).all()
