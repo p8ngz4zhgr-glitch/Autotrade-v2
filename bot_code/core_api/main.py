@@ -628,6 +628,7 @@ def sync_bingx_positions():
     cleanup_counter = 0
 
     while True:
+        log.info("❤️ [MAIN LOOP] Đang quét vị thế mở..")
         try:
             db           = SessionLocal()
             active_users = db.query(User).filter(User.is_active == True).all()
