@@ -319,6 +319,7 @@ class SignalEngine:
                 self._btc_cache = {"closes": btc_data["close"], "ts": now}
             btc_closes = self._btc_cache["closes"]
 
+              # ══════════════════════════════════════════════════════════
             n = min(len(closes_1h), len(btc_closes), window + 1)
             if n < 15:
                 return None
@@ -349,44 +350,36 @@ class SignalEngine:
         results = {}
 
         # ══════════════════════════════════════════════════════════
-        # [NEW] A & B: ĐĂNG KÝ VÀ ĐỌC DỮ LIỆU HMM TỪ DATABASE
+        # HMM REGIME (Đọc từ bảng MarketRegime DB)
         # ══════════════════════════════════════════════════════════
         hmm_regime = "UNKNOWN"
         hmm_conf = 0.0
         btc_hmm_regime = "UNKNOWN"
-        
-        if db is not None:
-            try:
-                # Import bên trong hàm để tránh lỗi Circular Import
-                from sqlalchemy.dialects.postgresql import insert
-                from core_api.models import TrackedSymbol, MarketRegime 
-
-                # A. Tự động đăng ký mã coin cho HMM Worker quét
-                stmt = insert(TrackedSymbol).values(symbol=symbol, is_active=True)
-                stmt = stmt.on_conflict_do_nothing(index_elements=['symbol'])
-                db.execute(stmt)
-                db.commit()
-
-                # B. Đọc bối cảnh thị trường HMM mới nhất
-                regime_data = db.query(MarketRegime).filter(MarketRegime.symbol == symbol).first()
-                if regime_data:
-                    hmm_regime = regime_data.regime_name
-                    hmm_conf = regime_data.confidence
-                    log.info("  🧠 [HMM Context] %s: %s (Conf: %.1f%%)", symbol, hmm_regime, hmm_conf)
-
-                # [NEW v6.9] Đọc THÊM regime CỦA RIÊNG BTC (không phải regime của
-                # symbol đang xét) để dùng cho luật tương quan BTC-altcoin bên dưới.
-                # regime_data ở trên là của symbol (đã được HMM worker mềm hoá theo
-                # BTC), còn ở đây cần bản THÔ của chính BTC để so sánh.
-                btc_hmm_regime = "UNKNOWN"
-                if symbol != "BTCUSDT":
-                    btc_regime_data = db.query(MarketRegime).filter(MarketRegime.symbol == "BTCUSDT").first()
-                    if btc_regime_data:
-                        btc_hmm_regime = btc_regime_data.regime_name
-            except Exception as e:
-                db.rollback()
-                log.warning("  ⚠️ Lỗi giao tiếp HMM Database: %s", e)
-
+        try:
+            from core_api.models import MarketRegime
+            if db:
+                mr = db.query(MarketRegime).filter(MarketRegime.symbol == symbol).first()
+                if mr:
+                    hmm_regime = mr.regime_name or "UNKNOWN"
+                    hmm_conf = mr.confidence or 0.0
+                mr_btc = db.query(MarketRegime).filter(MarketRegime.symbol == "BTCUSDT").first()
+                if mr_btc:
+                    btc_hmm_regime = mr_btc.regime_name or "UNKNOWN"
+            else:
+                from core_api.database import SessionLocal
+                tmp_db = SessionLocal()
+                try:
+                    mr = tmp_db.query(MarketRegime).filter(MarketRegime.symbol == symbol).first()
+                    if mr:
+                        hmm_regime = mr.regime_name or "UNKNOWN"
+                        hmm_conf = mr.confidence or 0.0
+                    mr_btc = tmp_db.query(MarketRegime).filter(MarketRegime.symbol == "BTCUSDT").first()
+                    if mr_btc:
+                        btc_hmm_regime = mr_btc.regime_name or "UNKNOWN"
+                finally:
+                    tmp_db.close()
+        except Exception as e:
+            log.debug("Lỗi đọc HMM từ DB: %s", e)
         # Chạy song song 4 TF
         def _fetch_tf(tf):
             return tf, self.analyze_tf(symbol, tf, fetcher)
@@ -540,10 +533,13 @@ class SignalEngine:
         final, conf = None, 50.0
         for tf_n, bo in [("1H", bo_1h), ("4H", bo_4h)]:
             if bo.get("type") in ("BREAKOUT_UP","BREAKOUT_DOWN") and bo.get("strength",0) >= 70:
-                final = "LONG" if bo["type"] == "BREAKOUT_UP" else "SHORT"
-                conf  = min(95, 70 + bo["strength"] * 0.25)
-                log.info("🚨 Breakout override [%s]", tf_n)
-                break
+                is_up = (bo["type"] == "BREAKOUT_UP")
+                # TỐI ƯU WIN RATE: Yêu cầu Smart Score đồng thuận để tránh bẫy Fakeout
+                if (is_up and smart >= -5) or (not is_up and smart <= 5):
+                    final = "LONG" if is_up else "SHORT"
+                    conf  = min(95, 70 + bo["strength"] * 0.25)
+                    log.info("🚨 Breakout override [%s] (Smart=%+.1f)", tf_n, smart)
+                    break
 
         if final is None:
             long_ok  = longs >= min_long_tfs  and combined >= 62 and smart >= -10
@@ -791,14 +787,15 @@ class SignalEngine:
         # phá vỡ logic tp1/tp2 đã chạy ổn định.
         # ══════════════════════════════════════════════════════════
         leg_12 = abs(tp2 - tp1)
-        if final == "LONG":
+        if leg_12 < (price * 0.001):
+            leg_12 = price * 0.015
+
+        if tp2 >= tp1:
             tp3 = round(tp2 + leg_12 * 0.85, 2)
             tp4 = round(tp3 + leg_12 * 1.15, 2)
-        elif final == "SHORT":
+        else:
             tp3 = round(tp2 - leg_12 * 0.85, 2)
             tp4 = round(tp3 - leg_12 * 1.15, 2)
-        else:
-            tp3, tp4 = tp2, tp2
 
         candle_1h = results.get("1h", {}).get("candle", {})
         candle_4h = results.get("4h", {}).get("candle", {})
@@ -861,23 +858,23 @@ class SignalEngine:
             if kalman_trend == "BULLISH": likelihood *= 1.3
             elif kalman_trend == "BEARISH": likelihood *= 0.7
 
-            # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
-            if hmm_regime == "UPTREND": likelihood *= 1.4
-            elif hmm_regime == "DOWNTREND": likelihood *= 0.5
-            elif hmm_regime == "SIDEWAYS": likelihood *= 0.6
+            # 5. TÍCH HỢP HMM REGIME VÀO BAYES
+            if hmm_regime in ("UPTREND", "BULLISH"): likelihood *= 1.25
+            elif hmm_regime in ("DOWNTREND", "BEARISH"): likelihood *= 0.7
+            elif hmm_regime == "SIDEWAYS": likelihood *= 0.9
 
             # 6. [NEW v6.5] TÍCH HỢP OPEN INTEREST + FUNDING RATE
             # (oi_signal/funding đã được fetch từ trước nhưng chỉ nằm trong report,
             # chưa hề ảnh hưởng tới p_win/EV/quyết định vào lệnh — nay đã nối vào)
-            if oi_signal == "LONG_BUILD": likelihood *= 1.25      # Tiền mới thật sự vào Long -> xác nhận
-            elif oi_signal == "SHORT_BUILD": likelihood *= 0.75  # Tiền đang vào Short trong khi ta định LONG -> nghịch dòng tiền
-            elif oi_signal == "SHORT_SQUEEZE": likelihood *= 1.3  # Short đang bị ép -> nhiên liệu đẩy giá lên tiếp
-            elif oi_signal == "LONG_LIQ": likelihood *= 0.7      # Long đang bị thanh lý hàng loạt -> áp lực bán chưa hết
+            if oi_signal == "LONG_BUILD": likelihood *= 1.35      # Thưởng lớn hơn
+            elif oi_signal == "SHORT_BUILD": likelihood *= 0.6   # Phạt nặng hơn
+            elif oi_signal == "SHORT_SQUEEZE": likelihood *= 1.4  # Tối ưu: Squeeze là nhiên liệu mạnh
+            elif oi_signal == "LONG_LIQ": likelihood *= 0.6      # Phạt nặng hơn
 
             if funding >= FUNDING_EXTREME_PCT:
-                likelihood *= 0.75   # Long đã quá đông (funding cao) -> rủi ro bị squeeze ngược nếu vào thêm
+                likelihood *= 0.5   # Phạt rất nặng, hoặc ta có thể check để cấm hẳn
             elif funding <= -FUNDING_EXTREME_PCT:
-                likelihood *= 1.2    # Short đang quá đông (funding âm sâu) -> có lợi cho kịch bản Long (short squeeze)
+                likelihood *= 1.3    # Thưởng lớn hơn
 
             # 7. [NEW v6.10] WYCKOFF SPRING — wyckoff() đã phát hiện Spring trong
             # events[] từ lâu nhưng CHƯA hề ảnh hưởng likelihood (chỉ hiển thị).
@@ -937,21 +934,21 @@ class SignalEngine:
             if kalman_trend == "BEARISH": likelihood *= 1.3
             elif kalman_trend == "BULLISH": likelihood *= 0.7
 
-            # 5. [NEW] TÍCH HỢP HMM VÀO XÁC SUẤT BAYES
-            if hmm_regime == "DOWNTREND": likelihood *= 1.4
-            elif hmm_regime == "UPTREND": likelihood *= 0.5
-            elif hmm_regime == "SIDEWAYS": likelihood *= 0.6
+            # 5. TÍCH HỢP HMM REGIME VÀO BAYES
+            if hmm_regime in ("UPTREND", "BULLISH"): likelihood *= 1.25
+            elif hmm_regime in ("UPTREND", "BEARISH"): likelihood *= 0.7
+            elif hmm_regime == "SIDEWAYS": likelihood *= 0.9
 
             # 6. [NEW v6.5] TÍCH HỢP OPEN INTEREST + FUNDING RATE
-            if oi_signal == "SHORT_BUILD": likelihood *= 1.25
-            elif oi_signal == "LONG_BUILD": likelihood *= 0.75
-            elif oi_signal == "LONG_LIQ": likelihood *= 1.3      # Long đang bị thanh lý -> nhiên liệu đẩy giá xuống tiếp
-            elif oi_signal == "SHORT_SQUEEZE": likelihood *= 0.7  # Short đang bị ép -> nghịch với kịch bản Short mới
+            if oi_signal == "SHORT_BUILD": likelihood *= 1.35
+            elif oi_signal == "LONG_BUILD": likelihood *= 0.6
+            elif oi_signal == "LONG_LIQ": likelihood *= 1.4      # Long đang bị thanh lý -> nhiên liệu đẩy giá xuống tiếp
+            elif oi_signal == "SHORT_SQUEEZE": likelihood *= 0.6  # Phạt nặng hơn
 
             if funding <= -FUNDING_EXTREME_PCT:
-                likelihood *= 0.75   # Short đã quá đông -> rủi ro bị squeeze ngược nếu vào thêm
+                likelihood *= 0.5   # Phạt nặng, short đã quá đông
             elif funding >= FUNDING_EXTREME_PCT:
-                likelihood *= 1.2    # Long đang quá đông (funding dương cao) -> có lợi cho kịch bản Short
+                likelihood *= 1.3    # Thưởng lớn hơn
 
             # 7. [NEW v6.10] WYCKOFF UTAD (Upthrust After Distribution) — đỉnh
             # giả kèm volume mở rộng, dấu hiệu kết thúc phân phối. Thưởng dù
@@ -1012,10 +1009,9 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.55   # có biên an toàn trên 50% vì bản thân p_win cũng chỉ là ước lượng
+            MIN_P_WIN = 0.60   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
             if p_win < MIN_P_WIN:
-                log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT (EV đẹp trên giấy không đủ, "
-                            "cần xác suất thắng thật > 50%% mới giữ đúng mục tiêu winrate).",
+                log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
                             p_win * 100, MIN_P_WIN * 100)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
