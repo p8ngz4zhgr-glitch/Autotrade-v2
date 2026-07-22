@@ -246,7 +246,7 @@ class BingXExchange:
             
         return res
 
-    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5, p_win: float = 0.5, rr_ratio: float = 1.5) -> dict:
+    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5, p_win: float = 0.5, rr_ratio: float = 1.5, tp_levels: list = None) -> dict:
         open_positions = self.get_open_positions(symbol)
         if len(open_positions) > 0:
             current_direction = open_positions[0].get("direction")
@@ -357,12 +357,12 @@ class BingXExchange:
         if res.get("code") == 0:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
-            self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price)
+            self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price, tp_levels)
             return {"ok": True, "order_id": order_id, "qty": safe_qty}
             
         return {"ok": False, "msg": res.get("msg", "Error placing order")}
 
-    def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float):
+    def _place_sl_tp(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, tp_levels: list = None):
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
         
@@ -387,7 +387,28 @@ class BingXExchange:
             else:
                 log.error(f"❌ Đặt Stop Loss THẤT BẠI: {symbol} - Lỗi: {res_sl.get('msg', 'Unknown')}")
                 
-        if tp_price > 0:
+        if tp_levels and len(tp_levels) > 0:
+            for lvl in tp_levels:
+                lvl_price = lvl.get("price", 0)
+                lvl_pct = lvl.get("close_pct", 0)
+                if lvl_price > 0 and lvl_pct > 0:
+                    tp_qty = float(int((qty * lvl_pct) * 10000) / 10000)
+                    if tp_qty <= 0:
+                        continue
+                    res_tp = self._safe_order({
+                        "symbol": symbol,
+                        "side": opposite_side,
+                        "type": "TAKE_PROFIT_MARKET",
+                        "stopPrice": lvl_price,
+                        "quantity": tp_qty,
+                        "positionSide": position_side,
+                        "workingType": "CONTRACT_PRICE"
+                    })
+                    if res_tp.get("code") == 0:
+                        log.info(f"🎯 Đặt Take Profit {lvl.get('level')} OK: {symbol} tại {lvl_price} (Qty: {tp_qty})")
+                    else:
+                        log.error(f"❌ Đặt Take Profit {lvl.get('level')} THẤT BẠI: {symbol} - Lỗi: {res_tp.get('msg', 'Unknown')}")
+        elif tp_price > 0:
             res_tp = self._safe_order({
                 "symbol": symbol,
                 "side": opposite_side,
