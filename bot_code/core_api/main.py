@@ -577,7 +577,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                 new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
                                 new_rr    = analysis.get("rr_ratio", 1.5)
                                 bx.set_leverage(sym, leverage=user.leverage)
-                                bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2,
+                                bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2, tp_levels=analysis.get("plan", {}).get("tp_levels", []),
                                                leverage=user.leverage, p_win=new_p_win, rr_ratio=new_rr)
                                 
                                 _tg_send(
@@ -987,7 +987,8 @@ def _execute_for_user(user: User, signal: dict):
         bx.cancel_all_orders(sym)
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
         sig_rr    = signal.get("rr_ratio", 1.5)
-        res = bx.place_order(sym, side, qty, sl, tp2, leverage=user.leverage, p_win=sig_p_win, rr_ratio=sig_rr)
+        tp_levels = signal.get("plan", {}).get("tp_levels", [])
+        res = bx.place_order(sym, side, qty, sl, tp2, leverage=user.leverage, p_win=sig_p_win, rr_ratio=sig_rr, tp_levels=tp_levels)
 
         if res.get("ok"):
             if redis_client:
@@ -1063,6 +1064,18 @@ async def startup_event():
     threading.Thread(target=_register_telegram_webhook, daemon=True, name="webhook-register").start()
     threading.Thread(target=lambda: [time.sleep(600) or gc.collect() for _ in iter(int, 1)],
                      daemon=True, name="gc").start()
+                     
+    def run_news_agent():
+        try:
+            from analyzer.news_agent import scan_news_and_check_kill_switch
+            while True:
+                scan_news_and_check_kill_switch()
+                time.sleep(600)
+        except Exception as e:
+            log.error(f"News agent error: {e}")
+
+    threading.Thread(target=run_news_agent, daemon=True, name="news-agent").start()
+
     log.info("Tat ca threads khoi dong")
 
 
