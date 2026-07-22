@@ -366,8 +366,13 @@ class BingXExchange:
         opposite_side = "SELL" if side == "BUY" else "BUY"
         position_side = "LONG" if side == "BUY" else "SHORT"
         
+        # KIỂM TRA ĐẦU VÀO TỪ AI
+        if sl_price <= 0 and tp_price <= 0:
+            log.warning(f"⚠️ {symbol}: Bỏ qua đặt SL/TP vì giá trị nhận được đều <= 0 (SL: {sl_price}, TP: {tp_price})")
+            return
+
         if sl_price > 0:
-            self._safe_order({
+            res_sl = self._safe_order({
                 "symbol": symbol,
                 "side": opposite_side,
                 "type": "STOP_MARKET",
@@ -376,9 +381,14 @@ class BingXExchange:
                 "positionSide": position_side,
                 "workingType": "MARK_PRICE"  
             })
-            
+            # Ép bot phải in ra kết quả đặt SL
+            if res_sl.get("code") == 0:
+                log.info(f"🛡️ Đặt Stop Loss OK: {symbol} tại {sl_price}")
+            else:
+                log.error(f"❌ Đặt Stop Loss THẤT BẠI: {symbol} - Lỗi: {res_sl.get('msg', 'Unknown')}")
+                
         if tp_price > 0:
-            self._safe_order({
+            res_tp = self._safe_order({
                 "symbol": symbol,
                 "side": opposite_side,
                 "type": "TAKE_PROFIT_MARKET",
@@ -387,6 +397,12 @@ class BingXExchange:
                 "positionSide": position_side,
                 "workingType": "CONTRACT_PRICE" 
             })
+            # Ép bot phải in ra kết quả đặt TP
+            if res_tp.get("code") == 0:
+                log.info(f"🎯 Đặt Take Profit OK: {symbol} tại {tp_price}")
+            else:
+                log.error(f"❌ Đặt Take Profit THẤT BẠI: {symbol} - Lỗi: {res_tp.get('msg', 'Unknown')}")
+
 
     # ════════════════════════════════════════════════════════════════════
     # [FIX v6.2] Breakeven có đệm phí — tránh "hoà vốn" thành lỗ nhẹ sau phí/trượt giá
