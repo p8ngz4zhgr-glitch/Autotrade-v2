@@ -321,8 +321,17 @@ class TelegramBot:
             "📌 <b>KẾ HOẠCH LỆNH</b>",
             "  ├ Vào lệnh  : <code>$" + str(plan["entry"]) + "</code>",
             "  ├ 🛑 Cắt lỗ: <code>$" + str(plan["sl"]) + "</code> (-" + str(data.get("sl_pct","1.5")) + "%)",
-            "  ├ 🎯 TP1    : <code>$" + str(plan["tp1"]) + "</code>",
-            "  ├ 🏆 TP2    : <code>$" + str(plan["tp2"]) + "</code>",
+        ])
+        if "tp_levels" in plan:
+            for lvl in plan["tp_levels"]:
+                lines.append(f"  ├ 🎯 TP{lvl['level']} ({int(lvl['close_pct']*100)}%): <code>${lvl['price']}</code>")
+        else:
+            lines.extend([
+                "  ├ 🎯 TP1    : <code>$" + str(plan.get("tp1", 0)) + "</code>",
+                "  ├ 🏆 TP2    : <code>$" + str(plan.get("tp2", 0)) + "</code>",
+            ])
+            
+        lines.extend([
             "  └ ⚖️ R:R     : 1:" + str(data.get("rr_ratio","2.0")),
             "",
             "🤖 <b>AI</b> <i>(" + llm_name + ")</i>",
