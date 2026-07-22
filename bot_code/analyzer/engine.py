@@ -1009,7 +1009,7 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.60   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
+            MIN_P_WIN = 0.55   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
             if p_win < MIN_P_WIN:
                 log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
                             p_win * 100, MIN_P_WIN * 100)
