@@ -299,7 +299,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 "analysis": analysis
             }
 
-                # ══════════════════════════════════════════════════════════
+        # ══════════════════════════════════════════════════════════
         # [NEW] LỚP BẢO VỆ ĐỘNG (BREAKEVEN & LỌC NHIỄU TỪ EXCHANGE)
         # ══════════════════════════════════════════════════════════
         bx = get_bx(user)
@@ -372,9 +372,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # Xu thế ĐƯỢC COI LÀ CÒN ACTIVE nếu: AI đồng thuận, HOẶC (AI báo WAIT do EV thấp NHƯNG Kalman/HMM vẫn đang giữ form tăng/giảm)
         is_trend_active = ai_same_dir or (new_direction == "WAIT" and (kalman_same_dir or hmm_same_dir))
         
-        # Bóc tách 4 mốc TP (thay cho tp1/tp2 cũ) — plan.tp_levels đến từ
-        # engine.py bản mới; nếu vì lý do gì đó chưa có (vd cache cũ) thì dựng
-        # tạm 2 mốc như trước để không vỡ luồng.
+        # Bóc tách 4 mốc TP (thay cho tp1/tp2 cũ) 
         plan = analysis.get("plan", {})
         tp_levels_raw = plan.get("tp_levels")
         if not tp_levels_raw:
@@ -384,7 +382,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             ]
 
         # ══════════════════════════════════════════════════════════
-        # [BẢN VÁ LỖI TOÁN HỌC]: CHẶN TP ẢO DO AI ĐẢO VIEW — áp dụng cho MỌI mốc
+        # [BẢN VÁ LỖI TOÁN HỌC]: CHẶN TP ẢO DO AI ĐẢO VIEW
         # ══════════════════════════════════════════════════════════
         tp_levels = []
         for lv in tp_levels_raw:
@@ -395,11 +393,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 p = 0
             tp_levels.append({"level": lv.get("level"), "price": p, "close_pct": lv.get("close_pct", 0.25)})
 
-        tp1 = tp_levels[0]["price"] if tp_levels else 0  # 1 số đoạn code cũ bên dưới vẫn dùng tên "tp1" để hiển thị
+        tp1 = tp_levels[0]["price"] if tp_levels else 0
 
-        # [NEW v6.12] Đếm số mốc TP đã xử lý (0..len(tp_levels)) — TÁI DÙNG
-        # đúng key partial_key cũ để tương thích ngược: "1" từ hệ 2-TP cũ vẫn
-        # đúng nghĩa "đã xong mốc 1" trong hệ 4-TP mới.
+        # [NEW v6.12] Đếm số mốc TP đã xử lý
         partial_key = f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}"
         tp_progress = 0
         if redis_client:
@@ -408,7 +404,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 tp_progress = int(raw_p) if raw_p else 0
             except Exception:
                 tp_progress = 0
-        is_scaled_out = tp_progress > 0  # giữ cho các đoạn code bên dưới còn tham chiếu (phase_str, DYNAMIC_TP...)
+        is_scaled_out = tp_progress > 0 
 
 
         # ══════════════════════════════════════════════════════════
@@ -420,88 +416,79 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         emoji = "🛡️"
         action_type = ""
 
-        DYNAMIC_SL_LIMIT = -12.0  # Ngưỡng cắt lỗ sớm bảo vệ NAV
-        DYNAMIC_TP_LIMIT = 6.0    # Ngưỡng chốt lời sớm khi thị trường mất phương hướng
+        DYNAMIC_SL_LIMIT = -12.0  
+        DYNAMIC_TP_LIMIT = 6.0    
 
-        # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM)
-        if pnl_pct <= DYNAMIC_SL_LIMIT:
-            action = "CLOSE_ALL"
-            action_type = "CẮT LỖ SỚM"
-            emoji = "🚨"
-            reason = f"Trạng thái âm {pnl_pct:.2f}% chạm ngưỡng giới hạn sớm ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Hard Stop bảo toàn tài sản."
+        # 🚨 [TẦNG ƯU TIÊN 0]: PHẢN XẠ TỦY SỐNG (CHỐT LỜI CỨNG)
+        # Luôn chạy đầu tiên: Đã chạm TP là chốt ngay, ghi đè toàn bộ tín hiệu AI/HMM!
+        next_tp = tp_levels[tp_progress] if tp_progress < len(tp_levels) else None
+        if next_tp and next_tp["price"] > 0:
+            reached = (direction == "LONG" and current_price >= next_tp["price"]) or \
+                      (direction == "SHORT" and current_price <= next_tp["price"])
+            if reached:
+                action = "SCALE_OUT"
+                action_type = f"CHỐT LỜI TP{next_tp['level']}"
+                emoji = "🎯"
+                reason = (f"Phản xạ tự động: Giá đã quét qua TP{next_tp['level']} (${next_tp['price']:.4f}). "
+                          f"Khóa {int(next_tp['close_pct']*100)}% vị thế gốc, dời SL phần còn lại lên mốc trước đó.")
 
-        # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK)
-        # Bất kể đang trên đường đến TP1 hay đang thả TP2, nếu bị đảo chiều mạnh -> CHỐT LỜI ĐỘNG/CẮT LỖ KHẨN CẤP
-        elif is_reversal and conf >= 60:
-            action = "CLOSE_ALL"
-            should_reverse = True
-            action_type = "CHỐT LỜI SỚM (ĐẢO CHIỀU)" if in_profit else "CẮT LỖ SỚM"
-            phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
-            emoji = "🚨"
-            reason = f"Đang trong giai đoạn {phase_str}, phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Chốt lệnh khẩn cấp."
-            
-        elif is_reversal and conf >= 40:
-            action = "CLOSE_ALL"
-            action_type = "CHỐT LỜI SỚM (PHÂN KỲ)" if in_profit else "CẮT LỖ SỚM"
-            phase_str = "tiến về TP2" if is_scaled_out else "chưa chạm TP1"
-            emoji = "⚠️"
-            reason = f"Dòng tiền phân kỳ nhẹ khi lệnh đang {phase_str}, xu hướng báo {new_direction} -> Đóng lệnh chủ động thu tiền về."
+        # NẾU CHƯA CHẠM MỐC TP NÀO, MỚI BẮT ĐẦU DÙNG TƯ DUY AI ĐỂ XÉT NGẮT LỆNH
+        if action != "SCALE_OUT":
+            # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM)
+            if pnl_pct <= DYNAMIC_SL_LIMIT:
+                action = "CLOSE_ALL"
+                action_type = "CẮT LỖ SỚM"
+                emoji = "🚨"
+                reason = f"Trạng thái âm {pnl_pct:.2f}% chạm ngưỡng giới hạn sớm ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Hard Stop bảo toàn tài sản."
 
-        # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT (CƠ CHẾ CHỐT TỪNG PHẦN & GỒNG)
-        elif is_trend_active:
-            # [NEW v6.12] Kiểm tra mốc TP TIẾP THEO (không chỉ TP1) — tp_progress
-            # là chỉ số 0-based vào tp_levels cho mốc kế tiếp cần đạt.
-            next_tp = tp_levels[tp_progress] if tp_progress < len(tp_levels) else None
-            if next_tp and next_tp["price"] > 0:
-                reached = (direction == "LONG" and current_price >= next_tp["price"]) or \
-                          (direction == "SHORT" and current_price <= next_tp["price"])
-                if reached:
-                    action = "SCALE_OUT"
-                    action_type = f"CHỐT LỜI TP{next_tp['level']}"
-                    emoji = "🎯"
-                    reason = (f"Giá đã chạm mốc TP{next_tp['level']} (${next_tp['price']:.4f}). "
-                              f"Khóa {int(next_tp['close_pct']*100)}% vị thế gốc, dời SL phần còn lại lên "
-                              f"mốc trước đó và tiếp tục thả mồi.")
-            if action != "SCALE_OUT":
-                # Đã chốt hết các mốc, hoặc chưa tới mốc kế tiếp nhưng trend đang mạnh -> giữ lệnh
+            # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK)
+            elif is_reversal and conf >= 60:
+                action = "CLOSE_ALL"
+                should_reverse = True
+                action_type = "CHỐT LỜI SỚM (ĐẢO CHIỀU)" if in_profit else "CẮT LỖ SỚM"
+                phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
+                emoji = "🚨"
+                reason = f"Đang trong giai đoạn {phase_str}, phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Chốt lệnh khẩn cấp."
+                
+            elif is_reversal and conf >= 40:
+                action = "CLOSE_ALL"
+                action_type = "CHỐT LỜI SỚM (PHÂN KỲ)" if in_profit else "CẮT LỖ SỚM"
+                phase_str = "tiến về TP2" if is_scaled_out else "chưa chạm TP1"
+                emoji = "⚠️"
+                reason = f"Dòng tiền phân kỳ nhẹ khi lệnh đang {phase_str}, xu hướng báo {new_direction} -> Đóng lệnh chủ động thu tiền về."
+
+            # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT
+            elif is_trend_active:
                 action = "KEEP"
                 phase_str = f"đã qua TP{tp_progress}, tiến lên TP{tp_progress+1}" if is_scaled_out else "chờ chạm mốc TP1"
                 reason = f"Xu thế {new_direction} đang tiếp diễn thuận lợi. Trạng thái: Đang {phase_str} (PnL: {pnl_pct:+.2f}%)."
 
-        # [TẦNG ƯU TIÊN 4]: THỊ TRƯỜNG MẤT ĐỘNG LƯỢNG (WAIT REGIME)
-        elif new_direction == "WAIT":
-            is_market_sideways = (hmm_regime == "SIDEWAYS")
-            
-            # Tính toán ngưỡng chốt lời động (DYNAMIC_TP): 
-            # - Trên đường đến TP1: Ngưỡng chốt sớm là 12%
-            # - Trên đường đến TP2 (đã chốt 1/2): Ngưỡng chốt nâng lên 18% để bot "lì" hơn, cho phép giá giật nhiều hơn
-            current_tp_limit = DYNAMIC_TP_LIMIT if not is_scaled_out else (DYNAMIC_TP_LIMIT * 1.5)
-            
-            if pnl_pct >= current_tp_limit and is_market_sideways:
-                action = "CLOSE_ALL"
-                action_type = "CHỐT LỜI ĐỘNG (SIDEWAYS)"
-                emoji = "✅"
-                phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
-                reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận {pnl_pct:.2f}% >= mục tiêu thu hoạch sớm ({current_tp_limit}%) -> Đóng lệnh an toàn."
-            else:
-                action = "HOLD"
-                log.info(f"Tín hiệu {sym} báo WAIT nhưng Kalman/HMM chưa gãy hoặc ROE chưa đủ ngưỡng chốt sớm. Tiếp tục neo lệnh giám sát.")
+            # [TẦNG ƯU TIÊN 4]: THỊ TRƯỜNG MẤT ĐỘNG LƯỢNG (WAIT REGIME)
+            elif new_direction == "WAIT":
+                is_market_sideways = (hmm_regime == "SIDEWAYS")
+                current_tp_limit = DYNAMIC_TP_LIMIT if not is_scaled_out else (DYNAMIC_TP_LIMIT * 1.5)
+                
+                if pnl_pct >= current_tp_limit and is_market_sideways:
+                    action = "CLOSE_ALL"
+                    action_type = "CHỐT LỜI ĐỘNG (SIDEWAYS)"
+                    emoji = "✅"
+                    phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
+                    reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận {pnl_pct:.2f}% >= mục tiêu thu hoạch sớm ({current_tp_limit}%) -> Đóng lệnh an toàn."
+                else:
+                    action = "HOLD"
+                    log.info(f"Tín hiệu {sym} báo WAIT nhưng Kalman/HMM chưa gãy hoặc ROE chưa đủ ngưỡng chốt sớm. Tiếp tục neo lệnh giám sát.")
 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
         # ══════════════════════════════════════════════════════════
         if action != "KEEP" and action != "HOLD":
-            # Đã khởi tạo bx ở trên, không cần get_bx(user) lại nữa
             
-            # --- CƠ CHẾ GỒNG: CHỐT TỪNG MỐC TP & DỜI SL (4 mốc) ---
+            # --- CƠ CHẾ GỒNG: CHỐT TỪNG MỐC TP & DỜI SL ---
             if action == "SCALE_OUT":
                 lv = tp_levels[tp_progress]
                 next_lv = tp_levels[tp_progress + 1] if tp_progress + 1 < len(tp_levels) else None
                 prev_price = tp_levels[tp_progress - 1]["price"] if tp_progress > 0 else None
 
-                # [NEW v6.12] original_qty PHẢI là qty GỐC lúc vào lệnh (không
-                # phải qty hiện tại đang shrink dần), để mỗi mốc chốt đúng %
-                # đã định trên tổng ban đầu — không cộng dồn sai qua các mốc.
                 original_qty = qty
                 if redis_client:
                     try:
