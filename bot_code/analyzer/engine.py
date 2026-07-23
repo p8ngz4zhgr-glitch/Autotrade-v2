@@ -380,7 +380,9 @@ class SignalEngine:
                     tmp_db.close()
         except Exception as e:
             log.debug("Lỗi đọc HMM từ DB: %s", e)
-        log.info("  🧠 [HMM] Market Regime: %s (Confidence: %.1f%%)", hmm_regime, hmm_conf * 100)
+        if hmm_conf <= 1.0 and hmm_conf > 0:
+            hmm_conf = round(hmm_conf * 100, 1)
+        log.info("  🧠 [HMM] Market Regime: %s (Confidence: %.1f%%)", hmm_regime, hmm_conf)
         # Chạy song song 4 TF
         def _fetch_tf(tf):
             return tf, self.analyze_tf(symbol, tf, fetcher)
