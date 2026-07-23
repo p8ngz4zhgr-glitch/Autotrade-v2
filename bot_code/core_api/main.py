@@ -101,6 +101,8 @@ REPORT_TOKEN    = os.getenv("TELEGRAM_REPORT_TOKEN", "")
 REGISTER_TOKEN  = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
 TG_BASE         = "https://api.telegram.org"
 
+from core_api.local_store import local_store
+
 try:
     _rc_kwargs = {"decode_responses": True}
     if REDIS_URL.startswith("rediss://"):
@@ -110,24 +112,39 @@ try:
     log.info("Redis OK")
 except Exception as e:
     redis_client = None
-    log.error("Redis error: %s", e)
+    log.error("Redis error: %s -> Dùng LocalStore (In-Memory)", e)
+
+
+def _get_active_redis():
+    if redis_client:
+        try:
+            redis_client.ping()
+            return redis_client
+        except Exception:
+            pass
+    return local_store
 
 
 def _redis_get(key, default=None):
-    if not redis_client:
-        return default
+    client = _get_active_redis()
     try:
-        v = redis_client.get(key)
-        return json.loads(v) if v else default
+        v = client.get(key)
+        if v is None:
+            return default
+        if isinstance(v, (dict, list)):
+            return v
+        return json.loads(v) if isinstance(v, str) and (v.startswith("{") or v.startswith("[")) else v
     except Exception:
         return default
 
 
 def _redis_set(key, value, ex=86400 * 30):
-    if not redis_client:
-        return
+    client = _get_active_redis()
     try:
-        redis_client.set(key, json.dumps(value), ex=ex)
+        if client == redis_client:
+            client.set(key, json.dumps(value), ex=ex)
+        else:
+            client.setex(key, ex, value)
     except Exception as e:
         log.error("Redis set %s: %s", key, e)
 
@@ -822,48 +839,62 @@ def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty
 # ══════════════════════════════════════════════════════════════════
 async def _trade_worker_async():
     log.info("Trade Worker khoi dong...")
-    retry = 0
     while True:
         r = None
+        use_local = False
         try:
-            # Dung cac thong so socket_timeout va socket_keepalive de tranh timeout ngat ket noi voi Upstash/Redis
             r = await aioredis.from_url(
                 REDIS_URL,
                 decode_responses=True,
-                socket_connect_timeout=10,
-                socket_timeout=15,
+                socket_connect_timeout=5,
+                socket_timeout=10,
                 socket_keepalive=True,
                 retry_on_timeout=True
             )
             await r.ping()
-            log.info("Worker Redis OK")
-            retry = 0
+            log.info("Worker Redis Cloud OK")
+        except Exception as e:
+            use_local = True
+            log.warning("⚠️ Worker dùng LocalStore (0%% RAM & 0%% Request Quota): %s", e)
+
+        try:
             while True:
-                try:
-                    # Giam timeout blpop xuong 2 giay de giu cho socket luon hoat dong va tranh socket read timeout (5s)
-                    msg = await r.blpop("TRADE_SIGNALS", timeout=2)
-                except (redis.exceptions.TimeoutError, asyncio.TimeoutError):
-                    # Khi bi timeout doc, kiem tra ket noi bang cach ping, neu ping OK thi tiep tuc, neu loi thi break de reconnect
+                msg = None
+                if not use_local and r:
                     try:
-                        await r.ping()
-                        continue
-                    except Exception:
-                        break
-                except (redis.exceptions.ConnectionError, redis.exceptions.RedisError):
-                    break
+                        msg = await r.blpop("TRADE_SIGNALS", timeout=2)
+                    except Exception as e:
+                        log.warning("⚠️ Redis error during blpop, fallback sang LocalStore: %s", e)
+                        use_local = True
+
+                if use_local:
+                    msg = await local_store.blpop_async("TRADE_SIGNALS", timeout=2)
 
                 if not msg:
+                    await asyncio.sleep(0.1)
                     continue
+
                 _, data_str = msg
                 try:
-                    signal = json.loads(data_str)
+                    signal = json.loads(data_str) if isinstance(data_str, str) else data_str
+                    data_str = json.dumps(signal) if not isinstance(data_str, str) else data_str
                 except Exception:
                     continue
 
-                await r.lpush("WEB_SIGNALS", data_str)
-                await r.lpush("WEB_SIGNALS_RECORD", data_str)
-                await r.ltrim("WEB_SIGNALS", 0, 29)
-                await r.ltrim("WEB_SIGNALS_RECORD", 0, 99)
+                if not use_local and r:
+                    try:
+                        await r.lpush("WEB_SIGNALS", data_str)
+                        await r.lpush("WEB_SIGNALS_RECORD", data_str)
+                        await r.ltrim("WEB_SIGNALS", 0, 29)
+                        await r.ltrim("WEB_SIGNALS_RECORD", 0, 99)
+                    except Exception:
+                        pass
+
+                # Luôn sync vào LocalStore cho Web UI
+                local_store.lpush("WEB_SIGNALS", data_str)
+                local_store.lpush("WEB_SIGNALS_RECORD", data_str)
+                local_store.ltrim("WEB_SIGNALS", 0, 29)
+                local_store.ltrim("WEB_SIGNALS_RECORD", 0, 99)
 
                 if not BOT_GLOBAL_AUTO or BOT_KILL_SWITCH:
                     log.info(f"Skip trade: GLOBAL_AUTO={BOT_GLOBAL_AUTO}, KILL_SWITCH={BOT_KILL_SWITCH}")
@@ -893,13 +924,9 @@ async def _trade_worker_async():
                 tasks = [asyncio.to_thread(_execute_for_user, u, signal) for u in eligible]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        except (ConnectionRefusedError, OSError) as e:
-            retry += 1
-            await asyncio.sleep(min(5 * retry, 60))
         except Exception as e:
-            retry += 1
             log.error("Worker error: %s", e)
-            await asyncio.sleep(min(5 * retry, 60))
+            await asyncio.sleep(5)
         finally:
             if r:
                 try:
@@ -1454,13 +1481,12 @@ def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(
 
 
 def _get_signals():
-    if not redis_client:
-        return []
+    client = _get_active_redis()
     try:
-        raws = redis_client.lrange("WEB_SIGNALS", 0, 19)
+        raws = client.lrange("WEB_SIGNALS", 0, 19)
         result = []
         for raw in raws:
-            d = json.loads(raw)
+            d = json.loads(raw) if isinstance(raw, str) else raw
             result.append({"symbol": d.get("symbol"), "final": d.get("final"),
                            "confidence": d.get("confidence", 0),
                            "timestamp": d.get("timestamp", ""),
