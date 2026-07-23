@@ -338,17 +338,24 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # Chạy ngầm hàm quản trị vị thế động
         dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage)
         
-        if dynamic_status.get("action") == "BREAKEVEN":
-            # Chỉ gửi Telegram và kích hoạt nếu chưa từng làm việc này
-            if not is_breakeven:
+        if dynamic_status.get("action") in ("BREAKEVEN", "TRAILING_SL"):
+            target_lvl = dynamic_status.get("level", 1)
+            new_sl_val = dynamic_status.get("new_sl", entry)
+            sl_notif_key = f"TRAILING_SL_{user.telegram_id}_{sym}_{direction}_{target_lvl}"
+            is_sl_notified = False
+            if redis_client:
+                try: is_sl_notified = bool(redis_client.get(sl_notif_key))
+                except: pass
+
+            if not is_sl_notified:
+                lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)" if target_lvl == 1 else f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
                 _tg_send(
                     REGISTER_TOKEN, user.telegram_id, 
-                    f"🛡️ <b>RISK-FREE KÍCH HOẠT: {sym}</b>\n"
-                    f"Giá đã đi được 50% quãng đường đến TP1. Tự động dời Stoploss về Entry (<code>${entry:.4f}</code>) để bảo toàn vốn!"
+                    f"🛡️ <b>TRAILING SL KÍCH HOẠT: {sym}</b>\n"
+                    f"Giá đã đi được 50% chặng đường tới TP{target_lvl}. Tự động dời Stoploss về {lvl_str} để bảo vệ lợi nhuận!"
                 )
-                # Đánh dấu đã dời SL thành công, khóa lại trong 24h
                 if redis_client:
-                    try: redis_client.setex(be_key, 86400, "1")
+                    try: redis_client.setex(sl_notif_key, 86400, "1")
                     except: pass
             
         elif dynamic_status.get("action") == "CLOSE":
