@@ -22,6 +22,7 @@ class BingXExchange:
     def __init__(self, api_key: str, api_secret: str):
         self.api_key    = str(api_key).strip() if api_key else ""
         self.api_secret = str(api_secret).strip() if api_secret else ""
+        self._be_set_positions = set()
 
     def _sign(self, params: dict) -> str:
         query_string = urllib.parse.urlencode(sorted(params.items()))
@@ -156,31 +157,36 @@ class BingXExchange:
         positions = []
         if isinstance(res, dict) and res.get("code") == 0:
             data = res.get("data")
+            raw_pos = []
             if isinstance(data, list):
-                for p in data:
-                    if isinstance(p, dict):
-                        qty = float(p.get("positionAmt", 0))
-                        if qty == 0:
-                            continue
+                raw_pos = data
+            elif isinstance(data, dict):
+                raw_pos = data.get("positions", []) or data.get("list", []) or []
+
+            for p in raw_pos:
+                if isinstance(p, dict):
+                    qty = float(p.get("positionAmt", 0))
+                    if qty == 0:
+                        continue
+                    
+                    sym = p.get("symbol", "")
+                    normalized_sym = sym.replace("-", "") if sym else ""
+                    
+                    pos_side = p.get("positionSide")
+                    if pos_side in ("LONG", "SHORT"):
+                        direction = pos_side
+                    else:
+                        direction = "LONG" if qty > 0 else "SHORT"
                         
-                        sym = p.get("symbol", "")
-                        normalized_sym = sym.replace("-", "") if sym else ""
-                        
-                        pos_side = p.get("positionSide")
-                        if pos_side in ("LONG", "SHORT"):
-                            direction = pos_side
-                        else:
-                            direction = "LONG" if qty > 0 else "SHORT"
-                            
-                        entry_val = p.get("avgPrice", p.get("entryPrice", 0))
-                        
-                        positions.append({
-                            "symbol": normalized_sym,
-                            "direction": direction,
-                            "entry": float(entry_val),
-                            "qty": abs(qty),
-                            "pnl": float(p.get("unrealizedProfit", 0)),
-                        })
+                    entry_val = p.get("avgPrice", p.get("entryPrice", 0))
+                    
+                    positions.append({
+                        "symbol": normalized_sym,
+                        "direction": direction,
+                        "entry": float(entry_val),
+                        "qty": abs(qty),
+                        "pnl": float(p.get("unrealizedProfit", 0)),
+                    })
         return positions
 
     def get_trigger_orders(self):
@@ -189,12 +195,6 @@ class BingXExchange:
         khi không có lệnh chờ nào — dict rỗng hợp lệ). Trả về None khi GỌI SÀN
         THẤT BẠI (lỗi API/mạng/xác thực) — KHÁC với dict rỗng, để nơi gọi phân
         biệt được "chắc chắn không có SL" với "không biết vì gọi sàn lỗi".
-        [FIX v6.11] Trước đây 2 trường hợp này lẫn lộn thành cùng 1 kết quả
-        ({}) — mỗi lần get_balance/get_trigger_orders lỡ gặp lỗi API (vd đúng
-        lỗi code=100413 "Incorrect apiKey" đã từng thấy trong log), current_sl
-        đọc về lại thành 0, khiến manage_position_dynamic tưởng SL CHƯA được
-        kéo về breakeven và cancel+đặt lại lệnh — dù thực ra đã kéo đúng từ
-        trước. Đây chính là nguyên nhân "gọi sàn đặt SL nhiều lần" đang hỏi.
         """
         res = self._request("GET", "/openApi/swap/v2/trade/openOrders")
         if not (isinstance(res, dict) and res.get("code") == 0):
@@ -205,26 +205,27 @@ class BingXExchange:
 
         triggers = {}
         data = res.get("data")
+        orders = []
         if isinstance(data, list):
-            for o in data:
-                if isinstance(o, dict):
-                    sym = o.get("symbol")
-                    normalized_sym = sym.replace("-", "") if sym else ""
-                    if normalized_sym not in triggers:
-                        triggers[normalized_sym] = {}
-                    otype = o.get("type", "")
-                    # [FIX v6.4] TAKE_PROFIT_MARKET (đặt bởi _place_sl_tp) lưu giá kích
-                    # hoạt ở "stopPrice", KHÔNG phải "price" (đó là field của lệnh LIMIT
-                    # thường). Đọc sai field khiến tp2 luôn = 0 -> mọi nơi đọc giá trị
-                    # này (vd dashboard hiển thị vị thế) luôn rơi về số ước lượng chung
-                    # chung thay vì TP thật đang treo trên sàn.
-                    if "STOP_MARKET" in otype or ("STOP" in otype and "TAKE_PROFIT" not in otype):
-                        triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0))
-                    elif "TAKE_PROFIT" in otype:
-                        tp_val = o.get("stopPrice", 0) or o.get("price", 0)
-                        triggers[normalized_sym]["tp2"] = float(tp_val)
-                    elif "LIMIT" in otype:
-                        triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
+            orders = data
+        elif isinstance(data, dict):
+            orders = data.get("orders", []) or data.get("list", []) or []
+
+        for o in orders:
+            if isinstance(o, dict):
+                sym = o.get("symbol", "")
+                normalized_sym = sym.replace("-", "") if sym else ""
+                if normalized_sym not in triggers:
+                    triggers[normalized_sym] = {}
+                otype = o.get("type", "")
+                if "STOP" in otype or "STOP_MARKET" in otype or "STOP_LOSS" in otype:
+                    if "TAKE_PROFIT" not in otype:
+                        triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0) or o.get("price", 0))
+                if "TAKE_PROFIT" in otype:
+                    tp_val = o.get("stopPrice", 0) or o.get("price", 0)
+                    triggers[normalized_sym]["tp2"] = float(tp_val)
+                elif "LIMIT" in otype:
+                    triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
         return triggers
 
     def _safe_order(self, params: dict) -> dict:
@@ -367,9 +368,26 @@ class BingXExchange:
         position_side = "LONG" if side == "BUY" else "SHORT"
         
         # KIỂM TRA ĐẦU VÀO TỪ AI
-        if sl_price <= 0 and tp_price <= 0:
+        if sl_price <= 0 and tp_price <= 0 and not tp_levels:
             log.warning(f"⚠️ {symbol}: Bỏ qua đặt SL/TP vì giá trị nhận được đều <= 0 (SL: {sl_price}, TP: {tp_price})")
             return
+
+        cur_price = self.get_latest_price(symbol)
+        if cur_price > 0:
+            if position_side == "LONG":
+                if sl_price >= cur_price:
+                    log.warning(f"⚠️ [SL INVALID] LONG {symbol}: sl_price ({sl_price}) >= current_price ({cur_price}) -> Bỏ qua đặt SL")
+                    sl_price = 0.0
+                if tp_price > 0 and tp_price <= cur_price:
+                    log.warning(f"⚠️ [TP INVALID] LONG {symbol}: tp_price ({tp_price}) <= current_price ({cur_price}) -> Bỏ qua đặt TP")
+                    tp_price = 0.0
+            else: # SHORT
+                if sl_price > 0 and sl_price <= cur_price:
+                    log.warning(f"⚠️ [SL INVALID] SHORT {symbol}: sl_price ({sl_price}) <= current_price ({cur_price}) -> Bỏ qua đặt SL")
+                    sl_price = 0.0
+                if tp_price > 0 and tp_price >= cur_price:
+                    log.warning(f"⚠️ [TP INVALID] SHORT {symbol}: tp_price ({tp_price}) >= current_price ({cur_price}) -> Bỏ qua đặt TP")
+                    tp_price = 0.0
 
         if sl_price > 0:
             res_sl = self._safe_order({
@@ -392,6 +410,14 @@ class BingXExchange:
                 lvl_price = lvl.get("price", 0)
                 lvl_pct = lvl.get("close_pct", 0)
                 if lvl_price > 0 and lvl_pct > 0:
+                    if cur_price > 0:
+                        if position_side == "LONG" and lvl_price <= cur_price:
+                            log.warning(f"⚠️ [TP LEVEL INVALID] LONG {symbol}: lvl_price ({lvl_price}) <= current_price ({cur_price}) -> Bỏ qua TP lvl")
+                            continue
+                        elif position_side == "SHORT" and lvl_price >= cur_price:
+                            log.warning(f"⚠️ [TP LEVEL INVALID] SHORT {symbol}: lvl_price ({lvl_price}) >= current_price ({cur_price}) -> Bỏ qua TP lvl")
+                            continue
+
                     tp_qty = float(int((qty * lvl_pct) * 10000) / 10000)
                     if tp_qty <= 0:
                         continue
@@ -568,32 +594,81 @@ class BingXExchange:
         # Tính toán ROE và quãng đường
         plan = analysis_result.get("plan", {})
         tp1_price = float(plan.get("tp1", 0))
+        tp2_price = float(plan.get("tp2", 0))
         
         if direction == "LONG":
             roe = ((current_price - entry_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(tp1_price - entry_price) if tp1_price > 0 else 0
+            dist_to_tp1 = abs(tp1_price - entry_price) if (tp1_price > 0 and tp1_price > entry_price) else 0
             curr_dist = current_price - entry_price
         else:
             roe = ((entry_price - current_price) / entry_price) * 100 * leverage
-            dist_to_tp1 = abs(entry_price - tp1_price) if tp1_price > 0 else 0
+            dist_to_tp1 = abs(entry_price - tp1_price) if (tp1_price > 0 and tp1_price < entry_price) else 0
             curr_dist = entry_price - current_price
 
-        # 1. EARLY BREAKEVEN: 50% chặng đường -> Dời SL về Entry
-        if dist_to_tp1 > 0 and (curr_dist / dist_to_tp1) >= 0.50:
+        # 1. TÍNH TOÁN 4 MỐC TP & TRAILING SL ĐA CẤP (50% SANG TP KẾ TIẾP -> DỜI SL VỀ TP TRƯỚC)
+        raw_tp_levels = plan.get("tp_levels", [])
+        tp_list = []
+        if raw_tp_levels and isinstance(raw_tp_levels, list):
+            for lvl in raw_tp_levels:
+                if isinstance(lvl, dict):
+                    p = float(lvl.get("price", 0))
+                    if p > 0:
+                        tp_list.append(p)
+        
+        if not tp_list:
+            for k in ["tp1", "tp2", "tp3", "tp4"]:
+                val = float(plan.get(k, 0))
+                if val > 0:
+                    tp_list.append(val)
+
+        # Lọc và sắp xếp danh sách TP đúng hướng vị thế
+        if direction == "LONG":
+            tp_list = sorted([p for p in tp_list if p > entry_price])
+        else: # SHORT
+            tp_list = sorted([p for p in tp_list if p < entry_price], reverse=True)
+
+        if tp_list:
             be_price = self.breakeven_price(direction, entry_price)
-            # [FIX v6.4] So sánh current_sl với TARGET breakeven (be_price, có đệm phí)
-            # thay vì entry_price thô. Trước đây so với entry_price + ngưỡng 0.01% trong
-            # khi be_price lệch entry ~0.06% (đệm phí) -> điều kiện "đã kéo rồi" KHÔNG BAO
-            # GIỜ đúng -> mỗi vòng poll 30s lại cancel+đặt lại SL/TP vô hạn lần dù đã kéo
-            # thành công từ vòng đầu tiên. Ngưỡng so sánh vẫn đủ hẹp (0.02%) để không bị
-            # nhầm với SL gốc (thường lệch entry vài % trở lên).
-            if abs(current_sl - be_price) > (entry_price * 0.0002):
-                log.info(f"🛡️ {symbol} đạt 50% TP1. Kéo SL về Breakeven+phí {be_price}!")
-                self.cancel_all_orders(symbol)
-                # Dùng TP2 từ plan nếu có, không thì dùng TP1 cũ
-                tp_target = float(plan.get("tp2", tp1_price))
-                self.set_runner_sl_tp(symbol, direction, current_qty, be_price, tp_target)
-                return {"action": "BREAKEVEN", "msg": "Kéo SL về hòa vốn (có đệm phí)."}
+            tolerance = entry_price * 0.0002  # 0.02% đệm sai số giá
+
+            # Duyệt từ mốc cao nhất xuống mốc thấp nhất để tìm mốc 50% xa nhất đã vượt qua
+            for i in range(len(tp_list) - 1, -1, -1):
+                prev_p = tp_list[i - 1] if i > 0 else entry_price
+                curr_p = tp_list[i]
+                
+                # Tính giá milestone 50% quãng đường
+                if direction == "LONG":
+                    milestone_50 = prev_p + 0.5 * (curr_p - prev_p)
+                    reached_50 = (current_price >= milestone_50)
+                    target_sl = be_price if i == 0 else prev_p
+                    next_tp = tp_list[i] if i < len(tp_list) else tp_list[-1]
+                    sl_already_set = (current_sl > 0) and (current_sl >= target_sl - tolerance)
+                else: # SHORT
+                    milestone_50 = prev_p - 0.5 * (prev_p - curr_p)
+                    reached_50 = (current_price <= milestone_50)
+                    target_sl = be_price if i == 0 else prev_p
+                    next_tp = tp_list[i] if i < len(tp_list) else tp_list[-1]
+                    sl_already_set = (current_sl > 0) and (current_sl <= target_sl + tolerance)
+
+                if reached_50:
+                    # ĐÃ ĐẠT NGƯỠNG 50%: Kiểm tra xem SL trên sàn đã được dời hay chưa
+                    if sl_already_set:
+                        # SL ĐÃ ĐƯỢC DỜI ĐẾN HOẶC TỐT HƠN NGƯỠNG NÀY -> TUYỆT ĐỐI KHÔNG GỌI LẠI API!
+                        log.debug(f"🛡️ {symbol}: Giá đạt 50% chặng TP{i+1}, nhưng SL trên sàn ({current_sl}) đã ở/vượt mốc target ({target_sl}). Không gọi lại API.")
+                        break
+                    else:
+                        # CHƯA DỜI SL HOẶC SL TRÊN SÀN CHƯA ĐẠT MỐC NÀY -> GỌI API ĐẶT SL
+                        log.info(f"🛡️ {symbol}: Đạt 50% chặng đường tới TP{i+1} (${curr_p}). Dời SL lên {target_sl} (ngưỡng cũ: {current_sl})!")
+                        self.cancel_all_orders(symbol)
+                        self.set_runner_sl_tp(symbol, direction, current_qty, target_sl, next_tp)
+                        
+                        action_name = "BREAKEVEN" if i == 0 else "TRAILING_SL"
+                        return {
+                            "action": action_name,
+                            "level": i + 1,
+                            "new_sl": target_sl,
+                            "msg": f"Đã dời SL về {target_sl} khi đi được 50% chặng TP{i+1}."
+                        }
 
         # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
         new_signal = analysis_result.get("final", "WAIT")
