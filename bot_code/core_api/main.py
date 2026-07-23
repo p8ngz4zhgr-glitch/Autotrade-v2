@@ -434,8 +434,25 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
         # NẾU CHƯA CHẠM MỐC TP NÀO, MỚI BẮT ĐẦU DÙNG TƯ DUY AI ĐỂ XÉT NGẮT LỆNH
         if action != "SCALE_OUT":
+            # 🦈 [TẦNG ƯU TIÊN 0.5]: KIỂM TRA BẪY QUÉT THANH KHOẢN CÁ MẶP (LIQUIDITY SWEEP TRAP)
+            sweep_data = analysis.get("liquidity_sweep", {})
+            sw_detected = sweep_data.get("detected", False)
+            sw_type = sweep_data.get("type", "NONE") if sw_detected else "NONE"
+            sw_price = sweep_data.get("price", 0.0)
+
+            is_sweep_against = (direction == "LONG" and sw_type == "BEARISH_SWEEP") or \
+                               (direction == "SHORT" and sw_type == "BULLISH_SWEEP")
+
+            if is_sweep_against:
+                action = "CLOSE_ALL"
+                action_type = "CHỐT SỚM (BẪY CÁ MẶP SWEEP)" if in_profit else "CẮT LỖ SỚM (SWEEP TRAP)"
+                emoji = "🦈"
+                trap_name = "Bearish Sweep (Quét đỉnh xả hàng)" if sw_type == "BEARISH_SWEEP" else "Bullish Sweep (Quét đáy ép bán)"
+                reason = (f"CẢNH BÁO CÁ MẶP: Phát hiện bẫy thanh khoản {trap_name} tại giá ${sw_price:.4f} "
+                          f"ngược chiều lệnh {direction} đang giữ (PnL: {pnl_pct:+.2f}%) -> Kích hoạt thoát lệnh khẩn cấp để bảo vệ tài sản.")
+
             # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM)
-            if pnl_pct <= DYNAMIC_SL_LIMIT:
+            elif pnl_pct <= DYNAMIC_SL_LIMIT:
                 action = "CLOSE_ALL"
                 action_type = "CẮT LỖ SỚM"
                 emoji = "🚨"
