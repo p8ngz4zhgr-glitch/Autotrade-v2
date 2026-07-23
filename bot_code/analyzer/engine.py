@@ -380,6 +380,7 @@ class SignalEngine:
                     tmp_db.close()
         except Exception as e:
             log.debug("Lỗi đọc HMM từ DB: %s", e)
+        log.info("  🧠 [HMM] Market Regime: %s (Confidence: %.1f%%)", hmm_regime, hmm_conf * 100)
         # Chạy song song 4 TF
         def _fetch_tf(tf):
             return tf, self.analyze_tf(symbol, tf, fetcher)
@@ -859,9 +860,15 @@ class SignalEngine:
             elif kalman_trend == "BEARISH": likelihood *= 0.7
 
             # 5. TÍCH HỢP HMM REGIME VÀO BAYES
-            if hmm_regime in ("UPTREND", "BULLISH"): likelihood *= 1.25
-            elif hmm_regime in ("DOWNTREND", "BEARISH"): likelihood *= 0.7
-            elif hmm_regime == "SIDEWAYS": likelihood *= 0.9
+            if hmm_regime in ("UPTREND", "BULLISH"):
+                likelihood *= 1.25
+                log.info("  📈 [HMM BAYES] Đồng thuận UPTREND -> Tăng likelihood LONG (x1.25)")
+            elif hmm_regime in ("DOWNTREND", "BEARISH"):
+                likelihood *= 0.7
+                log.info("  📉 [HMM BAYES] Thấy DOWNTREND -> Giảm likelihood LONG (x0.7)")
+            elif hmm_regime == "SIDEWAYS":
+                likelihood *= 0.9
+                log.info("  ↔️ [HMM BAYES] Thị trường SIDEWAYS -> Giảm bớt likelihood (x0.9)")
 
             # 6. [NEW v6.5] TÍCH HỢP OPEN INTEREST + FUNDING RATE
             # (oi_signal/funding đã được fetch từ trước nhưng chỉ nằm trong report,
@@ -935,9 +942,15 @@ class SignalEngine:
             elif kalman_trend == "BULLISH": likelihood *= 0.7
 
             # 5. TÍCH HỢP HMM REGIME VÀO BAYES
-            if hmm_regime in ("UPTREND", "BULLISH"): likelihood *= 1.25
-            elif hmm_regime in ("UPTREND", "BEARISH"): likelihood *= 0.7
-            elif hmm_regime == "SIDEWAYS": likelihood *= 0.9
+            if hmm_regime in ("DOWNTREND", "BEARISH"):
+                likelihood *= 1.25
+                log.info("  📉 [HMM BAYES] Đồng thuận DOWNTREND -> Tăng likelihood SHORT (x1.25)")
+            elif hmm_regime in ("UPTREND", "BULLISH"):
+                likelihood *= 0.7
+                log.info("  📈 [HMM BAYES] Thấy UPTREND -> Giảm likelihood SHORT (x0.7)")
+            elif hmm_regime == "SIDEWAYS":
+                likelihood *= 0.9
+                log.info("  ↔️ [HMM BAYES] Thị trường SIDEWAYS -> Giảm bớt likelihood (x0.9)")
 
             # 6. [NEW v6.5] TÍCH HỢP OPEN INTEREST + FUNDING RATE
             if oi_signal == "SHORT_BUILD": likelihood *= 1.35
@@ -1009,7 +1022,7 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.55   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
+            MIN_P_WIN = 0.60   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
             if p_win < MIN_P_WIN:
                 log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
                             p_win * 100, MIN_P_WIN * 100)
