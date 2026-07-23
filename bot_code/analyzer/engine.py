@@ -703,6 +703,9 @@ class SignalEngine:
         sl_atr_pct = max(1.0, min(4.5, atr_pct_1h * atr_multiplier))
         sl_atr_pct = sl_atr_pct * news_risk["sl_tighten_mult"]
         
+        # [ANTI-MM] Thêm Dynamic Noise Buffer (0.3% - 0.5%) để giấu SL khỏi vùng phủ sóng MM
+        mm_noise_buffer_pct = max(0.3, min(0.6, atr_pct_1h * 0.35))
+        
         # C. Tỷ lệ R:R động
         tp1_pct    = sl_atr_pct * 1.5  # Tối thiểu R:R 1:1.5 cho TP1
         tp2_pct    = sl_atr_pct * 3.0  # R:R 1:3 cho TP2
@@ -717,22 +720,24 @@ class SignalEngine:
         fibo4h_trend = results.get("4h", {}).get("fibo", {}).get("trend", "")
 
         # ══════════════════════════════════════════════════════════
-        # 3. TỐI ƯU STOPLOSS BẰNG KALMAN & SWEEP (Bảo vệ lệnh khỏi Whipsaw & Stop Hunt)
+        # 3. TỐI ƯU STOPLOSS BẰNG KALMAN & SWEEP & ANTI-MM BUFFER (Bảo vệ lệnh khỏi Stop Hunt)
         # ══════════════════════════════════════════════════════════
         if final == "LONG":
-            sl = round(price * (1 - sl_atr_pct / 100), 2)
+            # SL cơ bản + Noise Buffer để giấu qua cản chẵn
+            sl = round(price * (1 - (sl_atr_pct + mm_noise_buffer_pct) / 100), 2)
             if kalman_data["detected"] and kalman_price < price:
-                k_sl = kalman_price * 0.995
-                if k_sl < price and ((price - k_sl) / price * 100) <= sl_atr_pct * 1.5:
+                k_sl = kalman_price * 0.993 # Nới thêm 0.2% dưới Kalman chống MM chọc râu
+                if k_sl < price and ((price - k_sl) / price * 100) <= sl_atr_pct * 1.8:
                     sl = round(k_sl, 2)
-                    log.info("  🛡️ Tối ưu SL LONG giấu dưới Kalman: %.4f", sl)
+                    log.info("  🛡️ Tối ưu SL LONG giấu dưới Kalman + Buffer Anti-MM: %.4f", sl)
             if sweep_data.get("detected") and sweep_data.get("type") == "BULLISH_SWEEP":
                 sw_p = sweep_data.get("price", 0.0)
                 if sw_p > 0 and sw_p < price:
-                    sw_sl = round(sw_p * 0.997, 2)
-                    if sw_sl < price and ((price - sw_sl) / price * 100) <= sl_atr_pct * 1.8:
+                    # Đặt SL nằm sâu hơn râu vừa quét thêm 0.35% đệm an toàn
+                    sw_sl = round(sw_p * 0.9965, 2)
+                    if sw_sl < price and ((price - sw_sl) / price * 100) <= sl_atr_pct * 2.0:
                         sl = sw_sl
-                        log.info("  🛡️ Tối ưu SL LONG giấu dưới râu Bullish Sweep cá mập: %.4f", sl)
+                        log.info("  🛡️ [ANTI-MM] Tối ưu SL LONG giấu ngoài râu Bullish Sweep (+0.35%% buffer): %.4f", sl)
 
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
@@ -748,19 +753,20 @@ class SignalEngine:
                 tp2 = atr_tp2
 
         elif final == "SHORT":
-            sl  = round(price * (1 + sl_atr_pct / 100), 2)
+            sl  = round(price * (1 + (sl_atr_pct + mm_noise_buffer_pct) / 100), 2)
             if kalman_data["detected"] and kalman_price > price:
-                k_sl = kalman_price * 1.005 
-                if k_sl > price and ((k_sl - price) / price * 100) <= sl_atr_pct * 1.5:
+                k_sl = kalman_price * 1.007 # Nới thêm 0.2% trên Kalman chống MM chọc râu
+                if k_sl > price and ((k_sl - price) / price * 100) <= sl_atr_pct * 1.8:
                     sl = round(k_sl, 2)
-                    log.info("  🛡️ Tối ưu SL SHORT giấu trên Kalman: %.4f", sl)
+                    log.info("  🛡️ Tối ưu SL SHORT giấu trên Kalman + Buffer Anti-MM: %.4f", sl)
             if sweep_data.get("detected") and sweep_data.get("type") == "BEARISH_SWEEP":
                 sw_p = sweep_data.get("price", 0.0)
                 if sw_p > 0 and sw_p > price:
-                    sw_sl = round(sw_p * 1.003, 2)
-                    if sw_sl > price and ((sw_sl - price) / price * 100) <= sl_atr_pct * 1.8:
+                    # Đặt SL nằm cao hơn râu vừa quét thêm 0.35% đệm an toàn
+                    sw_sl = round(sw_p * 1.0035, 2)
+                    if sw_sl > price and ((sw_sl - price) / price * 100) <= sl_atr_pct * 2.0:
                         sl = sw_sl
-                        log.info("  🛡️ Tối ưu SL SHORT giấu trên râu Bearish Sweep cá mập: %.4f", sl)
+                        log.info("  🛡️ [ANTI-MM] Tối ưu SL SHORT giấu ngoài râu Bearish Sweep (+0.35%% buffer): %.4f", sl)
 
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
@@ -797,11 +803,7 @@ class SignalEngine:
         rr_ratio = round(tp1_pct / sl_atr_pct, 2) if sl_atr_pct > 0 else 2.0
 
         # ══════════════════════════════════════════════════════════
-        # 3.5 [NEW v6.12] MỞ RỘNG 4 MỐC TP (thay vì 2) — giữ NGUYÊN cách tính
-        # tp1/tp2 ở trên (kể cả nhánh ưu tiên Fibonacci khi trend 4H khớp), tp3/
-        # tp4 nối tiếp theo đúng đơn vị khoảng cách tp1->tp2 để nhất quán dù
-        # tp1/tp2 đến từ ATR hay Fibonacci — không tính lại từ đầu, tránh rủi ro
-        # phá vỡ logic tp1/tp2 đã chạy ổn định.
+        # 3.5 [NEW v6.12] MỞ RỘNG 4 MỐC TP & [ANTI-MM] BỐ TRÍ MỘT PHẦN LỆCH NHẸ CHỐNG KẸT ORDERBOOK WALL
         # ══════════════════════════════════════════════════════════
         leg_12 = abs(tp2 - tp1)
         if leg_12 < (price * 0.001):
@@ -810,9 +812,19 @@ class SignalEngine:
         if tp2 >= tp1:
             tp3 = round(tp2 + leg_12 * 0.85, 2)
             tp4 = round(tp3 + leg_12 * 1.15, 2)
+            # [ANTI-MM] Lệnh LONG: Chiết khấu nhẹ 0.1% - 0.15% trước các mốc TP chẵn để chốt lời trước khi gặp tường xả MM
+            tp1 = round(tp1 * 0.9990, 2)
+            tp2 = round(tp2 * 0.9988, 2)
+            tp3 = round(tp3 * 0.9985, 2)
+            tp4 = round(tp4 * 0.9980, 2)
         else:
             tp3 = round(tp2 - leg_12 * 0.85, 2)
             tp4 = round(tp3 - leg_12 * 1.15, 2)
+            # [ANTI-MM] Lệnh SHORT: Cộng nhẹ 0.1% - 0.15% trước các mốc TP chẵn để chốt lời trước khi gặp tường gom MM
+            tp1 = round(tp1 * 1.0010, 2)
+            tp2 = round(tp2 * 1.0012, 2)
+            tp3 = round(tp3 * 1.0015, 2)
+            tp4 = round(tp4 * 1.0020, 2)
 
         candle_1h = results.get("1h", {}).get("candle", {})
         candle_4h = results.get("4h", {}).get("candle", {})
