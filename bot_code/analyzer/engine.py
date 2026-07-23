@@ -717,7 +717,7 @@ class SignalEngine:
         fibo4h_trend = results.get("4h", {}).get("fibo", {}).get("trend", "")
 
         # ══════════════════════════════════════════════════════════
-        # 3. TỐI ƯU STOPLOSS BẰNG KALMAN (Bảo vệ lệnh khỏi Whipsaw)
+        # 3. TỐI ƯU STOPLOSS BẰNG KALMAN & SWEEP (Bảo vệ lệnh khỏi Whipsaw & Stop Hunt)
         # ══════════════════════════════════════════════════════════
         if final == "LONG":
             sl = round(price * (1 - sl_atr_pct / 100), 2)
@@ -726,6 +726,13 @@ class SignalEngine:
                 if k_sl < price and ((price - k_sl) / price * 100) <= sl_atr_pct * 1.5:
                     sl = round(k_sl, 2)
                     log.info("  🛡️ Tối ưu SL LONG giấu dưới Kalman: %.4f", sl)
+            if sweep_data.get("detected") and sweep_data.get("type") == "BULLISH_SWEEP":
+                sw_p = sweep_data.get("price", 0.0)
+                if sw_p > 0 and sw_p < price:
+                    sw_sl = round(sw_p * 0.997, 2)
+                    if sw_sl < price and ((price - sw_sl) / price * 100) <= sl_atr_pct * 1.8:
+                        sl = sw_sl
+                        log.info("  🛡️ Tối ưu SL LONG giấu dưới râu Bullish Sweep cá mập: %.4f", sl)
 
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
@@ -747,6 +754,13 @@ class SignalEngine:
                 if k_sl > price and ((k_sl - price) / price * 100) <= sl_atr_pct * 1.5:
                     sl = round(k_sl, 2)
                     log.info("  🛡️ Tối ưu SL SHORT giấu trên Kalman: %.4f", sl)
+            if sweep_data.get("detected") and sweep_data.get("type") == "BEARISH_SWEEP":
+                sw_p = sweep_data.get("price", 0.0)
+                if sw_p > 0 and sw_p > price:
+                    sw_sl = round(sw_p * 1.003, 2)
+                    if sw_sl > price and ((sw_sl - price) / price * 100) <= sl_atr_pct * 1.8:
+                        sl = sw_sl
+                        log.info("  🛡️ Tối ưu SL SHORT giấu trên râu Bearish Sweep cá mập: %.4f", sl)
 
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
@@ -1024,7 +1038,7 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.55   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
+            MIN_P_WIN = 0.60   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
             if p_win < MIN_P_WIN:
                 log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
                             p_win * 100, MIN_P_WIN * 100)
