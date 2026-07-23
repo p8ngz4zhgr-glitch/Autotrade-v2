@@ -10,6 +10,7 @@ from analyzer.llm_agents import LLMChain, MultiAgentPipeline
 from analyzer.telegram_bot import TelegramBot
 from analyzer.config import Config
 from core_api.models import SessionLocal, TradeJournal
+from core_api.local_store import local_store
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 cfg = Config()
@@ -94,9 +95,15 @@ class SignalBot:
         return False, "không đổi"
 
     def push_to_queue(self, symbol, data):
-        if not self.redis_client:
-            self.log.warning("⚠️ Không có Redis. Không thể đẩy lệnh.")
-            return
+        client = None
+        if self.redis_client:
+            try:
+                self.redis_client.ping()
+                client = self.redis_client
+            except Exception:
+                client = local_store
+        else:
+            client = local_store
 
         now = time.time()
         last_push = self._pushed_signals.get(symbol, 0)
@@ -124,12 +131,13 @@ class SignalBot:
             "news_risk": data.get("news_risk", {}),
         }
         try:
-            self.redis_client.lpush("TRADE_SIGNALS", json.dumps(payload))
-            self.redis_client.ltrim("TRADE_SIGNALS", 0, 99)
+            client.lpush("TRADE_SIGNALS", json.dumps(payload))
+            client.ltrim("TRADE_SIGNALS", 0, 99)
             self._pushed_signals[symbol] = now
-            self.log.info(f"📤 Đã đẩy lệnh {data['final']} {symbol} vào Hàng đợi.")
+            store_name = "Redis" if client == self.redis_client else "LocalStore (0% RAM/Quota)"
+            self.log.info(f"📤 Đã đẩy lệnh {data['final']} {symbol} vào Hàng đợi ({store_name}).")
         except Exception as e:
-            self.log.error(f"❌ Lỗi đẩy Redis: {e}")
+            self.log.error(f"❌ Lỗi đẩy Queue: {e}")
 
     def _run_pipeline_sync(self, sym, data):
         final_sig = data.get("final", "WAIT")
