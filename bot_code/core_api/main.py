@@ -34,13 +34,15 @@ log = logging.getLogger("MainAPI")
 app = FastAPI(title="SignalBot v6.1")
 
 REGISTER_TOKEN = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
-try:
-    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-    redis_client.ping()
-except Exception:
-    redis_client = None
+redis_client = None
+if REDIS_URL and any(REDIS_URL.startswith(prefix) for prefix in ("redis://", "rediss://", "unix://")):
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client.ping()
+    except Exception:
+        redis_client = None
 
 BOT_GLOBAL_AUTO = True
 BOT_KILL_SWITCH = False
@@ -93,7 +95,7 @@ def apply_tier(user: User, tier: str):
 #══════════════════════════════════════════════════════════════════
 # ENV & REDIS
 # ══════════════════════════════════════════════════════════════════
-REDIS_URL       = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL       = (os.getenv("REDIS_URL") or "").strip()
 ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "admin123")
 RENDER_URL      = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
 ADMIN_CHAT_ID   = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
@@ -103,16 +105,20 @@ TG_BASE         = "https://api.telegram.org"
 
 from core_api.local_store import local_store
 
-try:
-    _rc_kwargs = {"decode_responses": True}
-    if REDIS_URL.startswith("rediss://"):
-        _rc_kwargs["ssl_cert_reqs"] = "none"
-    redis_client = redis.from_url(REDIS_URL, **_rc_kwargs)
-    redis_client.ping()
-    log.info("Redis OK")
-except Exception as e:
-    redis_client = None
-    log.error("Redis error: %s -> Dùng LocalStore (In-Memory)", e)
+redis_client = None
+if REDIS_URL and any(REDIS_URL.startswith(p) for p in ("redis://", "rediss://", "unix://")):
+    try:
+        _rc_kwargs = {"decode_responses": True}
+        if REDIS_URL.startswith("rediss://"):
+            _rc_kwargs["ssl_cert_reqs"] = "none"
+        redis_client = redis.from_url(REDIS_URL, **_rc_kwargs)
+        redis_client.ping()
+        log.info("🟢 Redis Cloud kết nối OK")
+    except Exception as e:
+        redis_client = None
+        log.warning("⚠️ Lỗi kết nối Redis Cloud: %s -> Tự động chuyển sang LocalStore (0%% Quota/RAM)", e)
+else:
+    log.info("ℹ️ Không khai báo REDIS_URL hợp lệ -> Sử dụng LocalStore In-Memory (0%% Quota/RAM)")
 
 
 def _get_active_redis():
