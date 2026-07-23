@@ -434,7 +434,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
         # NẾU CHƯA CHẠM MỐC TP NÀO, MỚI BẮT ĐẦU DÙNG TƯ DUY AI ĐỂ XÉT NGẮT LỆNH
         if action != "SCALE_OUT":
-            # 🦈 [TẦNG ƯU TIÊN 0.5]: KIỂM TRA BẪY QUÉT THANH KHOẢN CÁ MẶP (LIQUIDITY SWEEP TRAP)
+            # 🦈 [TẦNG ƯU TIÊN 0.5]: KIỂM TRA BẪY QUÉT THANH KHOẢN CÁ MẶP (LIQUIDITY SWEEP & VIRTUAL SL)
             sweep_data = analysis.get("liquidity_sweep", {})
             sw_detected = sweep_data.get("detected", False)
             sw_type = sweep_data.get("type", "NONE") if sw_detected else "NONE"
@@ -442,6 +442,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
             is_sweep_against = (direction == "LONG" and sw_type == "BEARISH_SWEEP") or \
                                (direction == "SHORT" and sw_type == "BULLISH_SWEEP")
+
+            is_sweep_same = (direction == "LONG" and sw_type == "BULLISH_SWEEP") or \
+                            (direction == "SHORT" and sw_type == "BEARISH_SWEEP")
 
             if is_sweep_against:
                 action = "CLOSE_ALL"
@@ -451,12 +454,17 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 reason = (f"CẢNH BÁO CÁ MẶP: Phát hiện bẫy thanh khoản {trap_name} tại giá ${sw_price:.4f} "
                           f"ngược chiều lệnh {direction} đang giữ (PnL: {pnl_pct:+.2f}%) -> Kích hoạt thoát lệnh khẩn cấp để bảo vệ tài sản.")
 
-            # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM)
+            elif is_sweep_same and not in_profit:
+                # MM đang chọc râu quét SL phe ta nhưng nến đã rút chân Reclaim -> Kích hoạt VIRTUAL SL bảo vệ, KHÔNG cắt lỗ ở giá xấu nhất râu!
+                log.info(f"  🛡️ [ANTI-MM VIRTUAL SL] %s: Phát hiện cá mập chọc râu Stop Hunt (%s @ ${sw_price:.4f}). "
+                         f"Nến đã rút chân Reclaim (PnL hiện tại: {pnl_pct:+.2f}%%) -> GIỮ VỊ THẾ ẢO, từ chối cắt lỗ đúng đáy/đỉnh râu!", sym, sw_type)
+
+            # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM VỚI VIRTUAL SL BUFFER)
             elif pnl_pct <= DYNAMIC_SL_LIMIT:
                 action = "CLOSE_ALL"
-                action_type = "CẮT LỖ SỚM"
+                action_type = "CẮT LỖ SỚM (VIRTUAL SL)"
                 emoji = "🚨"
-                reason = f"Trạng thái âm {pnl_pct:.2f}% chạm ngưỡng giới hạn sớm ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Hard Stop bảo toàn tài sản."
+                reason = f"Trạng thái âm {pnl_pct:.2f}% vọt quá ngưỡng Virtual SL an toàn ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Hard Stop bảo toàn tài sản."
 
             # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK)
             elif is_reversal and conf >= 60:
