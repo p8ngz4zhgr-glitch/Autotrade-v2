@@ -4,7 +4,7 @@ import time
 from analyzer.llm_agents import LLMChain
 from core_api.models import AppConfig
 from sqlalchemy.orm import Session
-from core_api.database import SessionLocal
+from core_api.models import SessionLocal, AppConfig
 
 log = logging.getLogger("analyzer.news_agent")
 
