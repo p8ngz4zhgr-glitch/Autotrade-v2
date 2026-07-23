@@ -58,14 +58,18 @@ class SignalBot:
         self._pushed_signals: dict[str, float] = {}
         self._push_cooldown = 90
 
-        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-        try:
-            self.redis_client = redis.from_url(redis_url, socket_connect_timeout=5)
-            self.redis_client.ping()
-            self.log.info("🟢 Redis Queue kết nối OK")
-        except Exception as e:
-            self.log.error("❌ Lỗi kết nối Redis: %s", e)
-            self.redis_client = None
+        redis_url = (os.environ.get("REDIS_URL") or "").strip()
+        self.redis_client = None
+        if redis_url and any(redis_url.startswith(p) for p in ("redis://", "rediss://", "unix://")):
+            try:
+                self.redis_client = redis.from_url(redis_url, socket_connect_timeout=5)
+                self.redis_client.ping()
+                self.log.info("🟢 Redis Queue kết nối OK")
+            except Exception as e:
+                self.log.warning("⚠️ Lỗi kết nối Redis: %s -> Dùng LocalStore", e)
+                self.redis_client = None
+        else:
+            self.log.info("ℹ️ Scanner sử dụng LocalStore Queue (In-Memory)")
 
     def _cleanup(self):
         keys = self.CRYPTO_SYMBOLS + self.STOCK_SYMBOLS
