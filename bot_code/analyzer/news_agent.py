@@ -2,7 +2,6 @@ import logging
 import feedparser
 import time
 from analyzer.llm_agents import LLMChain
-from core_api.models import AppConfig
 from sqlalchemy.orm import Session
 from core_api.models import SessionLocal, AppConfig
 
@@ -65,11 +64,38 @@ def activate_kill_switch():
     db: Session = SessionLocal()
     try:
         cfg = db.query(AppConfig).first()
-        if cfg:
+        if not cfg:
+            cfg = AppConfig(bot_active=False, kill_switch=True)
+            db.add(cfg)
+        else:
             cfg.bot_active = False
-            db.commit()
-            log.critical("🛑 ĐÃ TẮT BOT (bot_active=False) VÌ THIÊN NGA ĐEN!")
+            cfg.kill_switch = True
+        db.commit()
+        log.critical("🛑 ĐÃ TẮT BOT (bot_active=False) VÌ THIÊN NGA ĐEN!")
     except Exception as e:
         log.error(f"Lỗi khi kích hoạt kill switch DB: {e}")
     finally:
         db.close()
+
+def init_default_app_config():
+    """Tự động tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False) nếu chưa có."""
+    db: Session = SessionLocal()
+    try:
+        cfg = db.query(AppConfig).first()
+        if not cfg:
+            cfg = AppConfig(bot_active=True, kill_switch=False)
+            db.add(cfg)
+            db.commit()
+            log.info("✅ Đã khởi tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False).")
+    except Exception as e:
+        log.error(f"Lỗi khi khởi tạo AppConfig mặc định: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+# Tự động khởi tạo cấu hình mặc định khi module được import
+try:
+    init_default_app_config()
+except Exception:
+    pass
+
