@@ -174,6 +174,7 @@ class TelegramBot:
         vol   = data.get("volume_1h", {})
         sml_1h = data.get("sm_liq_1h", {})
         sml_4h = data.get("sm_liq_4h", {})
+        adx_1h = data.get("adx_1h", {})
         lvls  = fibo.get("levels", {})
         conf  = data["confidence"]
         atype = data.get("asset_type", "CRYPTO")
@@ -280,6 +281,7 @@ class TelegramBot:
             bo_line + wh_line + mkt_line + sweep_line + sml_line,
             "",
             "⚡ <b>SMART SIGNALS</b>",
+            "  ├ ADX (1H) : " + str(adx_1h.get("adx", 0)) + " (" + str(adx_1h.get("trend", "WEAK")) + ")",
             "  ├ CVD      : " + CVD_IC.get(cvd_tr,"⚪") + " " + cvd_tr + cvd_div,
             "  ├ Vol      : " + str(vol.get("vol_trend","?")) + " x" + str(vol.get("vol_ratio",1)),
             "  ├ OBV      : " + str(vol.get("obv_trend","?")),
