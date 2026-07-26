@@ -172,6 +172,8 @@ class TelegramBot:
         bo    = data.get("breakout", {})
         wh    = data.get("whale", {})
         vol   = data.get("volume_1h", {})
+        sml_1h = data.get("sm_liq_1h", {})
+        sml_4h = data.get("sm_liq_4h", {})
         lvls  = fibo.get("levels", {})
         conf  = data["confidence"]
         atype = data.get("asset_type", "CRYPTO")
@@ -237,6 +239,9 @@ class TelegramBot:
         bo_line   = ("\n🚨 <b>BREAKOUT</b>: " + str(bo.get("desc",""))
                      if bo.get("type","NONE") != "NONE" else "")
         wh_line   = ("\n" + str(wh.get("desc","")) if wh.get("detected") else "")
+        sml_line  = ("\n🐋 <b>DÒNG TIỀN (1H)</b>: " + str(sml_1h.get("desc", "")) if sml_1h.get("signal", "NONE") != "NONE" else "")
+        if sml_4h.get("signal", "NONE") != "NONE":
+            sml_line += ("\n🐋 <b>DÒNG TIỀN (4H)</b>: " + str(sml_4h.get("desc", "")))
         mkt_line  = ("\n🏛️ " + str(data.get("mkt_note","")) if data.get("mkt_note") else "")
         
         sweep_line = ("\n🔥 <b>BẪY THANH KHOẢN (" + str(sweep.get("type", "")) + ")</b>: Quét râu tại <code>$" + 
@@ -272,7 +277,7 @@ class TelegramBot:
             f"💰 Giá       : <code>${round(data['price'],2)}</code>",
             f"🎯 Độ tin cậy: <b>{conf}%</b> <code>[{conf_bar}]</code>" + stat_note,
             "📊 Khung giờ : " + tf_line,
-            bo_line + wh_line + mkt_line + sweep_line,
+            bo_line + wh_line + mkt_line + sweep_line + sml_line,
             "",
             "⚡ <b>SMART SIGNALS</b>",
             "  ├ CVD      : " + CVD_IC.get(cvd_tr,"⚪") + " " + cvd_tr + cvd_div,
