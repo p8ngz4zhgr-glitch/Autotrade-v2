@@ -50,6 +50,96 @@ class Indicators:
         return vals[-1] if vals else 50.0
 
     @staticmethod
+    def adx(highs: list, lows: list, closes: list, period: int = 14) -> dict:
+        """
+        Calculate Average Directional Index (ADX)
+        Returns: {"adx": float, "plus_di": float, "minus_di": float, "trend": str}
+        """
+        if len(closes) < period * 2:
+            return {"adx": 0, "plus_di": 0, "minus_di": 0, "trend": "WEAK"}
+            
+        tr = [0]
+        plus_dm = [0]
+        minus_dm = [0]
+        
+        for i in range(1, len(closes)):
+            h = highs[i]
+            l = lows[i]
+            pc = closes[i-1]
+            ph = highs[i-1]
+            pl = lows[i-1]
+            
+            tr.append(max(h - l, abs(h - pc), abs(l - pc)))
+            
+            up_move = h - ph
+            down_move = pl - l
+            
+            if up_move > down_move and up_move > 0:
+                plus_dm.append(up_move)
+            else:
+                plus_dm.append(0)
+                
+            if down_move > up_move and down_move > 0:
+                minus_dm.append(down_move)
+            else:
+                minus_dm.append(0)
+                
+        tr_sum = sum(tr[1:period+1])
+        pdm_sum = sum(plus_dm[1:period+1])
+        mdm_sum = sum(minus_dm[1:period+1])
+        
+        smooth_tr = [tr_sum]
+        smooth_pdm = [pdm_sum]
+        smooth_mdm = [mdm_sum]
+        
+        for i in range(period+1, len(closes)):
+            smooth_tr.append(smooth_tr[-1] - (smooth_tr[-1]/period) + tr[i])
+            smooth_pdm.append(smooth_pdm[-1] - (smooth_pdm[-1]/period) + plus_dm[i])
+            smooth_mdm.append(smooth_mdm[-1] - (smooth_mdm[-1]/period) + minus_dm[i])
+            
+        plus_di = []
+        minus_di = []
+        dx = []
+        
+        for i in range(len(smooth_tr)):
+            str_val = smooth_tr[i]
+            spdm_val = smooth_pdm[i]
+            smdm_val = smooth_mdm[i]
+            
+            if str_val == 0:
+                pdi = 0
+                mdi = 0
+            else:
+                pdi = 100 * spdm_val / str_val
+                mdi = 100 * smdm_val / str_val
+                
+            plus_di.append(pdi)
+            minus_di.append(mdi)
+            
+            if pdi + mdi == 0:
+                dx.append(0)
+            else:
+                dx.append(100 * abs(pdi - mdi) / (pdi + mdi))
+                
+        if len(dx) < period:
+            return {"adx": 0, "plus_di": plus_di[-1], "minus_di": minus_di[-1], "trend": "WEAK"}
+            
+        adx_val = sum(dx[:period]) / period
+        for i in range(period, len(dx)):
+            adx_val = ((adx_val * (period - 1)) + dx[i]) / period
+            
+        trend = "STRONG_UP" if adx_val > 25 and plus_di[-1] > minus_di[-1] else \
+                "STRONG_DOWN" if adx_val > 25 and minus_di[-1] > plus_di[-1] else \
+                "WEAK"
+                
+        return {
+            "adx": round(adx_val, 2),
+            "plus_di": round(plus_di[-1], 2),
+            "minus_di": round(minus_di[-1], 2),
+            "trend": trend
+        }
+
+    @staticmethod
     def ema(closes, period) -> float:
         closes = [c for c in closes if c and c > 0]
         if not closes:
@@ -399,7 +489,8 @@ class Indicators:
                  "obv_trend": "NEUTRAL", "pressure": "NEUTRAL",
                  "vol_trend": "NEUTRAL", "poc": 0, "vol_ratio": 1,
                  "buy_pct": 50, "dist_poc": 0, "vwap_signal": "N/A",
-                 "buy_confirm": False, "sell_confirm": False}
+                 "buy_confirm": False, "sell_confirm": False,
+                 "vol_suspicious": False, "vol_zscore": 0}
 
         n = min(len(closes), len(highs), len(lows), len(volumes), len(taker_buy_vols), 50)
         if n < 10:
@@ -411,6 +502,15 @@ class Indicators:
         vol_n = volumes[-n:]
         tbv_n = taker_buy_vols[-n:]
         price = closes[-1]
+        
+        import math
+        vol_mean = sum(vol_n) / n
+        vol_std = math.sqrt(sum((v - vol_mean)**2 for v in vol_n) / n) if n > 0 else 1
+        vol_zscore = (vol_n[-1] - vol_mean) / (vol_std if vol_std > 0 else 1)
+        
+        curr_range = hgh_n[-1] - low_n[-1]
+        avg_range = sum(hgh_n[i] - low_n[i] for i in range(n)) / n if n > 0 else 1
+        vol_suspicious = (vol_zscore > 2.0) and (curr_range < avg_range * 1.2)
 
         # Volume trend
         avg20  = sum(vol_n[-20:]) / 20
@@ -492,6 +592,8 @@ class Indicators:
             "buy_pct":      round(bp, 1),
             "buy_confirm":  buy_confirm,
             "sell_confirm": sell_confirm,
+            "vol_suspicious": vol_suspicious,
+            "vol_zscore": round(vol_zscore, 2),
         }
 
     @staticmethod
@@ -963,44 +1065,48 @@ class Indicators:
         bull_signal = False
         bull_adj = 0
         bull_desc = ""
+        bull_mcp = 0
         if swing_lows:
             last_sl_idx = swing_lows[-1]
             sl_vol = v[last_sl_idx]
             sl_tbv = tbv[last_sl_idx]
             buy_ratio = sl_tbv / sl_vol if sl_vol > 0 else 0.5
             vol_ratio = sl_vol / avg_vol if avg_vol > 0 else 1
-            if vol_ratio >= 1.5 and buy_ratio >= 0.55: # Thanh khoản mua cao ở đáy
+            if vol_ratio >= 1.25 and buy_ratio >= 0.52: # Thanh khoản mua cao ở đáy
                 bull_signal = True
                 bull_adj = 15
-                bull_desc = f"Đáy trước có dòng tiền MUA lớn (Vol {vol_ratio:.1f}x, {buy_ratio*100:.0f}% Buy)"
+                bull_mcp = l[last_sl_idx]
+                bull_desc = f"Đáy trước có dòng tiền MUA lớn (Vol {vol_ratio:.1f}x, {buy_ratio*100:.0f}% Buy, MCP: {bull_mcp})"
 
         # Check last swing high for big boy selling (high volume, low taker buy)
         bear_signal = False
         bear_adj = 0
         bear_desc = ""
+        bear_mcp = 0
         if swing_highs:
             last_sh_idx = swing_highs[-1]
             sh_vol = v[last_sh_idx]
             sh_tbv = tbv[last_sh_idx]
             sell_ratio = (sh_vol - sh_tbv) / sh_vol if sh_vol > 0 else 0.5
             vol_ratio = sh_vol / avg_vol if avg_vol > 0 else 1
-            if vol_ratio >= 1.5 and sell_ratio >= 0.55: # Thanh khoản bán cao ở đỉnh
+            if vol_ratio >= 1.25 and sell_ratio >= 0.52: # Thanh khoản bán cao ở đỉnh
                 bear_signal = True
                 bear_adj = -15
-                bear_desc = f"Đỉnh trước có dòng tiền BÁN lớn (Vol {vol_ratio:.1f}x, {sell_ratio*100:.0f}% Sell)"
+                bear_mcp = h[last_sh_idx]
+                bear_desc = f"Đỉnh trước có dòng tiền BÁN lớn (Vol {vol_ratio:.1f}x, {sell_ratio*100:.0f}% Sell, MCP: {bear_mcp})"
 
         if bull_signal and not bear_signal:
-            return {"signal": "BULL", "score_adj": bull_adj, "desc": bull_desc}
+            return {"signal": "BULL", "score_adj": bull_adj, "desc": bull_desc, "mcp_price": bull_mcp, "bull_mcp": bull_mcp, "bear_mcp": bear_mcp}
         elif bear_signal and not bull_signal:
-            return {"signal": "BEAR", "score_adj": bear_adj, "desc": bear_desc}
+            return {"signal": "BEAR", "score_adj": bear_adj, "desc": bear_desc, "mcp_price": bear_mcp, "bull_mcp": bull_mcp, "bear_mcp": bear_mcp}
         elif bull_signal and bear_signal:
             # Both exists, check which one is more recent
             if swing_lows[-1] > swing_highs[-1]:
-                return {"signal": "BULL", "score_adj": bull_adj, "desc": bull_desc}
+                return {"signal": "BULL", "score_adj": bull_adj, "desc": bull_desc, "mcp_price": bull_mcp, "bull_mcp": bull_mcp, "bear_mcp": bear_mcp}
             else:
-                return {"signal": "BEAR", "score_adj": bear_adj, "desc": bear_desc}
+                return {"signal": "BEAR", "score_adj": bear_adj, "desc": bear_desc, "mcp_price": bear_mcp, "bull_mcp": bull_mcp, "bear_mcp": bear_mcp}
 
-        return EMPTY
+        return {"signal": "NONE", "score_adj": 0, "desc": "Không có vùng thanh khoản rõ ràng", "bull_mcp": bull_mcp, "bear_mcp": bear_mcp}
 
     @staticmethod
     def order_flow_fvg(highs: list, lows: list, closes: list, lookback: int = 50) -> dict:
