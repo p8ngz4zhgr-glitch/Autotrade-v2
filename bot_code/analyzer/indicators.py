@@ -140,6 +140,57 @@ class Indicators:
         }
 
     @staticmethod
+    def chop(highs: list, lows: list, closes: list, period: int = 14) -> dict:
+        """
+        Calculate Choppiness Index (CHOP)
+        CHOP = 100 * log10( Sum(TrueRange, period) / ( MaxHigh(period) - MinLow(period) ) ) / log10(period)
+        """
+        if len(closes) < period + 1:
+            return {"chop": 50.0, "market_state": "NEUTRAL"}
+            
+        tr = []
+        for i in range(1, len(closes)):
+            h = highs[i]
+            l = lows[i]
+            pc = closes[i-1]
+            tr.append(max(h - l, abs(h - pc), abs(l - pc)))
+            
+        if len(tr) < period:
+            return {"chop": 50.0, "market_state": "NEUTRAL"}
+            
+        sum_tr = sum(tr[-period:])
+        
+        window_highs = highs[-period:]
+        window_lows = lows[-period:]
+        
+        max_high = max(window_highs)
+        min_low = min(window_lows)
+        
+        range_high_low = max_high - min_low
+        if range_high_low == 0:
+            return {"chop": 50.0, "market_state": "NEUTRAL"}
+            
+        try:
+            val = sum_tr / range_high_low
+            if val <= 0:
+                return {"chop": 50.0, "market_state": "NEUTRAL"}
+            chop_val = 100 * math.log10(val) / math.log10(period)
+        except Exception:
+            return {"chop": 50.0, "market_state": "NEUTRAL"}
+        
+        if chop_val > 61.8:
+            state = "CHOPPY"
+        elif chop_val < 38.2:
+            state = "TRENDING"
+        else:
+            state = "NEUTRAL"
+            
+        return {
+            "chop": round(chop_val, 2),
+            "market_state": state
+        }
+
+    @staticmethod
     def ema(closes, period) -> float:
         closes = [c for c in closes if c and c > 0]
         if not closes:
