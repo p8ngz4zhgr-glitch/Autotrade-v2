@@ -70,6 +70,7 @@ class SignalEngine:
         mstruct = self.ind.market_structure(closes, highs, lows)
         elliott = self.ind.elliott_wave_analysis(closes, highs, lows)
         fvg = self.ind.order_flow_fvg(highs, lows, closes)
+        sm_liq = self.ind.smart_money_liquidity(closes, highs, lows, vols, tbvols)
 
         ema20  = self.ind.ema(closes, 20)
         ema50  = self.ind.ema(closes, 50)
@@ -204,6 +205,10 @@ class SignalEngine:
         # 12. Elliott Wave (weight 12)
         score += elliott.get("score_adj", 0)
         score += fvg.get("score_adj", 0)
+
+        # 13. Smart Money Liquidity (weight 15)
+        score += sm_liq.get("score_adj", 0)
+        
         score = max(5, min(95, score))
 
         # ══════════════════════════════════════════════════════
@@ -215,6 +220,12 @@ class SignalEngine:
         elif bo["type"] == "BREAKOUT_DOWN" and bo["strength"] >= 70:
             direction = "SHORT"
             score     = min(score, 28)
+        elif interval in ("1h", "4h") and sm_liq.get("signal") == "BULL":
+            direction = "LONG"
+            score     = max(score, 70)
+        elif interval in ("1h", "4h") and sm_liq.get("signal") == "BEAR":
+            direction = "SHORT"
+            score     = min(score, 30)
         elif whale.get("detected") and whale["type"] == "WHALE_BUY":
             direction = "LONG"
             score     = max(score, 70)
@@ -254,7 +265,7 @@ class SignalEngine:
             "breakout": bo, "whale": whale, "volume": vol_d,
             "candle": candle, "market_structure": mstruct,
             "elliott": elliott,
-            "fvg": fvg,
+            "fvg": fvg, "sm_liq": sm_liq,
             "atr": round(atr, 4), "atr_pct": round(atr_pct, 3),
             "is_trending": is_trending, "price": price,
             "high": highs, "low": lows, "close": closes
@@ -444,6 +455,8 @@ class SignalEngine:
         fi_1h  = results.get("1h", {}).get("fibo", {})
         vol_1h = results.get("1h", {}).get("volume", {})
         vol_4h = results.get("4h", {}).get("volume", {})
+        sml_1h = results.get("1h", {}).get("sm_liq", {})
+        sml_4h = results.get("4h", {}).get("sm_liq", {})
 
         # [NEW v6.9] Tương quan BTC-altcoin đo bằng returns thật (Pearson),
         # không chỉ dựa vào luật cứng của HMM worker.
@@ -876,6 +889,11 @@ class SignalEngine:
             
             if bo_1h.get("type") == "BREAKOUT_UP": likelihood *= 1.3
             
+            if sml_1h.get("signal") == "BULL": likelihood *= 1.3
+            if sml_4h.get("signal") == "BULL": likelihood *= 1.4
+            if sml_1h.get("signal") == "BEAR": likelihood *= 0.7
+            if sml_4h.get("signal") == "BEAR": likelihood *= 0.6
+            
             if ob_data.get("detected") and ob_data.get("imbalance", 0) > 1.5: likelihood *= 1.15
             elif ob_data.get("detected") and ob_data.get("imbalance", 0) < -1.5: likelihood *= 0.85
             
@@ -957,6 +975,11 @@ class SignalEngine:
             elif wh_1h.get("detected") and wh_1h.get("type") == "WHALE_BUY": likelihood *= 0.6
             
             if bo_1h.get("type") == "BREAKOUT_DOWN": likelihood *= 1.3
+            
+            if sml_1h.get("signal") == "BEAR": likelihood *= 1.3
+            if sml_4h.get("signal") == "BEAR": likelihood *= 1.4
+            if sml_1h.get("signal") == "BULL": likelihood *= 0.7
+            if sml_4h.get("signal") == "BULL": likelihood *= 0.6
             
             if ob_data.get("detected") and ob_data.get("imbalance", 0) < -1.5: likelihood *= 1.15
             elif ob_data.get("detected") and ob_data.get("imbalance", 0) > 1.5: likelihood *= 0.85
@@ -1050,7 +1073,7 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.55   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
+            MIN_P_WIN = 0.60   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
             if p_win < MIN_P_WIN:
                 log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
                             p_win * 100, MIN_P_WIN * 100)
@@ -1137,6 +1160,7 @@ class SignalEngine:
             "wyckoff": wy_4h, "fibo": fi_1h, "cvd": cvd_1h,
             "breakout": bo_1h, "whale": wh_1h,
             "volume_1h": vol_1h, "volume_4h": vol_4h,
+            "sm_liq_1h": sml_1h, "sm_liq_4h": sml_4h,
             "candle": candle_summary,
             "elliott_4h": results.get("4h", {}).get("elliott", {}),
             "market_structure_1h": ms_1h,
