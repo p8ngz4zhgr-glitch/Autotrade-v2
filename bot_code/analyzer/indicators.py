@@ -926,6 +926,83 @@ class Indicators:
 
 
     @staticmethod
+    def smart_money_liquidity(closes: list, highs: list, lows: list, volumes: list, taker_buy_vols: list, lookback: int = 60) -> dict:
+        EMPTY = {"signal": "NONE", "score_adj": 0, "desc": "Không có vùng thanh khoản rõ ràng"}
+        n = min(len(closes), len(highs), len(lows), len(volumes), lookback)
+        if n < 20: return EMPTY
+
+        h = highs[-n:]
+        l = lows[-n:]
+        v = volumes[-n:]
+        tbv = taker_buy_vols[-n:] if taker_buy_vols else [vi * 0.5 for vi in v]
+
+        def find_swings(arr, mode="high", min_pct=0.005):
+            swings = []
+            for i in range(2, len(arr) - 2):
+                if mode == "high":
+                    if arr[i] > arr[i-1] and arr[i] > arr[i-2] and arr[i] > arr[i+1] and arr[i] > arr[i+2]:
+                        prev_min = min(arr[max(0, i-5):i]) if i > 0 else arr[0]
+                        if prev_min > 0 and (arr[i] - prev_min) / prev_min >= min_pct:
+                            swings.append(i)
+                else:
+                    if arr[i] < arr[i-1] and arr[i] < arr[i-2] and arr[i] < arr[i+1] and arr[i] < arr[i+2]:
+                        prev_max = max(arr[max(0, i-5):i]) if i > 0 else arr[0]
+                        if prev_max > 0 and (prev_max - arr[i]) / prev_max >= min_pct:
+                            swings.append(i)
+            return swings
+
+        swing_highs = find_swings(h, "high")
+        swing_lows  = find_swings(l, "low")
+
+        if not swing_highs and not swing_lows:
+            return EMPTY
+
+        avg_vol = sum(v) / len(v) if v else 1
+
+        # Check last swing low for big boy buying (high volume, high taker buy)
+        bull_signal = False
+        bull_adj = 0
+        bull_desc = ""
+        if swing_lows:
+            last_sl_idx = swing_lows[-1]
+            sl_vol = v[last_sl_idx]
+            sl_tbv = tbv[last_sl_idx]
+            buy_ratio = sl_tbv / sl_vol if sl_vol > 0 else 0.5
+            vol_ratio = sl_vol / avg_vol if avg_vol > 0 else 1
+            if vol_ratio >= 1.5 and buy_ratio >= 0.55: # Thanh khoản mua cao ở đáy
+                bull_signal = True
+                bull_adj = 15
+                bull_desc = f"Đáy trước có dòng tiền MUA lớn (Vol {vol_ratio:.1f}x, {buy_ratio*100:.0f}% Buy)"
+
+        # Check last swing high for big boy selling (high volume, low taker buy)
+        bear_signal = False
+        bear_adj = 0
+        bear_desc = ""
+        if swing_highs:
+            last_sh_idx = swing_highs[-1]
+            sh_vol = v[last_sh_idx]
+            sh_tbv = tbv[last_sh_idx]
+            sell_ratio = (sh_vol - sh_tbv) / sh_vol if sh_vol > 0 else 0.5
+            vol_ratio = sh_vol / avg_vol if avg_vol > 0 else 1
+            if vol_ratio >= 1.5 and sell_ratio >= 0.55: # Thanh khoản bán cao ở đỉnh
+                bear_signal = True
+                bear_adj = -15
+                bear_desc = f"Đỉnh trước có dòng tiền BÁN lớn (Vol {vol_ratio:.1f}x, {sell_ratio*100:.0f}% Sell)"
+
+        if bull_signal and not bear_signal:
+            return {"signal": "BULL", "score_adj": bull_adj, "desc": bull_desc}
+        elif bear_signal and not bull_signal:
+            return {"signal": "BEAR", "score_adj": bear_adj, "desc": bear_desc}
+        elif bull_signal and bear_signal:
+            # Both exists, check which one is more recent
+            if swing_lows[-1] > swing_highs[-1]:
+                return {"signal": "BULL", "score_adj": bull_adj, "desc": bull_desc}
+            else:
+                return {"signal": "BEAR", "score_adj": bear_adj, "desc": bear_desc}
+
+        return EMPTY
+
+    @staticmethod
     def order_flow_fvg(highs: list, lows: list, closes: list, lookback: int = 50) -> dict:
         EMPTY = {"fvg_type": "NONE", "gap_top": 0, "gap_bottom": 0, "score_adj": 0, "bull_count": 0, "bear_count": 0}
         n = min(len(highs), len(lows), len(closes), lookback)
