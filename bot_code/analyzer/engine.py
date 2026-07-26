@@ -89,16 +89,14 @@ class SignalEngine:
             atr = price * 0.01
         atr_pct = atr / price * 100
 
-        # ── Trend strength (ADX simplified) ─────────────────────
-        if len(closes) >= 14:
-            changes = [abs(closes[i] - closes[i-1]) for i in range(-14, 0)]
-            avg_change = sum(changes) / 14
-            trend_strength = avg_change / (atr if atr > 0 else 1)
-            is_trending = trend_strength > 0.5
-        else:
-            is_trending = True
-            trend_strength = 1.0
-
+        # ── Trend strength (ADX based) ─────────────────────
+        adx_data = self.ind.adx(highs, lows, closes)
+        adx_val = adx_data.get("adx", 0)
+        adx_trend = adx_data.get("trend", "WEAK")
+        
+        is_trending = adx_val > 25
+        trend_strength = adx_val / 25.0  # normalize
+        
         # ══════════════════════════════════════════════════════
         # SCORING
         # ══════════════════════════════════════════════════════
@@ -267,7 +265,7 @@ class SignalEngine:
             "elliott": elliott,
             "fvg": fvg, "sm_liq": sm_liq,
             "atr": round(atr, 4), "atr_pct": round(atr_pct, 3),
-            "is_trending": is_trending, "price": price,
+            "is_trending": is_trending, "adx_data": adx_data, "price": price,
             "high": highs, "low": lows, "close": closes
         }
 
@@ -457,6 +455,8 @@ class SignalEngine:
         vol_4h = results.get("4h", {}).get("volume", {})
         sml_1h = results.get("1h", {}).get("sm_liq", {})
         sml_4h = results.get("4h", {}).get("sm_liq", {})
+        adx_1h = results.get("1h", {}).get("adx_data", {})
+        adx_4h = results.get("4h", {}).get("adx_data", {})
 
         # [NEW v6.9] Tương quan BTC-altcoin đo bằng returns thật (Pearson),
         # không chỉ dựa vào luật cứng của HMM worker.
@@ -743,6 +743,7 @@ class SignalEngine:
                 if k_sl < price and ((price - k_sl) / price * 100) <= sl_atr_pct * 1.8:
                     sl = round(k_sl, 2)
                     log.info("  🛡️ Tối ưu SL LONG giấu dưới Kalman + Buffer Anti-MM: %.4f", sl)
+                    
             if sweep_data.get("detected") and sweep_data.get("type") == "BULLISH_SWEEP":
                 sw_p = sweep_data.get("price", 0.0)
                 if sw_p > 0 and sw_p < price:
@@ -751,6 +752,14 @@ class SignalEngine:
                     if sw_sl < price and ((price - sw_sl) / price * 100) <= sl_atr_pct * 2.0:
                         sl = sw_sl
                         log.info("  🛡️ [ANTI-MM] Tối ưu SL LONG giấu ngoài râu Bullish Sweep (+0.35%% buffer): %.4f", sl)
+                        
+            # Tối ưu SL giấu dưới Mức Cản Phá (MCP) từ Smart Money Liquidity
+            sml_mcp = sml_4h.get("mcp_price", 0) or sml_1h.get("mcp_price", 0)
+            if sml_mcp > 0 and sml_mcp < price:
+                mcp_sl = round(sml_mcp * 0.9965, 2)
+                if mcp_sl < price and ((price - mcp_sl) / price * 100) <= sl_atr_pct * 2.2:
+                    sl = mcp_sl
+                    log.info("  🛡️ [SMC] Tối ưu SL LONG giấu ngoài MCP (Thanh khoản Mua): %.4f", sl)
 
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
@@ -772,6 +781,7 @@ class SignalEngine:
                 if k_sl > price and ((k_sl - price) / price * 100) <= sl_atr_pct * 1.8:
                     sl = round(k_sl, 2)
                     log.info("  🛡️ Tối ưu SL SHORT giấu trên Kalman + Buffer Anti-MM: %.4f", sl)
+                    
             if sweep_data.get("detected") and sweep_data.get("type") == "BEARISH_SWEEP":
                 sw_p = sweep_data.get("price", 0.0)
                 if sw_p > 0 and sw_p > price:
@@ -780,6 +790,14 @@ class SignalEngine:
                     if sw_sl > price and ((sw_sl - price) / price * 100) <= sl_atr_pct * 2.0:
                         sl = sw_sl
                         log.info("  🛡️ [ANTI-MM] Tối ưu SL SHORT giấu ngoài râu Bearish Sweep (+0.35%% buffer): %.4f", sl)
+                        
+            # Tối ưu SL giấu trên Mức Cản Phá (MCP) từ Smart Money Liquidity
+            sml_mcp = sml_4h.get("mcp_price", 0) or sml_1h.get("mcp_price", 0)
+            if sml_mcp > 0 and sml_mcp > price:
+                mcp_sl = round(sml_mcp * 1.0035, 2)
+                if mcp_sl > price and ((mcp_sl - price) / price * 100) <= sl_atr_pct * 2.2:
+                    sl = mcp_sl
+                    log.info("  🛡️ [SMC] Tối ưu SL SHORT giấu ngoài MCP (Thanh khoản Bán): %.4f", sl)
 
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
@@ -805,6 +823,15 @@ class SignalEngine:
                 tp2 = atr_tp2
             if tp1 <= price: tp1 = atr_tp1
             if tp2 <= tp1: tp2 = round(tp1 * 1.015, 2)
+            
+            # Tối ưu TP LONG dội ngược từ MCP Bán (Thanh khoản Bán)
+            sml_bear_mcp = sml_4h.get("bear_mcp", 0) or sml_1h.get("bear_mcp", 0)
+            if sml_bear_mcp > price and sml_bear_mcp < tp2:
+                # Nếu MCP Bán nằm giữa Price và TP2, ta dời TP2 xuống ngay dưới MCP Bán
+                tp2 = round(sml_bear_mcp * 0.9985, 2)
+                log.info("  🎯 [SMC] Tối ưu TP2 LONG ngay dưới MCP Bán: %.4f", tp2)
+                if tp1 >= tp2:
+                    tp1 = round(price + (tp2 - price) * 0.5, 2)
 
         elif final == "SHORT":
             if tp2 >= tp1:
@@ -812,6 +839,15 @@ class SignalEngine:
                 tp2 = atr_tp2_s
             if tp1 >= price: tp1 = atr_tp1_s
             if tp2 >= tp1: tp2 = round(tp1 * 0.985, 2)
+            
+            # Tối ưu TP SHORT dội ngược từ MCP Mua (Thanh khoản Mua)
+            sml_bull_mcp = sml_4h.get("bull_mcp", 0) or sml_1h.get("bull_mcp", 0)
+            if sml_bull_mcp > 0 and sml_bull_mcp < price and sml_bull_mcp > tp2:
+                # Nếu MCP Mua nằm giữa Price và TP2, ta dời TP2 lên ngay trên MCP Mua
+                tp2 = round(sml_bull_mcp * 1.0015, 2)
+                log.info("  🎯 [SMC] Tối ưu TP2 SHORT ngay trên MCP Mua: %.4f", tp2)
+                if tp1 <= tp2:
+                    tp1 = round(price - (price - tp2) * 0.5, 2)
 
         rr_ratio = round(tp1_pct / sl_atr_pct, 2) if sl_atr_pct > 0 else 2.0
 
@@ -877,6 +913,11 @@ class SignalEngine:
         FUNDING_DANGER_PCT  = 0.10    # "quá đông" — chặn cứng, hạ về WAIT bất kể EV
 
         if final == "LONG":
+            if adx_1h.get("trend") == "STRONG_UP": likelihood *= 1.2
+            elif adx_1h.get("trend") == "WEAK": likelihood *= 0.8
+            if adx_4h.get("trend") == "STRONG_UP": likelihood *= 1.3
+            elif adx_4h.get("trend") == "WEAK": likelihood *= 0.8
+            
             if cvd_tr == "BULLISH": likelihood *= 1.3
             elif cvd_tr == "BULLISH_DIV": likelihood *= 1.5
             elif cvd_tr in ("BEARISH", "BEARISH_DIV"): likelihood *= 0.6
@@ -964,6 +1005,11 @@ class SignalEngine:
                                 "-> vẫn giảm độ tin cậy LONG theo hướng an toàn.", symbol)
 
         elif final == "SHORT":
+            if adx_1h.get("trend") == "STRONG_DOWN": likelihood *= 1.2
+            elif adx_1h.get("trend") == "WEAK": likelihood *= 0.8
+            if adx_4h.get("trend") == "STRONG_DOWN": likelihood *= 1.3
+            elif adx_4h.get("trend") == "WEAK": likelihood *= 0.8
+            
             if cvd_tr == "BEARISH": likelihood *= 1.3
             elif cvd_tr == "BEARISH_DIV": likelihood *= 1.5
             elif cvd_tr in ("BULLISH", "BULLISH_DIV"): likelihood *= 0.6
@@ -1161,6 +1207,7 @@ class SignalEngine:
             "breakout": bo_1h, "whale": wh_1h,
             "volume_1h": vol_1h, "volume_4h": vol_4h,
             "sm_liq_1h": sml_1h, "sm_liq_4h": sml_4h,
+            "adx_1h": adx_1h, "adx_4h": adx_4h,
             "candle": candle_summary,
             "elliott_4h": results.get("4h", {}).get("elliott", {}),
             "market_structure_1h": ms_1h,
