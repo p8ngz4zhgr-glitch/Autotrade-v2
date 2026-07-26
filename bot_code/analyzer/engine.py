@@ -94,7 +94,12 @@ class SignalEngine:
         adx_val = adx_data.get("adx", 0)
         adx_trend = adx_data.get("trend", "WEAK")
         
-        is_trending = adx_val > 25
+        # ── Choppiness Index (CHOP based) ──────────────────
+        chop_data = self.ind.chop(highs, lows, closes)
+        chop_val = chop_data.get("chop", 50.0)
+        chop_state = chop_data.get("market_state", "NEUTRAL")
+        
+        is_trending = adx_val > 25 and chop_state != "CHOPPY"
         trend_strength = adx_val / 25.0  # normalize
         
         # ══════════════════════════════════════════════════════
@@ -115,27 +120,36 @@ class SignalEngine:
             elif rsi_v > 55: score -= 8
 
         # 2. EMA Stack (weight 12)
-        if ema_bull:   score += 12
-        elif ema_bear: score -= 12
-        elif price > ema20:  score += 4
-        elif price < ema20:  score -= 4
+        if chop_state == "CHOPPY":
+            # Giảm tác động của EMA Stack khi đi ngang để tránh nhiễu
+            if ema_bull:   score += 3
+            elif ema_bear: score -= 3
+            elif price > ema20:  score += 1
+            elif price < ema20:  score -= 1
+        else:
+            if ema_bull:   score += 12
+            elif ema_bear: score -= 12
+            elif price > ema20:  score += 4
+            elif price < ema20:  score -= 4
 
         # 3. MACD (weight 8)
         hist = macd_d.get("hist", 0)
+        macd_factor = 0.4 if chop_state == "CHOPPY" else 1.0 # Giảm tác động MACD khi đi ngang phân phối
         if macd_d["cross"] == "BULL_CROSS" and hist > 0:
-            score += 8
+            score += 8 * macd_factor
         elif macd_d["cross"] == "BEAR_CROSS" and hist < 0:
-            score -= 8
+            score -= 8 * macd_factor
         elif macd_d["cross"] == "BULL_CROSS":
-            score += 4
+            score += 4 * macd_factor
         elif macd_d["cross"] == "BEAR_CROSS":
-            score -= 4
+            score -= 4 * macd_factor
 
         # 4. Bollinger Bands (weight 8)
-        if bb["pct"] < 15:   score += 8
-        elif bb["pct"] < 30: score += 4
-        elif bb["pct"] > 85: score -= 8
-        elif bb["pct"] > 70: score -= 4
+        bb_mult = 1.5 if chop_state == "CHOPPY" else 1.0 # Tăng độ nhạy BB khi chuyển sang đánh biên (Mean Reversion)
+        if bb["pct"] < 15:   score += 8 * bb_mult
+        elif bb["pct"] < 30: score += 4 * bb_mult
+        elif bb["pct"] > 85: score -= 8 * bb_mult
+        elif bb["pct"] > 70: score -= 4 * bb_mult
         if bb.get("squeeze"):
             if ema_bull: score += 6
             elif ema_bear: score -= 6
@@ -175,12 +189,13 @@ class SignalEngine:
         # 9. Stochastic RSI (weight 8)
         stoch = self.ind.stoch_rsi(closes)
         stoch_adj = stoch.get("score_adj", 0)
+        stoch_mult = 1.5 if chop_state == "CHOPPY" else 1.0 # Tăng độ nhạy Stoch RSI khi đi ngang phân phối
         if abs(stoch_adj) >= 10:
             if ((stoch_adj > 0 and rsi_v < 50) or
                 (stoch_adj < 0 and rsi_v > 50)):
-                score += stoch_adj * 0.8
+                score += stoch_adj * 0.8 * stoch_mult
             else:
-                score += stoch_adj * 0.4
+                score += stoch_adj * 0.4 * stoch_mult
 
         # 10. Candlestick Patterns (weight 12)
         # Mô hình nến kinh điển — bổ sung tín hiệu kỹ thuật vi mô
@@ -265,7 +280,7 @@ class SignalEngine:
             "elliott": elliott,
             "fvg": fvg, "sm_liq": sm_liq,
             "atr": round(atr, 4), "atr_pct": round(atr_pct, 3),
-            "is_trending": is_trending, "adx_data": adx_data, "price": price,
+            "is_trending": is_trending, "adx_data": adx_data, "chop_data": chop_data, "price": price,
             "high": highs, "low": lows, "close": closes
         }
 
@@ -665,6 +680,37 @@ class SignalEngine:
                     conf = round(min(95, conf + 15.0), 1)
 
         # ══════════════════════════════════════════════════════════
+        # L2 ORDER BOOK IMBALANCE & LIQUIDITY WALL FILTER
+        # ══════════════════════════════════════════════════════════
+        if ob_data.get("detected"):
+            ratio = ob_data.get("ratio", 1.0)
+            imbalance = ob_data.get("imbalance", 0.0)
+            resist_wall = ob_data.get("resist_wall", 0.0)
+            support_wall = ob_data.get("support_wall", 0.0)
+            
+            # 1. Lọc LỆNH LONG
+            if final == "LONG":
+                # Chặn LONG nếu có một bức tường BÁN khổng lồ ngay phía trên trong phạm vi 1.2%
+                if resist_wall > 0 and (price < resist_wall <= price * 1.012):
+                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh LONG vì có Tường Bán Khổng Lồ (${resist_wall:.4f}, USD: {ob_data.get('resist_wall_usd', 0):,.0f}) ngay phía trên (cách {((resist_wall - price)/price*100):.2f}%).")
+                    final = "WAIT"
+                # Hoặc mất cân đối sổ lệnh thiên hẳn về phe Bán (Imbalance cực sâu)
+                elif imbalance < -0.6 or ratio < 0.35:
+                    log.warning(f"⛔ FILTER (L2 IMBALANCE): Chặn lệnh LONG do Sổ lệnh lệch bán cực mạnh (Imbalance: {imbalance:.2f}, Ratio: {ratio:.2f}).")
+                    final = "WAIT"
+                    
+            # 2. Lọc LỆNH SHORT
+            elif final == "SHORT":
+                # Chặn SHORT nếu có một bức tường MUA lớn ngay phía dưới trong phạm vi 1.2%
+                if support_wall > 0 and (price * 0.988 <= support_wall < price):
+                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh SHORT vì có Tường Mua Khổng Lồ (${support_wall:.4f}, USD: {ob_data.get('support_wall_usd', 0):,.0f}) ngay phía dưới (cách {((price - support_wall)/price*100):.2f}%).")
+                    final = "WAIT"
+                # Hoặc mất cân đối sổ lệnh thiên hẳn về phe Mua (Imbalance cực cao)
+                elif imbalance > 0.6 or ratio > 2.8:
+                    log.warning(f"⛔ FILTER (L2 IMBALANCE): Chặn lệnh SHORT do Sổ lệnh lệch mua cực mạnh (Imbalance: {imbalance:.2f}, Ratio: {ratio:.2f}).")
+                    final = "WAIT"
+
+        # ══════════════════════════════════════════════════════════
         # 2.6. [NEW v6.11] XÁC NHẬN ĐA KHUNG: 4H QUYẾT XU HƯỚNG LỚN,
         # 15M TÌM ĐIỂM VÀO THEO ĐÚNG XU HƯỚNG ĐÓ
         # ──────────────────────────────────────────────────────────
@@ -694,10 +740,22 @@ class SignalEngine:
         atr_1h     = results.get("1h", {}).get("atr", price * 0.01)
         atr_pct_1h = results.get("1h", {}).get("atr_pct", 1.0)
         
-        # A. Hệ số nhân động dựa trên HMM Regime
-        atr_multiplier = 2.0  # Mức chuẩn cho Crypto (Trend Following)
+        # A. Hệ số nhân động dựa trên HMM Regime & CHOP
+        # Dynamic Target Scaling: Tự động điều chỉnh khoảng cách TP/SL dựa trên chỉ số Choppiness Index (CHOP)
+        chop_1h = results.get("1h", {}).get("chop_data", {})
+        chop_val_1h = chop_1h.get("chop", 50.0)
+        
+        volatility_scaling_factor = 1.0
+        if chop_val_1h > 61.8:
+            volatility_scaling_factor = 0.8  # Giảm 20% khoảng cách mục tiêu để dễ khớp khi đi ngang phân phối
+            log.info("  📊 [DYNAMIC SCALING] CHOP = %.1f (CHOPPY) -> Thu nhỏ khoảng cách TP/SL (x0.8) để dễ khớp lệnh.", chop_val_1h)
+        elif chop_val_1h < 38.2:
+            volatility_scaling_factor = 1.25 # Nới rộng 25% khoảng cách mục tiêu để tối đa hóa trend
+            log.info("  📊 [DYNAMIC SCALING] CHOP = %.1f (TRENDING) -> Nới rộng khoảng cách TP/SL (x1.25) để gồng lời tốt hơn.", chop_val_1h)
+
+        atr_multiplier = 2.0 * volatility_scaling_factor  # Mức chuẩn cho Crypto (Trend Following)
         if hmm_regime == "SIDEWAYS":
-            atr_multiplier = 2.5  # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu
+            atr_multiplier = 2.5 * volatility_scaling_factor  # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu
 
         # [NEW v6.11] LỊCH TIN CPI/PPI/NFP — chỉ áp dụng cho Crypto/Vàng (đúng
         # yêu cầu, không quét toàn bộ lịch kinh tế). Trong vùng ảnh hưởng tin:
@@ -720,8 +778,8 @@ class SignalEngine:
         mm_noise_buffer_pct = max(0.3, min(0.6, atr_pct_1h * 0.35))
         
         # C. Tỷ lệ R:R động
-        tp1_pct    = sl_atr_pct * 1.5  # Tối thiểu R:R 1:1.5 cho TP1
-        tp2_pct    = sl_atr_pct * 3.0  # R:R 1:3 cho TP2
+        tp1_pct    = sl_atr_pct * 1.5 * volatility_scaling_factor  # Tối thiểu R:R 1:1.5 cho TP1
+        tp2_pct    = sl_atr_pct * 3.0 * volatility_scaling_factor  # R:R 1:3 cho TP2
         
         fibo4l     = results.get("4h", {}).get("fibo", {}).get("levels", {})
 
