@@ -336,7 +336,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             except: pass
         
         # Chạy ngầm hàm quản trị vị thế động
-        dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage)
+        dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage, redis_client=redis_client)
         
         if dynamic_status.get("action") in ("BREAKEVEN", "TRAILING_SL"):
             target_lvl = dynamic_status.get("level", 1)
@@ -374,6 +374,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 try: 
                     redis_client.delete(be_key)
                     redis_client.delete(f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}")
+                    redis_client.delete(f"PEAK_PRICE_{sym}_{direction}")
                 except: pass
             return  
 
