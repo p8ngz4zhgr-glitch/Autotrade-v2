@@ -564,7 +564,7 @@ class BingXExchange:
     # ════════════════════════════════════════════════════════════════════
     # CƠ CHẾ LỌC NHIỄU, KÉO SL HÒA VỐN SỚM (EARLY BREAKEVEN) VÀ GỒNG LÃI
     # ════════════════════════════════════════════════════════════════════
-    def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5) -> dict:
+    def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5, redis_client=None) -> dict:
         open_positions = self.get_open_positions(symbol)
         if not open_positions:
             return {"action": "NONE", "msg": "Không có vị thế mở."}
@@ -670,6 +670,63 @@ class BingXExchange:
                             "msg": f"Đã dời SL về {target_sl} khi đi được 50% chặng TP{i+1}."
                         }
 
+            # 1.5. CHANDELIER EXIT TRAILING STOP LOSS (ATR)
+            atr_val = float(analysis_result.get("atr", entry_price * 0.015))
+            peak_key = f"PEAK_PRICE_{symbol}_{direction}"
+            peak_price = entry_price
+            
+            if redis_client:
+                try:
+                    cached_peak = redis_client.get(peak_key)
+                    if cached_peak:
+                        peak_price = float(cached_peak)
+                    else:
+                        peak_price = entry_price
+                        redis_client.setex(peak_key, 86400, str(peak_price))
+                except Exception as e:
+                    log.warning("⚠️ Lỗi truy xuất peak price từ Redis: %s", e)
+                
+                if direction == "LONG":
+                    if current_price > peak_price:
+                        peak_price = current_price
+                        try: redis_client.setex(peak_key, 86400, str(peak_price))
+                        except: pass
+                    
+                    chandelier_sl = peak_price - 2.5 * atr_val
+                    update_threshold = entry_price * 0.0015
+                    if (chandelier_sl > current_sl + update_threshold) and (chandelier_sl < current_price):
+                        remaining_tps = [p for p in tp_list if p > current_price]
+                        next_tp = remaining_tps[0] if remaining_tps else (tp_list[-1] if tp_list else entry_price * 1.05)
+                        log.info(f"🛡️ [CHANDELIER EXIT] {symbol}: Đỉnh mới ${peak_price:.4f}. Dời SL động theo ATR lên ${chandelier_sl:.4f} (SL cũ: ${current_sl:.4f})")
+                        self.cancel_all_orders(symbol)
+                        self.set_runner_sl_tp(symbol, direction, current_qty, chandelier_sl, next_tp)
+                        return {
+                            "action": "TRAILING_SL",
+                            "level": 99,
+                            "new_sl": round(chandelier_sl, 4),
+                            "msg": f"Đã dời SL động theo Chandelier Exit (ATR) lên ${chandelier_sl:.4f}."
+                        }
+                else: # SHORT
+                    if current_price < peak_price or peak_price == entry_price:
+                        peak_price = current_price
+                        try: redis_client.setex(peak_key, 86400, str(peak_price))
+                        except: pass
+                        
+                    chandelier_sl = peak_price + 2.5 * atr_val
+                    update_threshold = entry_price * 0.0015
+                    if (current_sl == 0 or chandelier_sl < current_sl - update_threshold) and (chandelier_sl > current_price):
+                        remaining_tps = [p for p in tp_list if p < current_price]
+                        next_tp = remaining_tps[0] if remaining_tps else (tp_list[-1] if tp_list else entry_price * 0.95)
+                        log.info(f"🛡️ [CHANDELIER EXIT] {symbol}: Đáy mới ${peak_price:.4f}. Dời SL động theo ATR xuống ${chandelier_sl:.4f} (SL cũ: ${current_sl:.4f})")
+                        self.cancel_all_orders(symbol)
+                        self.set_runner_sl_tp(symbol, direction, current_qty, chandelier_sl, next_tp)
+                        return {
+                            "action": "TRAILING_SL",
+                            "level": 99,
+                            "new_sl": round(chandelier_sl, 4),
+                            "msg": f"Đã dời SL động theo Chandelier Exit (ATR) xuống ${chandelier_sl:.4f}."
+                        }
+
         # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
         new_signal = analysis_result.get("final", "WAIT")
         if new_signal == "WAIT":
@@ -683,6 +740,9 @@ class BingXExchange:
                     log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
                     self.close_position(symbol, current_qty, direction)
                     self.cancel_all_orders(symbol)
+                    if redis_client:
+                        try: redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                        except: pass
                     return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
         
         # 3. ĐẢO CHIỀU HOÀN TOÀN
@@ -691,6 +751,9 @@ class BingXExchange:
             log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
+            if redis_client:
+                try: redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                except: pass
             return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
 
         return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
