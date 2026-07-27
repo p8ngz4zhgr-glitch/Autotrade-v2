@@ -50,6 +50,7 @@ _POS_LOCK = threading.Lock()
 LIVE_POSITIONS = {}
 LAST_SIGNALS = []
 _LAST_REVERSAL_EVAL = {}
+_SENT_NOTIFICATIONS = {}
 
 # ══════════════════════════════════════════════════════════════════
 # TIER CONFIG
@@ -248,8 +249,9 @@ def _tp1_monitor():
                     # trước đây. Giờ vòng lặp này CHỈ còn vai trò cảnh báo nếu
                     # phát hiện giá đã qua TP1 khá lâu mà luồng chính (30s) vẫn
                     # chưa xử lý — không tự hành động để tránh trùng lặp logic.
+                    cache = _get_active_redis()
                     redis_key = f"SCALE_OUT_{user_id}_{sym}_{direction}"
-                    already_handled = bool(redis_client.exists(redis_key)) if redis_client else False
+                    already_handled = bool(cache.exists(redis_key)) if cache else False
                     if already_handled:
                         continue
 
@@ -261,13 +263,13 @@ def _tp1_monitor():
 
                     if is_hit:
                         stale_key = f"TP1_STALE_WARN_{user_id}_{sym}_{direction}"
-                        already_warned = bool(redis_client.exists(stale_key)) if redis_client else False
+                        already_warned = bool(cache.exists(stale_key)) if cache else False
                         if not already_warned:
                             log.warning("⚠️ [TP-MONITOR] %s %s đã qua TP1 (%.4f) nhưng luồng chính (30s) "
                                         "chưa xử lý — kiểm tra sync_bingx_positions có đang chạy không.",
                                         sym, direction, tp1)
-                            if redis_client:
-                                try: redis_client.setex(stale_key, 300, "1")  # cảnh báo tối đa 1 lần/5 phút
+                            if cache:
+                                try: cache.setex(stale_key, 300, "1")  # cảnh báo tối đa 1 lần/5 phút
                                 except Exception: pass
             db.close()
         except Exception as e:
@@ -328,25 +330,26 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         bx = get_bx(user)
         leverage = getattr(user, 'leverage', 5) 
         
-        # Khởi tạo cờ Breakeven từ Redis để chống spam
+        cache = _get_active_redis()
+        # Khởi tạo cờ Breakeven từ Redis/LocalStore để chống spam
         be_key = f"BREAKEVEN_{user.telegram_id}_{sym}_{direction}"
         is_breakeven = False
-        if redis_client:
-            try: is_breakeven = bool(redis_client.get(be_key))
-            except: pass
+        try: is_breakeven = bool(cache.get(be_key))
+        except: pass
         
         # Chạy ngầm hàm quản trị vị thế động
-        dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage, redis_client=redis_client)
+        dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage, redis_client=cache)
         
         if dynamic_status.get("action") in ("BREAKEVEN", "TRAILING_SL"):
             target_lvl = dynamic_status.get("level", 1)
             new_sl_val = dynamic_status.get("new_sl", entry)
             sl_notif_key = f"TRAILING_SL_{user.telegram_id}_{sym}_{direction}_{target_lvl}"
             is_sl_notified = False
-            if redis_client:
-                try: is_sl_notified = bool(redis_client.get(sl_notif_key))
-                except: pass
-
+            try:
+                is_sl_notified = bool(cache.get(sl_notif_key)) or _SENT_NOTIFICATIONS.get(sl_notif_key, False)
+            except:
+                is_sl_notified = _SENT_NOTIFICATIONS.get(sl_notif_key, False)
+ 
             if not is_sl_notified:
                 lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)" if target_lvl == 1 else f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
                 _tg_send(
@@ -354,9 +357,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     f"🛡️ <b>TRAILING SL KÍCH HOẠT: {sym}</b>\n"
                     f"Giá đã đi được 50% chặng đường tới TP{target_lvl}. Tự động dời Stoploss về {lvl_str} để bảo vệ lợi nhuận!"
                 )
-                if redis_client:
-                    try: redis_client.setex(sl_notif_key, 86400, "1")
-                    except: pass
+                _SENT_NOTIFICATIONS[sl_notif_key] = True
+                try: cache.setex(sl_notif_key, 86400, "1")
+                except: pass
             
         elif dynamic_status.get("action") == "CLOSE":
             roe_closed = dynamic_status.get("roe", 0)
@@ -370,12 +373,12 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             _save_journal(user.telegram_id, sym, direction, roe_closed, qty)
             
             # Xóa sạch cờ bộ nhớ khi lệnh đã đóng
-            if redis_client:
-                try: 
-                    redis_client.delete(be_key)
-                    redis_client.delete(f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}")
-                    redis_client.delete(f"PEAK_PRICE_{sym}_{direction}")
-                except: pass
+            try: 
+                cache.delete(be_key)
+                cache.delete(f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}")
+                cache.delete(f"PEAK_PRICE_{sym}_{direction}")
+                cache.delete(f"SL_COOLDOWN_{sym}_{direction}")
+            except: pass
             return  
 
 
@@ -429,9 +432,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # [NEW v6.12] Đếm số mốc TP đã xử lý
         partial_key = f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}"
         tp_progress = 0
-        if redis_client:
+        cache = _get_active_redis()
+        if cache:
             try:
-                raw_p = redis_client.get(partial_key)
+                raw_p = cache.get(partial_key)
                 tp_progress = int(raw_p) if raw_p else 0
             except Exception:
                 tp_progress = 0
@@ -546,9 +550,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 prev_price = tp_levels[tp_progress - 1]["price"] if tp_progress > 0 else None
 
                 original_qty = qty
-                if redis_client:
+                cache = _get_active_redis()
+                if cache:
                     try:
-                        raw_oq = redis_client.get(f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{direction}")
+                        raw_oq = cache.get(f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{direction}")
                         if raw_oq:
                             original_qty = float(raw_oq)
                     except Exception:
@@ -561,8 +566,8 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
                 if res.get("ok"):
                     new_progress = tp_progress + 1
-                    if redis_client:
-                        try: redis_client.setex(partial_key, 86400, str(new_progress))
+                    if cache:
+                        try: cache.setex(partial_key, 86400, str(new_progress))
                         except: pass
 
                     if res.get("closed_all"):
@@ -573,8 +578,8 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             f"🔍 Lý do: <i>{reason}</i>"
                         )
                         _save_journal(user.telegram_id, sym, direction, pnl_pct, original_qty)
-                        if redis_client:
-                            try: redis_client.delete(partial_key)
+                        if cache:
+                            try: cache.delete(partial_key)
                             except: pass
                     else:
                         new_sl = res.get("new_sl", 0)
@@ -595,10 +600,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 res = bx.close_position(sym, qty, direction)
                 
                 if res.get("ok"):
-                    if redis_client:
+                    if cache:
                         try:
-                            redis_client.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
-                            redis_client.delete(partial_key)
+                            cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
+                            cache.delete(partial_key)
                         except: pass
                         
                     _tg_send(
@@ -738,12 +743,13 @@ def sync_bingx_positions():
 
                         # Check if this close was already notified by reversal
                         was_reversal = False
-                        if redis_client:
+                        cache = _get_active_redis()
+                        if cache:
                             try:
                                 rev_key = f"REVERSAL_CLOSED:{user_id}:{symbol}:{direction}"
-                                if redis_client.get(rev_key):
+                                if cache.get(rev_key):
                                     was_reversal = True
-                                    redis_client.delete(rev_key)
+                                    cache.delete(rev_key)
                             except Exception:
                                 pass
 
@@ -812,9 +818,10 @@ def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty
             # đè key này lúc vào lệnh tiếp theo, nên không cần dọn thủ công; TTL 7
             # ngày lo phần dọn rác nếu vì lý do gì đó không có lệnh mới.
             entry_features_json = None
-            if redis_client:
+            cache = _get_active_redis()
+            if cache:
                 try:
-                    raw = redis_client.get(f"ENTRY_FEATURES_{user_id}_{symbol}_{direction}")
+                    raw = cache.get(f"ENTRY_FEATURES_{user_id}_{symbol}_{direction}")
                     if raw:
                         entry_features_json = raw.decode() if isinstance(raw, bytes) else raw
                 except Exception:
@@ -835,9 +842,9 @@ def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty
                     db.delete(r)
             db.commit()
 
-            if redis_client:
+            if cache:
                 try:
-                    redis_client.delete(f"TP1_DONE:{user_id}:{symbol}:{direction}")
+                    cache.delete(f"TP1_DONE:{user_id}:{symbol}:{direction}")
                 except Exception:
                     pass
 
@@ -957,9 +964,10 @@ def _execute_for_user(user: User, signal: dict):
             return
 
         pending_key = f"PENDING:{user.telegram_id}:{sym}"
-        if redis_client:
+        cache = _get_active_redis()
+        if cache:
             try:
-                if redis_client.get(pending_key):
+                if cache.get(pending_key):
                     log.info("Cooldown %s %s - skip", user.telegram_id, sym)
                     return
             except Exception:
@@ -1057,11 +1065,12 @@ def _execute_for_user(user: User, signal: dict):
         res = bx.place_order(sym, side, qty, sl, tp2, leverage=user.leverage, p_win=sig_p_win, rr_ratio=sig_rr, tp_levels=tp_levels)
 
         if res.get("ok"):
-            if redis_client:
+            cache = _get_active_redis()
+            if cache:
                 try:
-                    redis_client.setex(pending_key, 60, "1")
+                    cache.setex(pending_key, 60, "1")
                     # Lưu snapshot feature để _save_journal gắn vào TradeJournal khi đóng lệnh
-                    redis_client.setex(
+                    cache.setex(
                         f"ENTRY_FEATURES_{user.telegram_id}_{sym}_{direction}",
                         7 * 86400, json.dumps(entry_features)
                     )
@@ -1071,7 +1080,7 @@ def _execute_for_user(user: User, signal: dict):
                     # Dùng để mỗi mốc TP (trong 4 mốc) chốt đúng % trên tổng thật
                     # đã vào, không cộng dồn sai khi qty hiện tại shrink dần.
                     actual_qty = res.get("qty", qty)
-                    redis_client.setex(
+                    cache.setex(
                         f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{direction}",
                         7 * 86400, str(actual_qty)
                     )
@@ -1283,10 +1292,11 @@ def _handle_user_close(telegram_id: str, symbol: str):
                      f"✅ <b>Đã đóng lệnh {symbol}!</b>\n"
                      f"📈 {direction} | Qty: {qty:.4f}\n"
                      f"💰 PnL: <b>{sign}${pnl:.2f} ({sign}{pct:.2f}%)</b>")
-            if redis_client:
+            cache = _get_active_redis()
+            if cache:
                 try:
-                    redis_client.delete(f"TP1_DONE:{telegram_id}:{symbol}:{direction}")
-                    redis_client.delete(f"PENDING:{telegram_id}:{symbol}")
+                    cache.delete(f"TP1_DONE:{telegram_id}:{symbol}:{direction}")
+                    cache.delete(f"PENDING:{telegram_id}:{symbol}")
                 except Exception:
                     pass
         else:
@@ -1586,11 +1596,16 @@ async def handle_cmd(request: Request, token: str = Query(default="")):
             signal_data = cmd.get("signal", {})
             if not signal_data or not signal_data.get("symbol"):
                 return {"ok": False, "msg": "Tin hieu thieu thong tin symbol"}
-            if redis_client:
-                redis_client.rpush("TRADE_SIGNALS", json.dumps(signal_data))
-                return {"ok": True, "msg": f"Đã gửi tín hiệu {signal_data.get('symbol')} ({signal_data.get('final')}) vào hàng đợi Redis!"}
+            cache = _get_active_redis()
+            if cache:
+                try:
+                    cache.rpush("TRADE_SIGNALS", json.dumps(signal_data))
+                    store_name = "Redis" if cache == redis_client else "LocalStore (0% RAM/Quota)"
+                    return {"ok": True, "msg": f"Đã gửi tín hiệu {signal_data.get('symbol')} ({signal_data.get('final')}) vào hàng đợi {store_name}!"}
+                except Exception as e:
+                    return {"ok": False, "msg": f"Lỗi đẩy tín hiệu vào hàng đợi: {e}"}
             else:
-                return {"ok": False, "msg": "Lỗi: Redis không kết nối!"}
+                return {"ok": False, "msg": "Lỗi: Hệ thống lưu trữ/cooldown không khả dụng!"}
 
         return {"ok": False, "msg": f"Khong ho tro: {action}"}
 
