@@ -3,7 +3,10 @@ import feedparser
 import time
 from analyzer.llm_agents import LLMChain
 from sqlalchemy.orm import Session
-from core_api.models import SessionLocal, AppConfig
+import core_api.models as models_mod
+
+SessionLocal = getattr(models_mod, "SessionLocal", None)
+AppConfig = getattr(models_mod, "AppConfig", None)
 
 log = logging.getLogger("analyzer.news_agent")
 
@@ -61,11 +64,16 @@ Trạng thái trả về chỉ ĐÚNG 1 từ:
         log.error(f"Lỗi khi phân tích tin tức qua LLM: {e}")
 
 def activate_kill_switch():
-    db: Session = SessionLocal()
+    sl = getattr(models_mod, "SessionLocal", None) or SessionLocal
+    cfg_cls = getattr(models_mod, "AppConfig", None) or AppConfig
+    if not sl or not cfg_cls:
+        log.error("SessionLocal or AppConfig model not available")
+        return
+    db: Session = sl()
     try:
-        cfg = db.query(AppConfig).first()
+        cfg = db.query(cfg_cls).first()
         if not cfg:
-            cfg = AppConfig(bot_active=False, kill_switch=True)
+            cfg = cfg_cls(bot_active=False, kill_switch=True)
             db.add(cfg)
         else:
             cfg.bot_active = False
@@ -79,11 +87,15 @@ def activate_kill_switch():
 
 def init_default_app_config():
     """Tự động tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False) nếu chưa có."""
-    db: Session = SessionLocal()
+    sl = getattr(models_mod, "SessionLocal", None) or SessionLocal
+    cfg_cls = getattr(models_mod, "AppConfig", None) or AppConfig
+    if not sl or not cfg_cls:
+        return
+    db: Session = sl()
     try:
-        cfg = db.query(AppConfig).first()
+        cfg = db.query(cfg_cls).first()
         if not cfg:
-            cfg = AppConfig(bot_active=True, kill_switch=False)
+            cfg = cfg_cls(bot_active=True, kill_switch=False)
             db.add(cfg)
             db.commit()
             log.info("✅ Đã khởi tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False).")
