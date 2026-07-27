@@ -431,7 +431,14 @@ class SignalEngine:
         if tf_count < 2:
             raise RuntimeError(f"Quá ít TF ({tf_count}) cho {symbol}")
 
-        price = list(results.values())[-1]["price"]
+        # Đảm bảo lấy giá realtime từ TF nhỏ nhất (15m -> 1h -> 4h -> 1d) tránh bị lấy nhầm giá nến ngày (1d)
+        price = 0.0
+        for preferred_tf in ("15m", "5m", "1h", "4h", "1d"):
+            if preferred_tf in results and results[preferred_tf].get("price"):
+                price = float(results[preferred_tf]["price"])
+                break
+        if not price and results:
+            price = float(list(results.values())[0]["price"])
         oi_now, oi_delta = 0.0, 0.0
         funding = 0.0
         oi_signal, oi_desc = "N/A", "N/A"
@@ -692,7 +699,9 @@ class SignalEngine:
             if final == "LONG":
                 # Chặn LONG nếu có một bức tường BÁN khổng lồ ngay phía trên trong phạm vi 1.2%
                 if resist_wall > 0 and (price < resist_wall <= price * 1.012):
-                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh LONG vì có Tường Bán Khổng Lồ (${resist_wall:.4f}, USD: {ob_data.get('resist_wall_usd', 0):,.0f}) ngay phía trên (cách {((resist_wall - price)/price*100):.2f}%).")
+                    diff_pct = (resist_wall - price) / price * 100
+                    diff_str = f"{diff_pct:.2f}%" if diff_pct >= 0.01 else "<0.01%"
+                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh LONG vì có Tường Bán Khổng Lồ (${resist_wall:.4f}, USD: {ob_data.get('resist_wall_usd', 0):,.0f}) ngay phía trên (cách {diff_str}).")
                     final = "WAIT"
                 # Hoặc mất cân đối sổ lệnh thiên hẳn về phe Bán (Imbalance cực sâu)
                 elif imbalance < -0.6 or ratio < 0.35:
@@ -703,7 +712,9 @@ class SignalEngine:
             elif final == "SHORT":
                 # Chặn SHORT nếu có một bức tường MUA lớn ngay phía dưới trong phạm vi 1.2%
                 if support_wall > 0 and (price * 0.988 <= support_wall < price):
-                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh SHORT vì có Tường Mua Khổng Lồ (${support_wall:.4f}, USD: {ob_data.get('support_wall_usd', 0):,.0f}) ngay phía dưới (cách {((price - support_wall)/price*100):.2f}%).")
+                    diff_pct = (price - support_wall) / price * 100
+                    diff_str = f"{diff_pct:.2f}%" if diff_pct >= 0.01 else "<0.01%"
+                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh SHORT vì có Tường Mua Khổng Lồ (${support_wall:.4f}, USD: {ob_data.get('support_wall_usd', 0):,.0f}) ngay phía dưới (cách {diff_str}).")
                     final = "WAIT"
                 # Hoặc mất cân đối sổ lệnh thiên hẳn về phe Mua (Imbalance cực cao)
                 elif imbalance > 0.6 or ratio > 2.8:
