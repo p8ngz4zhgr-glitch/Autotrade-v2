@@ -536,7 +536,7 @@ class LLMChain:
                 "stat_explanation": stat_explain,
                 "stat_direction":   signal_direction}
 
-    def _call(self, prompt, fast=False):
+    def _call(self, prompt, fast=False, min_len=30):
         slot = self._slot()
 
         rotation = {
@@ -564,7 +564,7 @@ class LLMChain:
                 continue
             try:
                 result = fn(prompt)
-                if result and len(result.strip()) > 30:
+                if result and len(result.strip()) >= min_len:
                     _cb.ok(name)
                     log.info("  Agent [%s] OK", name)
                     return result.strip()
@@ -573,6 +573,10 @@ class LLMChain:
                 log.warning("  Agent [%s] lỗi: %s", name, e)
                 _cb.fail(name)
         return ""
+
+    def query(self, system_prompt="", prompt="", max_tokens=100, fast=True):
+        full_prompt = f"{system_prompt}\n\n{prompt}".strip() if system_prompt else prompt
+        return self._call(full_prompt, fast=fast, min_len=1)
 
     def _summary(self, data):
         fibo = data.get("fibo", {})
