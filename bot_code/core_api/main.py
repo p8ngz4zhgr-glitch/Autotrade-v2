@@ -1144,13 +1144,13 @@ async def startup_event():
                      daemon=True, name="gc").start()
                      
     def run_news_agent():
-        try:
-            from analyzer.news_agent import scan_news_and_check_kill_switch
-            while True:
+        while True:
+            try:
+                from analyzer.news_agent import scan_news_and_check_kill_switch
                 scan_news_and_check_kill_switch()
-                time.sleep(600)
-        except Exception as e:
-            log.error(f"News agent error: {e}")
+            except Exception as e:
+                log.error(f"News agent error: {e}")
+            time.sleep(600)
 
     threading.Thread(target=run_news_agent, daemon=True, name="news-agent").start()
 
