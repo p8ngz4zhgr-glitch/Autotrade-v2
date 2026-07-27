@@ -211,21 +211,62 @@ class BingXExchange:
         elif isinstance(data, dict):
             orders = data.get("orders", []) or data.get("list", []) or []
 
+        symbol_prices = {}
         for o in orders:
             if isinstance(o, dict):
                 sym = o.get("symbol", "")
                 normalized_sym = sym.replace("-", "") if sym else ""
                 if normalized_sym not in triggers:
                     triggers[normalized_sym] = {}
-                otype = o.get("type", "")
-                if "STOP" in otype or "STOP_MARKET" in otype or "STOP_LOSS" in otype:
-                    if "TAKE_PROFIT" not in otype:
-                        triggers[normalized_sym]["sl"] = float(o.get("stopPrice", 0) or o.get("price", 0))
-                if "TAKE_PROFIT" in otype:
-                    tp_val = o.get("stopPrice", 0) or o.get("price", 0)
-                    triggers[normalized_sym]["tp2"] = float(tp_val)
-                elif "LIMIT" in otype:
-                    triggers[normalized_sym]["tp2"] = float(o.get("price", 0))
+                
+                otype = o.get("type", "").upper()
+                stop_price = float(o.get("stopPrice") or o.get("triggerPrice") or o.get("price") or 0)
+                pos_side = o.get("positionSide", "").upper()
+                side = o.get("side", "").upper()
+                
+                if stop_price > 0:
+                    is_sl = False
+                    is_tp = False
+                    
+                    if "STOP_LOSS" in otype or "STOP_MARKET" in otype or "STOP" in otype:
+                        if "TAKE_PROFIT" not in otype:
+                            is_sl = True
+                    elif "TAKE_PROFIT" in otype:
+                        is_tp = True
+                    elif "LIMIT" in otype:
+                        is_tp = True
+                        
+                    if not is_sl and not is_tp:
+                        inferred_pos_side = ""
+                        if pos_side == "LONG":
+                            inferred_pos_side = "LONG"
+                        elif pos_side == "SHORT":
+                            inferred_pos_side = "SHORT"
+                        elif side == "SELL":
+                            inferred_pos_side = "LONG"
+                        elif side == "BUY":
+                            inferred_pos_side = "SHORT"
+                            
+                        if inferred_pos_side:
+                            if normalized_sym not in symbol_prices:
+                                symbol_prices[normalized_sym] = self.get_latest_price(sym)
+                            cur_p = symbol_prices[normalized_sym]
+                            if cur_p > 0:
+                                if inferred_pos_side == "LONG":
+                                    if stop_price < cur_p:
+                                        is_sl = True
+                                    else:
+                                        is_tp = True
+                                elif inferred_pos_side == "SHORT":
+                                    if stop_price > cur_p:
+                                        is_sl = True
+                                    else:
+                                        is_tp = True
+
+                    if is_sl:
+                        triggers[normalized_sym]["sl"] = stop_price
+                    elif is_tp:
+                        triggers[normalized_sym]["tp2"] = stop_price
         return triggers
 
     def _safe_order(self, params: dict) -> dict:
@@ -473,6 +514,28 @@ class BingXExchange:
         side = "BUY" if direction == "LONG" else "SELL"
         return self._place_sl_tp(symbol, side, qty, sl_price, tp_price)
 
+    def update_sl_and_keep_remaining_tps(self, symbol: str, direction: str, qty: float, sl_price: float, raw_tp_levels: list, current_price: float):
+        """
+        Hủy toàn bộ lệnh chờ của symbol, đặt lại SL mới và giữ nguyên các mốc TP chưa khớp
+        nhằm tránh việc dời SL làm mất cấu trúc các mốc TP đa cấp đã thiết lập từ trước.
+        """
+        self.cancel_all_orders(symbol)
+        
+        remaining_tps = []
+        if raw_tp_levels and isinstance(raw_tp_levels, list):
+            for lvl in raw_tp_levels:
+                if isinstance(lvl, dict):
+                    p = float(lvl.get("price", 0))
+                    if p > 0:
+                        if direction == "LONG" and p > current_price:
+                            remaining_tps.append(lvl)
+                        elif direction == "SHORT" and p < current_price:
+                            remaining_tps.append(lvl)
+                            
+        side = "BUY" if direction == "LONG" else "SELL"
+        # Đặt lại SL mới và giữ nguyên các mốc TP chưa khớp
+        return self._place_sl_tp(symbol, side, qty, sl_price, 0.0, tp_levels=remaining_tps)
+
     def cancel_all_orders(self, symbol: str) -> dict:
         return self._request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", {
             "symbol": symbol
@@ -658,10 +721,23 @@ class BingXExchange:
                         break
                     else:
                         # CHƯA DỜI SL HOẶC SL TRÊN SÀN CHƯA ĐẠT MỐC NÀY -> GỌI API ĐẶT SL
+                        cooldown_key = f"SL_COOLDOWN_{symbol}_{direction}"
+                        if redis_client:
+                            try:
+                                if redis_client.get(cooldown_key):
+                                    log.warning(f"⏳ Cooldown dời SL đang kích hoạt cho {symbol} -> Bỏ qua lần dời SL này để tránh spam API.")
+                                    break
+                            except Exception as e:
+                                log.warning("Lỗi cooldown Redis: %s", e)
+
                         log.info(f"🛡️ {symbol}: Đạt 50% chặng đường tới TP{i+1} (${curr_p}). Dời SL lên {target_sl} (ngưỡng cũ: {current_sl})!")
-                        self.cancel_all_orders(symbol)
-                        self.set_runner_sl_tp(symbol, direction, current_qty, target_sl, next_tp)
+                        self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, target_sl, raw_tp_levels, current_price)
                         
+                        if redis_client:
+                            try:
+                                redis_client.setex(cooldown_key, 120, "1")
+                            except: pass
+
                         action_name = "BREAKEVEN" if i == 0 else "TRAILING_SL"
                         return {
                             "action": action_name,
@@ -673,6 +749,7 @@ class BingXExchange:
             # 1.5. CHANDELIER EXIT TRAILING STOP LOSS (ATR)
             atr_val = float(analysis_result.get("atr", entry_price * 0.015))
             peak_key = f"PEAK_PRICE_{symbol}_{direction}"
+            cooldown_key = f"SL_COOLDOWN_{symbol}_{direction}"
             peak_price = entry_price
             
             if redis_client:
@@ -695,11 +772,20 @@ class BingXExchange:
                     chandelier_sl = peak_price - 2.5 * atr_val
                     update_threshold = entry_price * 0.0015
                     if (chandelier_sl > current_sl + update_threshold) and (chandelier_sl < current_price):
-                        remaining_tps = [p for p in tp_list if p > current_price]
-                        next_tp = remaining_tps[0] if remaining_tps else (tp_list[-1] if tp_list else entry_price * 1.05)
+                        # Kiểm tra cooldown
+                        try:
+                            if redis_client.get(cooldown_key):
+                                log.warning(f"⏳ Cooldown dời SL đang kích hoạt cho {symbol} -> Bỏ qua lần dời SL Chandelier LONG này.")
+                                return {"action": "NONE", "msg": "Chandelier SL cooldown active."}
+                        except: pass
+
                         log.info(f"🛡️ [CHANDELIER EXIT] {symbol}: Đỉnh mới ${peak_price:.4f}. Dời SL động theo ATR lên ${chandelier_sl:.4f} (SL cũ: ${current_sl:.4f})")
-                        self.cancel_all_orders(symbol)
-                        self.set_runner_sl_tp(symbol, direction, current_qty, chandelier_sl, next_tp)
+                        self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, chandelier_sl, raw_tp_levels, current_price)
+                        
+                        try:
+                            redis_client.setex(cooldown_key, 120, "1")
+                        except: pass
+
                         return {
                             "action": "TRAILING_SL",
                             "level": 99,
@@ -715,18 +801,27 @@ class BingXExchange:
                     chandelier_sl = peak_price + 2.5 * atr_val
                     update_threshold = entry_price * 0.0015
                     if (current_sl == 0 or chandelier_sl < current_sl - update_threshold) and (chandelier_sl > current_price):
-                        remaining_tps = [p for p in tp_list if p < current_price]
-                        next_tp = remaining_tps[0] if remaining_tps else (tp_list[-1] if tp_list else entry_price * 0.95)
+                        # Kiểm tra cooldown
+                        try:
+                            if redis_client.get(cooldown_key):
+                                log.warning(f"⏳ Cooldown dời SL đang kích hoạt cho {symbol} -> Bỏ qua lần dời SL Chandelier SHORT này.")
+                                return {"action": "NONE", "msg": "Chandelier SL cooldown active."}
+                        except: pass
+
                         log.info(f"🛡️ [CHANDELIER EXIT] {symbol}: Đáy mới ${peak_price:.4f}. Dời SL động theo ATR xuống ${chandelier_sl:.4f} (SL cũ: ${current_sl:.4f})")
-                        self.cancel_all_orders(symbol)
-                        self.set_runner_sl_tp(symbol, direction, current_qty, chandelier_sl, next_tp)
+                        self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, chandelier_sl, raw_tp_levels, current_price)
+                        
+                        try:
+                            redis_client.setex(cooldown_key, 120, "1")
+                        except: pass
+
                         return {
                             "action": "TRAILING_SL",
                             "level": 99,
                             "new_sl": round(chandelier_sl, 4),
                             "msg": f"Đã dời SL động theo Chandelier Exit (ATR) xuống ${chandelier_sl:.4f}."
                         }
-
+ 
         # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
         new_signal = analysis_result.get("final", "WAIT")
         if new_signal == "WAIT":
@@ -741,7 +836,9 @@ class BingXExchange:
                     self.close_position(symbol, current_qty, direction)
                     self.cancel_all_orders(symbol)
                     if redis_client:
-                        try: redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                        try: 
+                            redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                            redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
                         except: pass
                     return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
         
@@ -752,7 +849,9 @@ class BingXExchange:
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
             if redis_client:
-                try: redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                try: 
+                    redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                    redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
                 except: pass
             return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
 
