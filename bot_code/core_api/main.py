@@ -491,8 +491,11 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
             elif is_sweep_same and not in_profit:
                 # MM đang chọc râu quét SL phe ta nhưng nến đã rút chân Reclaim -> Kích hoạt VIRTUAL SL bảo vệ, KHÔNG cắt lỗ ở giá xấu nhất râu!
-                log.info(f"  🛡️ [ANTI-MM VIRTUAL SL] %s: Phát hiện cá mập chọc râu Stop Hunt (%s @ ${sw_price:.4f}). "
-                         f"Nến đã rút chân Reclaim (PnL hiện tại: {pnl_pct:+.2f}%%) -> GIỮ VỊ THẾ ẢO, từ chối cắt lỗ đúng đáy/đỉnh râu!", sym, sw_type)
+                vsl_key = f"VIRTUAL_SL_LOG_{sym}_{sw_type}_{sw_price:.2f}"
+                if not _SENT_NOTIFICATIONS.get(vsl_key):
+                    log.info(f"  🛡️ [ANTI-MM VIRTUAL SL] %s: Phát hiện cá mập chọc râu Stop Hunt (%s @ ${sw_price:.4f}). "
+                             f"Nến đã rút chân Reclaim (PnL hiện tại: {pnl_pct:+.2f}%%) -> GIỮ VỊ THẾ ẢO, từ chối cắt lỗ đúng đáy/đỉnh râu!", sym, sw_type)
+                    _SENT_NOTIFICATIONS[vsl_key] = True
 
             # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM VỚI VIRTUAL SL BUFFER)
             elif pnl_pct <= DYNAMIC_SL_LIMIT:
