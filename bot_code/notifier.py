@@ -7,24 +7,35 @@ import requests
 
 log = logging.getLogger("Notifier")
 
-_REPORT_TOKEN = os.getenv("TELEGRAM_REPORT_TOKEN", "")
+_REPORT_TOKEN = os.getenv("TELEGRAM_REPORT_TOKEN", "") or os.getenv("TELEGRAM_TOKEN", "")
 _ADMIN_CHAT   = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
 _TG_BASE      = "https://api.telegram.org"
 
-_REG_TOKEN    = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+_REG_TOKEN    = (
+    os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+    or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    or os.getenv("TELEGRAM_TOKEN", "")
+    or os.getenv("TELEGRAM_REPORT_TOKEN", "")
+)
 
 
 def _send(token: str, chat_id, text: str, parse_mode: str = "HTML") -> bool:
+    token = token or _REG_TOKEN or _REPORT_TOKEN
     if not token or not chat_id:
-        log.warning("⚠️  Thiếu token/chat_id, bỏ qua thông báo.")
+        log.warning("⚠️ Thiếu token/chat_id, bỏ qua thông báo.")
         return False
     try:
         r = requests.post(
             f"{_TG_BASE}/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": str(text)[:4096],
+            json={"chat_id": str(chat_id), "text": str(text)[:4096],
                   "parse_mode": parse_mode, "disable_web_page_preview": True},
             timeout=8,
         )
+        if not r.ok:
+            log.warning("⚠️ Telegram Notifier error HTTP %d: %s", r.status_code, r.text)
+        else:
+            summary = str(text).replace("\n", " ")[:70]
+            log.info("📲 [NOTIFIER] Đã gửi thông báo thành công tới %s: %s", chat_id, summary)
         return r.ok
     except Exception as e:
         log.error("Telegram send error: %s", e)
