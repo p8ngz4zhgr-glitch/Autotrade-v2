@@ -33,7 +33,12 @@ log = logging.getLogger("MainAPI")
 
 app = FastAPI(title="SignalBot v6.1")
 
-REGISTER_TOKEN = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+REGISTER_TOKEN = (
+    os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+    or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    or os.getenv("TELEGRAM_TOKEN", "")
+    or os.getenv("TELEGRAM_REPORT_TOKEN", "")
+)
 REDIS_URL = (os.getenv("REDIS_URL") or "").strip()
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "admin123")
 redis_client = None
@@ -100,8 +105,13 @@ REDIS_URL       = (os.getenv("REDIS_URL") or "").strip()
 ADMIN_SECRET    = os.getenv("ADMIN_SECRET", "admin123")
 RENDER_URL      = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
 ADMIN_CHAT_ID   = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
-REPORT_TOKEN    = os.getenv("TELEGRAM_REPORT_TOKEN", "")
-REGISTER_TOKEN  = os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+REPORT_TOKEN    = os.getenv("TELEGRAM_REPORT_TOKEN", "") or os.getenv("TELEGRAM_TOKEN", "")
+REGISTER_TOKEN  = (
+    os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+    or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    or os.getenv("TELEGRAM_TOKEN", "")
+    or os.getenv("TELEGRAM_REPORT_TOKEN", "")
+)
 TG_BASE         = "https://api.telegram.org"
 
 from core_api.local_store import local_store
@@ -171,11 +181,30 @@ def _update_user_balance_and_tier(user: User, balance: float, db: Session):
         log.warning("Update balance error: %s", e)
 
 def _tg_send(token: str, chat_id: str, text: str):
+    effective_token = (
+        token
+        or REGISTER_TOKEN
+        or os.getenv("TELEGRAM_REGISTER_TOKEN", "")
+        or os.getenv("TELEGRAM_BOT_TOKEN", "")
+        or os.getenv("TELEGRAM_TOKEN", "")
+        or os.getenv("TELEGRAM_REPORT_TOKEN", "")
+    )
+    if not effective_token or not chat_id:
+        log.warning("⚠️ _tg_send bỏ qua: Thiếu token (%s) hoặc chat_id (%s)", bool(effective_token), chat_id)
+        return False
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        _req.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=5)
+        url = f"https://api.telegram.org/bot{effective_token}/sendMessage"
+        resp = _req.post(url, json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}, timeout=5)
+        if resp.status_code != 200:
+            log.warning("⚠️ Telegram _tg_send lỗi HTTP %d: %s", resp.status_code, resp.text)
+            return False
+        else:
+            summary = text.replace("\n", " ")[:70]
+            log.info("📲 [TELEGRAM] Đã gửi thông báo thành công tới %s: %s", chat_id, summary)
+            return True
     except Exception as e:
-        log.warning("_tg_send error: %s", e)
+        log.warning("_tg_send exception: %s", e)
+        return False
 
 def _save_journal(uid: str, sym: str, direction: str, pnl_pct: float, qty: float):
     try:
