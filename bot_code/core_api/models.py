@@ -97,6 +97,13 @@ class MarketRegime(Base):
     confidence         = Column(Float)
     updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class AppConfig(Base):
+    __tablename__ = "app_config"
+    id                 = Column(Integer,  primary_key=True, index=True)
+    bot_active         = Column(Boolean,  default=True)
+    kill_switch        = Column(Boolean,  default=False)
+    updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 # Tạo bảng
 Base.metadata.create_all(bind=engine)
 
@@ -111,16 +118,17 @@ def _ensure_schema_migrations():
     """
     try:
         from sqlalchemy import inspect, text
+        Base.metadata.create_all(bind=engine)
         inspector = inspect(engine)
-        if "trade_journal" not in inspector.get_table_names():
-            return
-        existing_cols = {c["name"] for c in inspector.get_columns("trade_journal")}
-        if "entry_features" not in existing_cols:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE trade_journal ADD COLUMN entry_features TEXT"))
-            log.info("✅ [Migration] Đã thêm cột trade_journal.entry_features")
+        tables = inspector.get_table_names()
+        if "trade_journal" in tables:
+            existing_cols = {c["name"] for c in inspector.get_columns("trade_journal")}
+            if "entry_features" not in existing_cols:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE trade_journal ADD COLUMN entry_features TEXT"))
+                log.info("✅ [Migration] Đã thêm cột trade_journal.entry_features")
     except Exception as e:
-        log.warning("⚠️ [Migration] entry_features lỗi (bỏ qua, không chặn khởi động): %s", e)
+        log.warning("⚠️ [Migration] Schema migration lỗi (bỏ qua, không chặn khởi động): %s", e)
 
 
 _ensure_schema_migrations()
