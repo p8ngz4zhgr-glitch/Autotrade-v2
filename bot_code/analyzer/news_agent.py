@@ -40,7 +40,7 @@ Chỉ báo hiệu nếu thực sự CỰC KỲ NGUY HIỂM ảnh hưởng sập 
 Tin tức:
 {news_text}
 
-Trạng thái trả về chỉ ĐÚNG 1 từ:
+Trạng thái trả về CHỈ DUY NHẤT 1 từ, KHÔNG GIẢI THÍCH THÊM:
 - NGUYHIEM: Nếu có tin tức thiên nga đen.
 - ANTOAN: Nếu thị trường bình thường hoặc chỉ là tin tức xấu thông thường.
 """
@@ -54,56 +54,50 @@ Trạng thái trả về chỉ ĐÚNG 1 từ:
         response = llm.query(system_prompt, prompt, max_tokens=10)
         
         result = response.strip().upper()
-        if "NGUYHIEM" in result:
+        if "NGUYHIEM" in result and "ANTOAN" not in result and "SAFE" not in result:
             log.warning("🚨 [KILL SWITCH] PHÁT HIỆN TIN TỨC THIÊN NGA ĐEN! KÍCH HOẠT KILL SWITCH TOÀN HỆ THỐNG!")
             activate_kill_switch()
         else:
-            log.info("✅ Tin tức thị trường an toàn.")
+            log.info("✅ Tin tức thị trường an toàn. (LLM trả về: %s)", result[:60])
             
     except Exception as e:
         log.error(f"Lỗi khi phân tích tin tức qua LLM: {e}")
 
 def activate_kill_switch():
-    sl = getattr(models_mod, "SessionLocal", None) or SessionLocal
-    cfg_cls = getattr(models_mod, "AppConfig", None) or AppConfig
-    if not sl or not cfg_cls:
-        log.error("SessionLocal or AppConfig model not available")
-        return
-    db: Session = sl()
     try:
-        cfg = db.query(cfg_cls).first()
-        if not cfg:
-            cfg = cfg_cls(bot_active=False, kill_switch=True)
-            db.add(cfg)
-        else:
-            cfg.bot_active = False
-            cfg.kill_switch = True
-        db.commit()
-        log.critical("🛑 ĐÃ TẮT BOT (bot_active=False) VÌ THIÊN NGA ĐEN!")
+        from core_api.models import SessionLocal as SL, AppConfig as AC
+        db: Session = SL()
+        try:
+            cfg = db.query(AC).first()
+            if not cfg:
+                cfg = AC(bot_active=False, kill_switch=True)
+                db.add(cfg)
+            else:
+                cfg.bot_active = False
+                cfg.kill_switch = True
+            db.commit()
+            log.critical("🛑 ĐÃ TẮT BOT (bot_active=False) VÌ THIÊN NGA ĐEN!")
+        finally:
+            db.close()
     except Exception as e:
         log.error(f"Lỗi khi kích hoạt kill switch DB: {e}")
-    finally:
-        db.close()
 
 def init_default_app_config():
     """Tự động tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False) nếu chưa có."""
-    sl = getattr(models_mod, "SessionLocal", None) or SessionLocal
-    cfg_cls = getattr(models_mod, "AppConfig", None) or AppConfig
-    if not sl or not cfg_cls:
-        return
-    db: Session = sl()
     try:
-        cfg = db.query(cfg_cls).first()
-        if not cfg:
-            cfg = cfg_cls(bot_active=True, kill_switch=False)
-            db.add(cfg)
-            db.commit()
-            log.info("✅ Đã khởi tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False).")
+        from core_api.models import SessionLocal as SL, AppConfig as AC
+        db: Session = SL()
+        try:
+            cfg = db.query(AC).first()
+            if not cfg:
+                cfg = AC(bot_active=True, kill_switch=False)
+                db.add(cfg)
+                db.commit()
+                log.info("✅ Đã khởi tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False).")
+        finally:
+            db.close()
     except Exception as e:
         log.error(f"Lỗi khi khởi tạo AppConfig mặc định: {e}")
-        db.rollback()
-    finally:
-        db.close()
 
 # Tự động khởi tạo cấu hình mặc định khi module được import
 try:
