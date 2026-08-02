@@ -603,12 +603,14 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         except: pass
 
                     if res.get("closed_all"):
-                        _tg_send(
-                            REGISTER_TOKEN, user.telegram_id,
+                        msg_close_all = (
                             f"{emoji} <b>{action_type} — ĐÓNG TOÀN BỘ: {sym}</b>\n\n"
                             f"📊 Đã chốt hết vị thế {direction} tại TP{lv['level']} (PnL: {pnl_pct:+.2f}%)\n"
                             f"🔍 Lý do: <i>{reason}</i>"
                         )
+                        _tg_send(REGISTER_TOKEN, user.telegram_id, msg_close_all)
+                        if ADMIN_CHAT_ID and str(user.telegram_id) != str(ADMIN_CHAT_ID):
+                            _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user.telegram_id}</code>:\n" + msg_close_all)
                         _save_journal(user.telegram_id, sym, direction, pnl_pct, original_qty)
                         if cache:
                             try: cache.delete(partial_key)
@@ -616,14 +618,16 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     else:
                         new_sl = res.get("new_sl", 0)
                         next_target = next_lv["price"] if next_lv else 0
-                        _tg_send(
-                            REGISTER_TOKEN, user.telegram_id,
+                        msg_partial = (
                             f"{emoji} <b>{action_type}: {sym}</b>\n\n"
                             f"📊 Đã chốt: {int(lv['close_pct']*100)}% vị thế gốc {direction} (PnL: {pnl_pct:+.2f}%)\n"
                             f"🔒 SL phần còn lại: Dời lên <code>${new_sl:.4f}</code>\n"
                             f"🎯 Target tiếp theo (TP{next_lv['level'] if next_lv else '-'}): <code>${next_target:.4f}</code>\n"
                             f"🔍 Lý do: <i>{reason}</i>"
                         )
+                        _tg_send(REGISTER_TOKEN, user.telegram_id, msg_partial)
+                        if ADMIN_CHAT_ID and str(user.telegram_id) != str(ADMIN_CHAT_ID):
+                            _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user.telegram_id}</code>:\n" + msg_partial)
                         _save_journal(user.telegram_id, sym, direction, pnl_pct, res.get("closed_qty", 0))
             
             # --- CƠ CHẾ NGẮT: ĐÓNG TOÀN BỘ VỊ THẾ KHẨN CẤP ---
@@ -638,13 +642,15 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             cache.delete(partial_key)
                         except: pass
                         
-                    _tg_send(
-                        REGISTER_TOKEN, user.telegram_id,
+                    msg_rev_close = (
                         f"{emoji} <b>{action_type}: {sym}</b>\n\n"
                         f"📊 Vị thế cũ: {direction} @ ${entry:.4f}\n"
                         f"📈 Giá chốt: ${current_price:.4f} | PnL: {pnl_pct:+.2f}%\n"
                         f"🔍 Lý do: <i>{reason}</i>"
                     )
+                    _tg_send(REGISTER_TOKEN, user.telegram_id, msg_rev_close)
+                    if ADMIN_CHAT_ID and str(user.telegram_id) != str(ADMIN_CHAT_ID):
+                        _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user.telegram_id}</code>:\n" + msg_rev_close)
                     _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
                     time.sleep(1.5)
                     
@@ -802,8 +808,7 @@ def sync_bingx_positions():
                             except Exception as e:
                                 log.error("Error getting user_db for closing notification: %s", e)
 
-                            _tg_send(
-                                REGISTER_TOKEN, user_id,
+                            close_msg = (
                                 f"{outcome_emoji} <b>VỊ THẾ ĐÃ ĐÓNG: {symbol}</b>\n\n"
                                 f"📈 Hướng: <b>{direction}</b>\n"
                                 f"💰 Khối lượng: {qty:.4f} {symbol}\n"
@@ -811,6 +816,9 @@ def sync_bingx_positions():
                                 f"🛑 SL cũ: <code>${sl:.4f}</code> | 🏆 Target: <code>${tp2:.4f}</code>\n"
                                 f"🎯 Kết quả: <b>{outcome_text}</b>"
                             )
+                            _tg_send(REGISTER_TOKEN, user_id, close_msg)
+                            if ADMIN_CHAT_ID and str(user_id) != str(ADMIN_CHAT_ID):
+                                _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user_id}</code>:\n" + close_msg)
 
             sync_bingx_positions._prev = current_map
 
