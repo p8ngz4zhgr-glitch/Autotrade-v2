@@ -1128,11 +1128,14 @@ def _execute_for_user(user: User, signal: dict):
                     pass
 
             log.info("OK %s: %s %s qty=%.4f lev=%dx", user.telegram_id, direction, sym, qty, user.leverage)
+            news_notice = ""
+            if news_risk.get("active"):
+                news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - news_risk.get('size_mult', 0.5)) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
                 f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
                 f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
-                f"💰 Qty: {qty:.4f} | Lev: {user.leverage}x\n"
+                f"💰 Qty: {qty:.4f} | Lev: {user.leverage}x{news_notice}\n"
                 f"🛑 SL: <code>${sl:.4f}</code> | Risk: ${risk_amt:.2f}\n"
                 f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
                 f"🏆 TP2: <code>${tp2:.4f}</code> → đích 50% còn lại")
