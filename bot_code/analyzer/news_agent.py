@@ -11,8 +11,28 @@ RSS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/"
 ]
 
+_NEWS_RISK_STATE = {
+    "active": False,
+    "event": None,
+    "size_mult": 1.0,
+    "sl_tighten_mult": 1.0,
+    "last_check": 0
+}
+
+def get_news_agent_risk() -> dict:
+    """Trả về trạng thái rủi ro tin tức được phân tích bởi LLM News Agent."""
+    # Hết hiệu lực sau 2 tiếng nếu không có cập nhật mới
+    if _NEWS_RISK_STATE["active"] and (time.time() - _NEWS_RISK_STATE.get("last_check", 0) > 7200):
+        _NEWS_RISK_STATE["active"] = False
+        _NEWS_RISK_STATE["event"] = None
+        _NEWS_RISK_STATE["size_mult"] = 1.0
+        _NEWS_RISK_STATE["sl_tighten_mult"] = 1.0
+    return dict(_NEWS_RISK_STATE)
+
 def scan_news_and_check_kill_switch():
-    """Scan RSS feeds and use LLM to check for Black Swan events."""
+    """Scan RSS feeds and use LLM to check for high-risk news events.
+    Khi phát hiện tin xấu, tự động giảm vốn vào lệnh (size_mult=0.5) và siết SL thay vì tắt bot.
+    """
     all_news = []
     
     for feed_url in RSS_FEEDS:
@@ -28,16 +48,14 @@ def scan_news_and_check_kill_switch():
 
     news_text = "\n".join(all_news)
     prompt = f"""
-Bạn là chuyên gia phân tích rủi ro thị trường tài chính và Crypto.
-Nhiệm vụ: Đọc danh sách các tin tức dưới đây và xác định xem có bất kỳ sự kiện 'Thiên nga đen' (Black Swan) nào đang xảy ra không.
-Thiên nga đen bao gồm: Sàn giao dịch lớn (Binance, Coinbase...) bị hack hoặc sập, SEC hoặc chính phủ ra lệnh cấm toàn diện, chiến tranh thế giới nổ ra, tether (USDT) sụp đổ...
-Chỉ báo hiệu nếu thực sự CỰC KỲ NGUY HIỂM ảnh hưởng sập toàn thị trường.
+Bạn là chuyên gia phân tích rủi ro tin tức thị trường tài chính và Crypto.
+Nhiệm vụ: Đọc danh sách các tin tức dưới đây và xác định xem có tin tức xấu / rủi ro biến động cao (như FUD lớn, tin đồn phá sản, lạm phát tăng vọt, chiến tranh, chính phủ cấm đoán, hack sàn,...) hay không.
 
 Tin tức:
 {news_text}
 
 Trạng thái trả về CHỈ DUY NHẤT 1 TỪ VỚI CHỮ IN HOA, TUYỆT ĐỐI KHÔNG VIẾT THÊM LÝ DO HAY CÂU TỪ NÀO KHÁC:
-- NGUYHIEM (chỉ dùng nếu thực sự có thảm hoạ thiên nga đen cực kỳ khủng khiếp)
+- NGUYHIEM (nếu có tin xấu hoặc rủi ro biến động thị trường xấu; hệ thống sẽ tự động giảm 50% vốn vào lệnh để quản trị rủi ro nhưng KHÔNG tắt bot)
 - ANTOAN (dùng cho mọi trường hợp bình thường hoặc tin tức biến động thông thường)
 """
     
@@ -50,12 +68,20 @@ Trạng thái trả về CHỈ DUY NHẤT 1 TỪ VỚI CHỮ IN HOA, TUYỆT Đ�
         # Làm sạch kết quả: lấy từ đầu tiên
         first_word = re.sub(r'[^A-Z]', '', result.split()[0]) if result.split() else ""
         
-        # Chỉ kích hoạt Kill Switch khi từ ĐẦU TIÊN là NGUYHIEM và câu trả lời ngắn (<20 ký tự) không chứa từ an toàn
         if first_word == "NGUYHIEM" and len(result) < 25 and not any(w in result for w in ["ANTOAN", "SAFE", "NORMAL", "KHONG"]):
-            log.warning("🚨 [KILL SWITCH] PHÁT HIỆN TIN TỨC THIÊN NGA ĐEN! KÍCH HOẠT KILL SWITCH TOÀN HỆ THỐNG! (LLM: %s)", result)
-            activate_kill_switch()
+            _NEWS_RISK_STATE["active"] = True
+            _NEWS_RISK_STATE["event"] = "Tin xấu thị trường (AI Scanner)"
+            _NEWS_RISK_STATE["size_mult"] = 0.5  # Giảm 50% vốn vào lệnh
+            _NEWS_RISK_STATE["sl_tighten_mult"] = 0.7  # Siết SL 70%
+            _NEWS_RISK_STATE["last_check"] = time.time()
+            log.warning("📰 [NEWS RISK] PHÁT HIỆN TIN XẤU THỊ TRƯỜNG! Tự động giảm 50%% vốn vào lệnh (size_mult=0.5) & siết SL, BOT VẪN CHẠY BÌNH THƯỜNG. (LLM: %s)", result)
         else:
-            log.info("✅ Tin tức thị trường an toàn. (LLM trả về: %s)", result[:60])
+            _NEWS_RISK_STATE["active"] = False
+            _NEWS_RISK_STATE["event"] = None
+            _NEWS_RISK_STATE["size_mult"] = 1.0
+            _NEWS_RISK_STATE["sl_tighten_mult"] = 1.0
+            _NEWS_RISK_STATE["last_check"] = time.time()
+            log.info("✅ News Agent: Tin tức thị trường an toàn. Sử dụng 100%% vốn tiêu chuẩn. (LLM: %s)", result[:60])
             
     except Exception as e:
         log.error(f"Lỗi khi phân tích tin tức qua LLM: {e}")
@@ -66,12 +92,12 @@ def activate_kill_switch():
         from sqlalchemy import text
         with engine.begin() as conn:
             conn.execute(text("UPDATE app_config SET bot_active = false, kill_switch = true"))
-        log.critical("🛑 ĐÃ TẮT BOT (bot_active=False) VÌ THIÊN NGA ĐEN!")
+        log.critical("🛑 ĐÃ TẮT BOT (bot_active=False) THEO YÊU CẦU DỪNG KHẨN CẤP!")
     except Exception as e:
         log.error(f"Lỗi khi kích hoạt kill switch DB: {e}")
 
 def init_default_app_config():
-    """Tự động tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False) nếu chưa có."""
+    """Tự động đảm bảo bot_active=True, kill_switch=False khi khởi động hệ thống."""
     try:
         from core_api.models import engine
         from sqlalchemy import text
@@ -79,7 +105,9 @@ def init_default_app_config():
             res = conn.execute(text("SELECT id FROM app_config LIMIT 1")).fetchone()
             if not res:
                 conn.execute(text("INSERT INTO app_config (bot_active, kill_switch) VALUES (true, false)"))
-                log.info("✅ Đã khởi tạo bản ghi AppConfig mặc định (bot_active=True, kill_switch=False).")
+            else:
+                conn.execute(text("UPDATE app_config SET bot_active = true, kill_switch = false"))
+            log.info("✅ Đã khởi tạo/khôi phục AppConfig (bot_active=True, kill_switch=False).")
     except Exception as e:
         log.error(f"Lỗi khi khởi tạo AppConfig mặc định: {e}")
 
@@ -88,5 +116,6 @@ try:
     init_default_app_config()
 except Exception:
     pass
+
 
 
