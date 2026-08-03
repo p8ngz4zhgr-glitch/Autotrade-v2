@@ -125,14 +125,26 @@ def get_high_impact_events(days_ahead: int = 7) -> list:
 
 def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
     """
-    Kết quả dùng trực tiếp cho engine.py/bingx_trader.py:
+    Kết quả dùng trực tiếp cho engine.py/bingx_trader.py/main.py:
     {"active": bool, "event": str|None, "size_mult": float, "sl_tighten_mult": float}
-    - size_mult 0.5: giảm 50% khối lượng giao dịch trong vùng ảnh hưởng tin.
+    - size_mult 0.5: giảm 50% khối lượng giao dịch trong vùng ảnh hưởng tin xấu.
     - sl_tighten_mult 0.7: SL siết còn 70% khoảng cách bình thường (gọn hơn,
       lỗ nhỏ hơn nếu bị quét thanh khoản do biến động tin tức).
     Fail-open: lỗi bất kỳ -> {"active": False, size_mult=1.0, sl_tighten_mult=1.0}
     """
     try:
+        # 1. Kiểm tra rủi ro tin xấu từ AI LLM News Agent
+        try:
+            from analyzer.news_agent import get_news_agent_risk
+            na_risk = get_news_agent_risk()
+            if na_risk.get("active"):
+                log.warning("📰 [NEWS RISK - LLM] Cảnh báo tin xấu (%s) -> Giảm 50%% vốn vào lệnh (size_mult=0.5), siết SL x0.7 (Bot vẫn hoạt động).",
+                            na_risk.get("event"))
+                return na_risk
+        except Exception as ex_na:
+            log.debug("Lỗi lấy news_agent_risk: %s", ex_na)
+
+        # 2. Kiểm tra lịch tin vĩ mô (CPI/PPI/NFP...)
         events = get_high_impact_events(days_ahead=3)
         now = datetime.utcnow()
         for e in events:
@@ -141,10 +153,11 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
             except Exception:
                 continue
             if (et - timedelta(hours=hours_before)) <= now <= (et + timedelta(hours=hours_after)):
-                log.warning("📰 [NEWS WINDOW] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm size, siết SL.",
+                log.warning("📰 [NEWS WINDOW - CALENDAR] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm 50%% vốn vào lệnh, siết SL.",
                             e["name"], e["time"])
                 return {"active": True, "event": e["name"], "size_mult": 0.5, "sl_tighten_mult": 0.7}
         return {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
     except Exception as ex:
         log.warning("⚠️ news_risk_adjustment lỗi (%s) -> fail-open, không điều chỉnh gì.", ex)
         return {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
+
