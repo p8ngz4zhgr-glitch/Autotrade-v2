@@ -392,12 +392,14 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             
         elif dynamic_status.get("action") == "CLOSE":
             roe_closed = dynamic_status.get("roe", 0)
+            close_type = dynamic_status.get("type", "ĐÓNG VỊ THẾ")
+            close_icon = "🎯" if roe_closed > 0 else "📉"
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
-                f"📉 <b>BỘ LỌC NHIỄU VĨ MÔ: {sym}</b>\n\n"
-                f"Loại: {dynamic_status.get('type')}\n"
-                f"Lãi/Lỗ: {roe_closed:+.2f}%\n"
-                f"Lý do: HMM/Market Structure phát hiện thị trường biến động nhiễu. Đã đóng lệnh an toàn."
+                f"{close_icon} <b>THÔNG BÁO TỰ ĐỘNG: {sym} ({direction})</b>\n\n"
+                f"Loại: <b>{close_type}</b>\n"
+                f"Lãi/Lỗ (ROE): <b>{roe_closed:+.2f}%</b>\n"
+                f"Lý do: Đã chốt toàn bộ vị thế để bảo vệ lợi nhuận (đã trừ bù phí giao dịch sàn), tránh gồng lệnh bị đảo chiều cắn SL."
             )
             _save_journal(user.telegram_id, sym, direction, roe_closed, qty)
             
