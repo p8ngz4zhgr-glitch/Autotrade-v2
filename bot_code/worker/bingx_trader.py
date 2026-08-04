@@ -654,19 +654,51 @@ class BingXExchange:
         if entry_price <= 0 or current_price <= 0:
             return {"action": "NONE", "msg": "Giá bị lỗi."}
 
-        # Tính toán ROE và quãng đường
+        # Tính toán ROE và lợi nhuận bằng USD
         plan = analysis_result.get("plan", {})
         tp1_price = float(plan.get("tp1", 0))
         tp2_price = float(plan.get("tp2", 0))
         
         if direction == "LONG":
-            roe = ((current_price - entry_price) / entry_price) * 100 * leverage
+            gross_pnl_usd = (current_price - entry_price) * current_qty
+            raw_price_pct = ((current_price - entry_price) / entry_price) * 100
+            roe = raw_price_pct * leverage
             dist_to_tp1 = abs(tp1_price - entry_price) if (tp1_price > 0 and tp1_price > entry_price) else 0
             curr_dist = current_price - entry_price
         else:
-            roe = ((entry_price - current_price) / entry_price) * 100 * leverage
+            gross_pnl_usd = (entry_price - current_price) * current_qty
+            raw_price_pct = ((entry_price - current_price) / entry_price) * 100
+            roe = raw_price_pct * leverage
             dist_to_tp1 = abs(entry_price - tp1_price) if (tp1_price > 0 and tp1_price < entry_price) else 0
             curr_dist = entry_price - current_price
+
+        # Tính toán phí giao dịch sàn BingX 2 chiều ước tính (~0.05% x 2 = 0.10% tổng giá trị vị thế mở)
+        notional_usd = current_qty * entry_price
+        fee_usd = notional_usd * 0.0010  # 0.10% tổng phí 2 chiều (mở + đóng)
+
+        # Lấy thêm PnL từ BingX API nếu có để tính chính xác hơn
+        unrealized_pnl_api = float(pos.get("pnl", 0))
+        if unrealized_pnl_api != 0:
+            gross_pnl_usd = max(gross_pnl_usd, unrealized_pnl_api)
+
+        net_pnl_usd = gross_pnl_usd - fee_usd
+
+        # 0. CHỐT LỜI NHANH TRONG KHOẢNG $0.20 - $0.50 USD (ĐÃ TRỪ PHÍ GIAO DỊCH SÀN 2 CHIỀU)
+        # Tự động chốt 100% vị thế khi đạt từ 0.20$ USD lãi ròng trở lên,
+        # tránh gồng lệnh chờ TP xa rồi bị giá đảo chiều dính SL.
+        if net_pnl_usd >= 0.20:
+            log.info(f"🎯 [QUICK USD TP] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} USD "
+                     f"(Thô: +${gross_pnl_usd:.2f}, Phí 2 chiều: -${fee_usd:.2f}) >= $0.20 USD -> "
+                     f"CHỐT TOÀN BỘ 100% VỊ THẾ NGAY, KHÔNG GỒNG TRÁNH SL!")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
+            if redis_client:
+                try:
+                    redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                    redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
+                except Exception:
+                    pass
+            return {"action": "CLOSE", "type": f"CHỐT LỜI NHANH (+${net_pnl_usd:.2f} USD NET)", "roe": roe}
 
         # 1. TÍNH TOÁN 4 MỐC TP & TRAILING SL ĐA CẤP (50% SANG TP KẾ TIẾP -> DỜI SL VỀ TP TRƯỚC)
         raw_tp_levels = plan.get("tp_levels", [])
