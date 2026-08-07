@@ -312,6 +312,16 @@ class TelegramBot:
         
         lines.extend(ob_section)
         
+        sr = data.get("support_resistance", {})
+        if sr and sr.get("nearest_support") and sr.get("nearest_resistance"):
+            lines.extend([
+                "",
+                "📍 <b>VÙNG HỖ TRỢ & KHÁNG CỰ (S/R)</b>",
+                f"  ├ 🔴 Kháng cự cản: <code>${sr.get('nearest_resistance')}</code> (+{sr.get('resistance_dist_pct')}%)",
+                f"  ├ 🟢 Hỗ trợ đỡ  : <code>${sr.get('nearest_support')}</code> (-{sr.get('support_dist_pct')}%)",
+                f"  └ 📊 Vol tại S/R : <b>{sr.get('vol_ratio')}x</b> ({sr.get('buy_pct')}% Mua / {sr.get('sell_pct')}% Bán)",
+            ])
+        
 
         bayes_ev = data.get("bayes_ev")
         if bayes_ev:
