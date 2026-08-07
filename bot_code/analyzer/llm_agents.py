@@ -772,6 +772,10 @@ class MultiAgentPipeline:
         if ob.get("detected"):
             extra_context += f"- 🧱 SỔ LỆNH L2 (Order Book): Tường mua cứng (hỗ trợ) tại {ob.get('support_wall')}, Tường bán cứng (kháng cự) tại {ob.get('resist_wall')}. Độ lệch Imbalance là {ob.get('imbalance')} (Âm = phe Bán áp đảo, Dương = phe Mua áp đảo).\n"
 
+        sr = data.get("support_resistance", {})
+        if sr and sr.get("nearest_support") and sr.get("nearest_resistance"):
+            extra_context += f"- 📍 VÙNG S/R & VOLUME: Hỗ trợ gần tại ${sr.get('nearest_support')} (-{sr.get('support_dist_pct')}%), Kháng cự gần tại ${sr.get('nearest_resistance')} (+{sr.get('resistance_dist_pct')}%). Volume tại S/R: {sr.get('vol_ratio')}x ({sr.get('buy_pct')}% Mua / {sr.get('sell_pct')}% Bán).\n"
+
         S1  = ["TECHNICAL_ANALYST","ONCHAIN_ANALYST","MACRO_ANALYST","MOMENTUM_ANALYST"]
         S2  = ["BULL_RESEARCHER","BEAR_RESEARCHER","RESEARCH_MANAGER"]
         S34 = ["TRADER_AGENT","RISK_AGGRESSIVE","RISK_CONSERVATIVE","RISK_NEUTRAL"]
