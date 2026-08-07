@@ -1263,6 +1263,11 @@ class Indicators:
             "score_adj": 0
         }
 
+        if isinstance(volumes, dict) or not volumes or not isinstance(volumes, (list, tuple)):
+            volumes = [1.0] * min(len(closes), len(highs), len(lows), lookback)
+        if isinstance(taker_buy_vols, dict) or not taker_buy_vols or not isinstance(taker_buy_vols, (list, tuple)):
+            taker_buy_vols = [vi * 0.5 for vi in volumes]
+
         n = min(len(closes), len(highs), len(lows), len(volumes), lookback)
         if n < 15:
             return EMPTY
