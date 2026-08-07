@@ -281,7 +281,9 @@ class SignalEngine:
             "fvg": fvg, "sm_liq": sm_liq,
             "atr": round(atr, 4), "atr_pct": round(atr_pct, 3),
             "is_trending": is_trending, "adx_data": adx_data, "chop_data": chop_data, "price": price,
-            "high": highs, "low": lows, "close": closes
+            "high": highs, "low": lows, "close": closes,
+            "highs": highs, "lows": lows, "closes": closes,
+            "vols": vols, "tbvols": tbvols
         }
 
     def _btc_trend_now(self) -> str:
@@ -691,8 +693,8 @@ class SignalEngine:
         # ══════════════════════════════════════════════════════════
         highs_1h  = results.get("1h", {}).get("highs", []) or results.get("1h", {}).get("high", [])
         lows_1h   = results.get("1h", {}).get("lows", []) or results.get("1h", {}).get("low", [])
-        vols_1h   = results.get("1h", {}).get("volumes", []) or results.get("1h", {}).get("volume", [])
-        tbvols_1h = results.get("1h", {}).get("taker_buy_vols", [])
+        vols_1h   = results.get("1h", {}).get("vols", [])
+        tbvols_1h = results.get("1h", {}).get("tbvols", [])
 
         sr_data = self.ind.support_resistance_zones(
             closes_1h, highs_1h, lows_1h, vols_1h, tbvols_1h, ob_data=ob_data, lookback=80
