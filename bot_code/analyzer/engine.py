@@ -687,6 +687,28 @@ class SignalEngine:
                     conf = round(min(95, conf + 15.0), 1)
 
         # ══════════════════════════════════════════════════════════
+        # S/R ZONES & VOLUME PROFILE ANALYSIS
+        # ══════════════════════════════════════════════════════════
+        highs_1h  = results.get("1h", {}).get("highs", []) or results.get("1h", {}).get("high", [])
+        lows_1h   = results.get("1h", {}).get("lows", []) or results.get("1h", {}).get("low", [])
+        vols_1h   = results.get("1h", {}).get("volumes", []) or results.get("1h", {}).get("volume", [])
+        tbvols_1h = results.get("1h", {}).get("taker_buy_vols", [])
+
+        sr_data = self.ind.support_resistance_zones(
+            closes_1h, highs_1h, lows_1h, vols_1h, tbvols_1h, ob_data=ob_data, lookback=80
+        )
+
+        nearest_supp = sr_data.get("nearest_support", 0.0)
+        nearest_res  = sr_data.get("nearest_resistance", 0.0)
+        at_supp      = sr_data.get("at_support", False)
+        at_res       = sr_data.get("at_resistance", False)
+        vol_bo_up    = sr_data.get("vol_confirm_breakout", False)
+        vol_bo_down  = sr_data.get("vol_confirm_breakdown", False)
+        vol_ratio    = sr_data.get("vol_ratio", 1.0)
+        buy_pct      = sr_data.get("buy_pct", 50.0)
+        sell_pct     = sr_data.get("sell_pct", 50.0)
+
+        # ══════════════════════════════════════════════════════════
         # L2 ORDER BOOK IMBALANCE & LIQUIDITY WALL FILTER
         # ══════════════════════════════════════════════════════════
         if ob_data.get("detected"):
@@ -722,14 +744,50 @@ class SignalEngine:
                     final = "WAIT"
 
         # ══════════════════════════════════════════════════════════
+        # S/R ZONES & VOLUME CONFIRMATION FILTERS
+        # ══════════════════════════════════════════════════════════
+        if final == "LONG":
+            # 1. Chặn LONG khi tiệm cận Kháng cự mà Volume không đủ bứt phá (Tránh đu đỉnh dính SL)
+            if at_res and not vol_bo_up:
+                log.warning(
+                    f"⛔ FILTER (S/R RESISTANCE): Giá (${price:.4f}) tiệm cận Kháng Cự (${nearest_res:.4f}, cách {sr_data.get('resistance_dist_pct')}%) "
+                    f"nhưng Volume không đủ bứt phá (Vol ratio: {vol_ratio}x, Buy: {buy_pct}%) -> HỦY LỆNH LONG (Tránh đu đỉnh dính SL)."
+                )
+                final = "WAIT"
+
+        elif final == "SHORT":
+            # 2. Chặn SHORT khi tiệm cận Hỗ trợ mà Volume không đủ cắn xuống (Tránh dội ngược dính SL)
+            if at_supp and not vol_bo_down:
+                log.warning(
+                    f"⛔ FILTER (S/R SUPPORT): Giá (${price:.4f}) tiệm cận Hỗ Trợ (${nearest_supp:.4f}, cách {sr_data.get('support_dist_pct')}%) "
+                    f"nhưng Volume không đủ cắn xuống (Vol ratio: {vol_ratio}x, Sell: {sell_pct}%) -> HỦY LỆNH SHORT (Tránh dội ngược dính SL)."
+                )
+                final = "WAIT"
+
+        # 3. Kiểm tra dư địa Risk-to-Reward (R:R) so với mốc Kháng cự / Hỗ trợ gần nhất
+        atr_pct_1h_est = results.get("1h", {}).get("atr_pct", 1.0)
+        sl_est_pct = max(1.0, min(4.5, atr_pct_1h_est * 2.0))
+        if final == "LONG" and nearest_res > price:
+            dist_res_pct = (nearest_res - price) / price * 100
+            if dist_res_pct < 1.15 * sl_est_pct:
+                log.warning(
+                    f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Kháng Cự gần nhất (${nearest_res:.4f}) chỉ có {dist_res_pct:.2f}% "
+                    f"quá hẹp so với SL dự kiến ({sl_est_pct:.2f}%) -> R:R < 1.15 -> HỦY LỆNH LONG."
+                )
+                final = "WAIT"
+
+        elif final == "SHORT" and nearest_supp > 0 and nearest_supp < price:
+            dist_supp_pct = (price - nearest_supp) / price * 100
+            if dist_supp_pct < 1.15 * sl_est_pct:
+                log.warning(
+                    f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Hỗ Trợ gần nhất (${nearest_supp:.4f}) chỉ có {dist_supp_pct:.2f}% "
+                    f"quá hẹp so với SL dự kiến ({sl_est_pct:.2f}%) -> R:R < 1.15 -> HỦY LỆNH SHORT."
+                )
+                final = "WAIT"
+
+        # ══════════════════════════════════════════════════════════
         # 2.6. [NEW v6.11] XÁC NHẬN ĐA KHUNG: 4H QUYẾT XU HƯỚNG LỚN,
         # 15M TÌM ĐIỂM VÀO THEO ĐÚNG XU HƯỚNG ĐÓ
-        # ──────────────────────────────────────────────────────────
-        # Trước đây avg_score/combined trộn đều cả 4 khung (15m/1h/4h/1d)
-        # cùng lúc — không có thứ tự ưu tiên rõ ràng nào giữa "xu hướng lớn"
-        # và "thời điểm vào cụ thể". Giờ tách bạch: 4H không rõ hướng hoặc
-        # ngược tín hiệu -> không vào; 4H đồng thuận nhưng chính nến 15m chưa
-        # xác nhận cùng hướng -> chờ thêm, không vội bắt đầu ngay giữa chừng.
         # ══════════════════════════════════════════════════════════
         trend_4h  = results.get("4h", {}).get("direction", "WAIT")
         trend_15m = results.get("15m", {}).get("direction", "WAIT")
@@ -743,6 +801,7 @@ class SignalEngine:
                 log.info("  ⏳ [15M TRIGGER] %s: 4H đồng thuận %s nhưng nến 15m (%s) chưa xác nhận "
                          "điểm vào -> chờ nến 15m tiếp theo.", symbol, final, trend_15m)
                 final = "WAIT"
+
 
 
        # ══════════════════════════════════════════════════════════
@@ -830,6 +889,13 @@ class SignalEngine:
                     sl = mcp_sl
                     log.info("  🛡️ [SMC] Tối ưu SL LONG giấu ngoài MCP (Thanh khoản Mua): %.4f", sl)
 
+            # Tối ưu SL giấu dưới Vùng Hỗ Trợ Gần Nhất (S/R Support Zone)
+            if nearest_supp > 0 and nearest_supp < price:
+                sr_sl = round(nearest_supp * 0.9965, 2)
+                if sr_sl < price and ((price - sr_sl) / price * 100) <= sl_atr_pct * 2.2:
+                    sl = min(sl, sr_sl) if sl > 0 else sr_sl
+                    log.info("  🛡️ [S/R ZONE] Tối ưu SL LONG giấu ngoài Vùng Hỗ Trợ: %.4f", sl)
+
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
@@ -867,6 +933,13 @@ class SignalEngine:
                 if mcp_sl > price and ((mcp_sl - price) / price * 100) <= sl_atr_pct * 2.2:
                     sl = mcp_sl
                     log.info("  🛡️ [SMC] Tối ưu SL SHORT giấu ngoài MCP (Thanh khoản Bán): %.4f", sl)
+
+            # Tối ưu SL giấu trên Vùng Kháng Cự Gần Nhất (S/R Resistance Zone)
+            if nearest_res > price:
+                sr_sl = round(nearest_res * 1.0035, 2)
+                if sr_sl > price and ((sr_sl - price) / price * 100) <= sl_atr_pct * 2.2:
+                    sl = max(sl, sr_sl) if sl > 0 else sr_sl
+                    log.info("  🛡️ [S/R ZONE] Tối ưu SL SHORT giấu ngoài Vùng Kháng Cự: %.4f", sl)
 
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
@@ -1188,7 +1261,7 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.55   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
+            MIN_P_WIN = 0.60   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
             if p_win < MIN_P_WIN:
                 log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
                             p_win * 100, MIN_P_WIN * 100)
@@ -1287,6 +1360,7 @@ class SignalEngine:
             "rr_ratio": rr_ratio, "sl_pct": round(sl_atr_pct, 2),
             "tf_count": tf_count,
             "orderbook": ob_data,
+            "support_resistance": sr_data,
             "liquidity_sweep": sweep_data,
             "kalman": kalman_data,
             "hmm": {"regime": hmm_regime, "confidence": hmm_conf}, # Trả về dữ liệu HMM để hiển thị trên Telegram nếu cần
