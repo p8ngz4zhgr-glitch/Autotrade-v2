@@ -1235,3 +1235,160 @@ class Indicators:
             "bull_count": len(unmitigated_bullish),
             "bear_count": len(unmitigated_bearish)
         }
+
+    @staticmethod
+    def support_resistance_zones(closes: list, highs: list, lows: list, volumes: list, taker_buy_vols: list = None, ob_data: dict = None, lookback: int = 80) -> dict:
+        """
+        Xác định chi tiết các vùng Kháng Cự (Resistance) & Hỗ Trợ (Support) từ:
+        1. Pivots / Swing Highs & Lows (Các mốc đảo chiều kỹ thuật)
+        2. Volume Profile (Thanh khoản POC, VAH, VAL)
+        3. Orderbook L2 Liquidity Walls (Tường Bán / Tường Mua)
+        Thực hiện gom nhóm (clustering) các mốc giá gần nhau trong khoảng 0.6% để tạo thành vùng S/R thực tế.
+        Đo lường Volume & Taker Buy/Sell ratio tại các vùng S/R để xác nhận bứt phá (Breakout/Breakdown) hoặc dội ngược (Rejection).
+        """
+        EMPTY = {
+            "nearest_support": 0.0,
+            "nearest_resistance": 0.0,
+            "support_dist_pct": 99.0,
+            "resistance_dist_pct": 99.0,
+            "at_support": False,
+            "at_resistance": False,
+            "support_zones": [],
+            "resistance_zones": [],
+            "vol_confirm_breakout": False,
+            "vol_confirm_breakdown": False,
+            "vol_ratio": 1.0,
+            "buy_pct": 50.0,
+            "sell_pct": 50.0,
+            "score_adj": 0
+        }
+
+        n = min(len(closes), len(highs), len(lows), len(volumes), lookback)
+        if n < 15:
+            return EMPTY
+
+        price = float(closes[-1])
+        c = [float(x) for x in closes[-n:]]
+        h = [float(x) for x in highs[-n:]]
+        l = [float(x) for x in lows[-n:]]
+        v = [float(x) for x in volumes[-n:]]
+        tbv = [float(x) for x in taker_buy_vols[-n:]] if taker_buy_vols else [vi * 0.5 for vi in v]
+
+        avg_vol = sum(v) / len(v) if v else 1.0
+        curr_vol = v[-1]
+        vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1.0
+
+        curr_tbv = tbv[-1]
+        buy_pct = (curr_tbv / curr_vol * 100) if curr_vol > 0 else 50.0
+        sell_pct = 100.0 - buy_pct
+
+        candidates_support = []
+        candidates_resistance = []
+
+        # 1. Swing Highs & Swing Lows
+        for i in range(2, n - 2):
+            if h[i] > h[i-1] and h[i] > h[i-2] and h[i] > h[i+1] and h[i] > h[i+2]:
+                candidates_resistance.append((h[i], v[i], "SWING_HIGH"))
+            if l[i] < l[i-1] and l[i] < l[i-2] and l[i] < l[i+1] and l[i] < l[i+2]:
+                candidates_support.append((l[i], v[i], "SWING_LOW"))
+
+        # 2. Volume Profile (Volume nodes)
+        pmn, pmx = min(l), max(h)
+        prng = pmx - pmn
+        if prng > 0:
+            N_BUCKETS = 16
+            b_vols = [0.0] * N_BUCKETS
+            for i in range(n):
+                b_idx = min(N_BUCKETS - 1, int((c[i] - pmn) / prng * N_BUCKETS))
+                b_vols[b_idx] += v[i]
+            max_b_vol = max(b_vols) if b_vols else 1.0
+            for idx, b_vol in enumerate(b_vols):
+                if b_vol >= max_b_vol * 0.55:
+                    node_price = round(pmn + (idx + 0.5) * prng / N_BUCKETS, 4)
+                    if node_price > price:
+                        candidates_resistance.append((node_price, b_vol, "VOL_NODE"))
+                    elif node_price < price:
+                        candidates_support.append((node_price, b_vol, "VOL_NODE"))
+
+        # 3. Orderbook Walls (L2)
+        if ob_data and isinstance(ob_data, dict):
+            r_wall = float(ob_data.get("resist_wall", 0.0))
+            s_wall = float(ob_data.get("support_wall", 0.0))
+            r_usd = float(ob_data.get("resist_wall_usd", 0.0))
+            s_usd = float(ob_data.get("support_wall_usd", 0.0))
+            if r_wall > price:
+                candidates_resistance.append((r_wall, r_usd if r_usd > 0 else avg_vol * 2, "OB_WALL"))
+            if s_wall > 0 and s_wall < price:
+                candidates_support.append((s_wall, s_usd if s_usd > 0 else avg_vol * 2, "OB_WALL"))
+
+        # Clustering: gom mốc giá trong bán kính 0.6%
+        def cluster_levels(level_tuples, is_support=True):
+            if not level_tuples:
+                return []
+            sorted_tuples = sorted(level_tuples, key=lambda x: x[0], reverse=not is_support)
+            zones = []
+            for p_val, weight, src in sorted_tuples:
+                added = False
+                for z in zones:
+                    if abs(p_val - z["price"]) / z["price"] <= 0.006:
+                        z["touches"] += 1
+                        z["weight"] += weight
+                        z["sources"].add(src)
+                        z["price"] = round((z["price"] * (z["touches"] - 1) + p_val) / z["touches"], 4)
+                        added = True
+                        break
+                if not added:
+                    zones.append({
+                        "price": round(p_val, 4),
+                        "weight": weight,
+                        "touches": 1,
+                        "sources": {src}
+                    })
+            return zones
+
+        supp_zones = cluster_levels(candidates_support, is_support=True)
+        res_zones = cluster_levels(candidates_resistance, is_support=False)
+
+        supp_prices = [z["price"] for z in supp_zones if z["price"] < price]
+        res_prices = [z["price"] for z in res_zones if z["price"] > price]
+
+        nearest_supp = max(supp_prices) if supp_prices else round(price * 0.985, 4)
+        nearest_res = min(res_prices) if res_prices else round(price * 1.015, 4)
+
+        supp_dist_pct = round((price - nearest_supp) / price * 100, 2)
+        res_dist_pct = round((nearest_res - price) / price * 100, 2)
+
+        at_support = supp_dist_pct <= 0.85
+        at_resistance = res_dist_pct <= 0.85
+
+        # Volume confirmation
+        vol_confirm_breakout = (vol_ratio >= 1.25 and buy_pct >= 55.0) or (buy_pct >= 65.0)
+        vol_confirm_breakdown = (vol_ratio >= 1.25 and sell_pct >= 55.0) or (sell_pct >= 65.0)
+
+        score_adj = 0
+        if at_support and vol_confirm_breakout:
+            score_adj += 12
+        elif at_resistance and vol_confirm_breakdown:
+            score_adj -= 12
+        elif at_resistance and not vol_confirm_breakout:
+            score_adj -= 10
+        elif at_support and not vol_confirm_breakdown:
+            score_adj += 10
+
+        return {
+            "nearest_support": nearest_supp,
+            "nearest_resistance": nearest_res,
+            "support_dist_pct": supp_dist_pct,
+            "resistance_dist_pct": res_dist_pct,
+            "at_support": at_support,
+            "at_resistance": at_resistance,
+            "support_zones": supp_zones[:3],
+            "resistance_zones": res_zones[:3],
+            "vol_confirm_breakout": vol_confirm_breakout,
+            "vol_confirm_breakdown": vol_confirm_breakdown,
+            "vol_ratio": round(vol_ratio, 2),
+            "buy_pct": round(buy_pct, 1),
+            "sell_pct": round(sell_pct, 1),
+            "score_adj": score_adj
+        }
+
