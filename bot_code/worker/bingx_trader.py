@@ -149,7 +149,7 @@ class BingXExchange:
             })
         return res
 
-    def get_open_positions(self, symbol: str = None) -> list:
+    def get_open_positions(self, symbol: str = None):
         params = {}
         if symbol:
             params["symbol"] = symbol
@@ -187,7 +187,12 @@ class BingXExchange:
                         "qty": abs(qty),
                         "pnl": float(p.get("unrealizedProfit", 0)),
                     })
-        return positions
+            return positions
+        else:
+            log.error("⚠️ get_open_positions thất bại: code=%s msg=%s",
+                      res.get("code") if isinstance(res, dict) else "?",
+                      res.get("msg") if isinstance(res, dict) else res)
+            return None
 
     def get_trigger_orders(self):
         """
