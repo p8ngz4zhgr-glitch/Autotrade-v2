@@ -196,7 +196,13 @@ def _tg_send(token: str, chat_id: str, text: str):
         url = f"https://api.telegram.org/bot{effective_token}/sendMessage"
         resp = _req.post(url, json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}, timeout=5)
         if resp.status_code != 200:
-            log.warning("⚠️ Telegram _tg_send lỗi HTTP %d: %s", resp.status_code, resp.text)
+            log.warning("⚠️ Telegram _tg_send lỗi HTTP %d: %s. Thử lại dạng plain text...", resp.status_code, resp.text)
+            import re
+            clean_text = re.sub(r'<[^>]+>', '', text)
+            resp2 = _req.post(url, json={"chat_id": str(chat_id), "text": clean_text}, timeout=5)
+            if resp2.status_code == 200:
+                log.info("📲 [TELEGRAM] Đã gửi fallback plain text thành công tới %s", chat_id)
+                return True
             return False
         else:
             summary = text.replace("\n", " ")[:70]
@@ -708,6 +714,7 @@ def sync_bingx_positions():
 
             current_all: list = []
             current_map: dict = {}
+            fetch_failed_users: set = set()
 
             for user in active_users:
                 tid = user.telegram_id
@@ -725,6 +732,11 @@ def sync_bingx_positions():
 
                     positions = bx.get_open_positions()
                     triggers  = bx.get_trigger_orders()
+
+                    if positions is None:
+                        fetch_failed_users.add(tid)
+                        log.warning("⚠️ Không lấy được danh sách vị thế của user %s từ BingX -> Bỏ qua sync user này.", tid)
+                        continue
 
                     if not isinstance(positions, list):
                         positions = []
@@ -756,6 +768,7 @@ def sync_bingx_positions():
                             "direction": p.get("direction", "LONG"), "pct": pct,
                             "qty": p.get("qty", 0), "user_id": tid,
                             "entry": p.get("entry", 0), "sl": sl, "tp2": tp2,
+                            "leverage": user.leverage or 5
                         }
                         current_all.append({
                             "user_id": tid, "tier": user.tier, "capital": user.capital,
@@ -764,11 +777,17 @@ def sync_bingx_positions():
                             "qty": p.get("qty", 0), "sl": sl, "tp1": tp1, "tp2": tp2,
                         })
                 except Exception as e:
-                    log.warning("Sync user %s: %s", tid, e)
+                    log.warning("Sync user %s error: %s", tid, e)
+                    fetch_failed_users.add(tid)
                     _bx_cache.pop(tid, None)
 
             prev_map = getattr(sync_bingx_positions, "_prev", {})
             for k, v in prev_map.items():
+                user_id = v.get("user_id")
+                if user_id in fetch_failed_users:
+                    current_map[k] = v
+                    continue
+
                 if k not in current_map:
                     parts = k.split("_", 2)
                     if len(parts) == 3:
@@ -778,8 +797,7 @@ def sync_bingx_positions():
                         entry = v.get("entry", 0)
                         sl = v.get("sl", 0)
                         tp2 = v.get("tp2", 0)
-
-                        _save_journal(user_id, symbol, direction, pnl_pct, qty)
+                        lev = v.get("leverage", 5)
 
                         # Check if this close was already notified by reversal
                         was_reversal = False
@@ -794,11 +812,53 @@ def sync_bingx_positions():
                                 pass
 
                         if not was_reversal:
-                            # Send Telegram notification for Closed Position!
-                            # Determine if it hit SL, TP2, or was closed manually
-                            outcome_emoji = "🏆" if pnl_pct > 0 else "🛑"
-                            outcome_text = "CHỐT LỜI THÀNH CÔNG (TP2)" if pnl_pct > 0 else "DỪNG LỖ (SL)"
-                            if abs(pnl_pct) < 0.1:
+                            cur_px = 0
+                            try:
+                                bx_inst = _bx_cache.get(user_id)
+                                if bx_inst:
+                                    cur_px = bx_inst.get_latest_price(symbol)
+                            except Exception:
+                                pass
+
+                            is_sl_hit = False
+                            is_tp_hit = False
+
+                            if direction == "LONG":
+                                if sl > 0 and cur_px > 0 and cur_px <= sl * 1.003:
+                                    is_sl_hit = True
+                                elif sl > 0 and (cur_px <= 0 or cur_px < entry) and pnl_pct < 0:
+                                    is_sl_hit = True
+                                elif tp2 > 0 and cur_px >= tp2 * 0.997:
+                                    is_tp_hit = True
+                            else: # SHORT
+                                if sl > 0 and cur_px > 0 and cur_px >= sl * 0.997:
+                                    is_sl_hit = True
+                                elif sl > 0 and (cur_px <= 0 or cur_px > entry) and pnl_pct < 0:
+                                    is_sl_hit = True
+                                elif tp2 > 0 and cur_px <= tp2 * 1.003:
+                                    is_tp_hit = True
+
+                            if is_sl_hit:
+                                outcome_emoji = "🛑"
+                                outcome_text = "CẮT LỖ (STOP LOSS HIT)"
+                                if entry > 0 and sl > 0:
+                                    sl_price_pct = abs(entry - sl) / entry
+                                    calc_sl_pct = -round(sl_price_pct * lev * 100, 2)
+                                    pnl_pct = min(pnl_pct, calc_sl_pct) if calc_sl_pct < 0 else pnl_pct
+                            elif is_tp_hit:
+                                outcome_emoji = "🏆"
+                                outcome_text = "CHỐT LỜI THÀNH CÔNG (TP2)"
+                                if entry > 0 and tp2 > 0:
+                                    tp_price_pct = abs(tp2 - entry) / entry
+                                    calc_tp_pct = round(tp_price_pct * lev * 100, 2)
+                                    pnl_pct = max(pnl_pct, calc_tp_pct)
+                            elif pnl_pct > 0.1:
+                                outcome_emoji = "🏆"
+                                outcome_text = "CHỐT LỜI THÀNH CÔNG"
+                            elif pnl_pct < -0.1:
+                                outcome_emoji = "🛑"
+                                outcome_text = "CẮT LỖ (SL / ĐÓNG THỦ CÔNG)"
+                            else:
                                 outcome_emoji = "🛡️"
                                 outcome_text = "HOÀ VỐN / ĐÓNG THỦ CÔNG"
 
@@ -821,6 +881,8 @@ def sync_bingx_positions():
                             _tg_send(REGISTER_TOKEN, user_id, close_msg)
                             if ADMIN_CHAT_ID and str(user_id) != str(ADMIN_CHAT_ID):
                                 _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user_id}</code>:\n" + close_msg)
+
+                        _save_journal(user_id, symbol, direction, pnl_pct, qty)
 
             sync_bingx_positions._prev = current_map
 
