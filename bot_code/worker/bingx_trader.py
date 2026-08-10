@@ -859,30 +859,49 @@ class BingXExchange:
                             "msg": f"Đã dời SL động theo Chandelier Exit (ATR) xuống ${chandelier_sl:.4f}."
                         }
  
-        # 2. XỬ LÝ LỌC NHIỄU (AI BÁO WAIT)
+        # 2. BẢO VỆ CẮT LỖ SỚM VỚI NGƯỠNG RỦI RO & TÍN HIỆU SUY YẾU (AI BÁO WAIT / NEWS RISK)
+        # 2.1 Cắt lỗ tối đa an toàn (Hard Loss Cut): Khi ROE <= -8.0% (tránh gồng lỗ lớn)
+        if roe <= -8.0:
+            log.info(f"🛑 [MAX LOSS PROTECTION] {symbol} {direction}: Lỗ ROE {roe:.2f}% <= -8.0% -> CẮT LỖ SỚM BẢO VỆ VỐN!")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
+            if redis_client:
+                try: 
+                    redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                    redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
+                except: pass
+            return {"action": "CLOSE", "type": "CẮT LỖ SỚM BẢO VỆ VỐN (ROE <= -8.0%)", "roe": roe}
+
         new_signal = analysis_result.get("final", "WAIT")
         if new_signal == "WAIT":
             is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
-            THRESHOLD = 12.0
             
-            # Cần so sánh abs(roe) để cắt cả LONG lẫn SHORT
-            if roe >= THRESHOLD or roe <= -THRESHOLD:
-                # Chỉ đóng khi trend đã mất (is_trending == False)
-                if not is_trending:
-                    log.info(f"💰 Đóng chốt lời/cắt lỗ sớm {roe:.2f}% (Wait Regime).")
-                    self.close_position(symbol, current_qty, direction)
-                    self.cancel_all_orders(symbol)
-                    if redis_client:
-                        try: 
-                            redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
-                            redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
-                        except: pass
-                    return {"action": "CLOSE", "type": "CHỐT/CẮT SỚM", "roe": roe}
+            # Nếu đang âm >= 3% ROE hoặc mất trend khi âm -> Cắt lỗ sớm ngay!
+            if roe <= -3.0 or (roe < 0 and not is_trending):
+                log.info(f"📉 [EARLY CUT WAIT] Đóng cắt lỗ sớm {roe:.2f}% (Wait Regime / Suy yếu).")
+                self.close_position(symbol, current_qty, direction)
+                self.cancel_all_orders(symbol)
+                if redis_client:
+                    try: 
+                        redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                        redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
+                    except: pass
+                return {"action": "CLOSE", "type": "CẮT LỖ SỚM (SUY YẾU/WAIT)", "roe": roe}
+            elif roe >= 5.0 or net_pnl_usd >= 0.15:
+                log.info(f"💰 [EARLY TP WAIT] Đóng chốt lời sớm {roe:.2f}% khi AI chuyển WAIT.")
+                self.close_position(symbol, current_qty, direction)
+                self.cancel_all_orders(symbol)
+                if redis_client:
+                    try: 
+                        redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                        redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
+                    except: pass
+                return {"action": "CLOSE", "type": "CHỐT LỜI SỚM (WAIT)", "roe": roe}
         
         # 3. ĐẢO CHIỀU HOÀN TOÀN
         elif (direction == "LONG" and new_signal == "SHORT") or \
              (direction == "SHORT" and new_signal == "LONG"):
-            log.warning(f"🚨 Tín hiệu đảo ngược. Đóng lệnh {direction} cũ!")
+            log.warning(f"🚨 Tín hiệu đảo ngược ({direction} -> {new_signal}). Đóng lệnh {direction} cũ!")
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
             if redis_client:
