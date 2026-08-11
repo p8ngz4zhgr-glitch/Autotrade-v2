@@ -813,26 +813,28 @@ class SignalEngine:
         atr_pct_1h = results.get("1h", {}).get("atr_pct", 1.0)
         
         # A. Hệ số nhân động dựa trên HMM Regime & CHOP
-        # Dynamic Target Scaling: Tự động điều chỉnh khoảng cách TP/SL dựa trên chỉ số Choppiness Index (CHOP)
+        # Dynamic Target Scaling: Tự động điều chỉnh khoảng cách TP dựa trên chỉ số Choppiness Index (CHOP)
+        # LƯU Ý: Khi thị trường CHOPPY (đi ngang nhiễu râu), KHÔNG thu nhỏ SL (để tránh bị quét râu dính SL oan).
+        # Chỉ thu nhỏ mục tiêu TP để dễ chốt lời sớm.
         chop_1h = results.get("1h", {}).get("chop_data", {})
         chop_val_1h = chop_1h.get("chop", 50.0)
         
-        volatility_scaling_factor = 1.0
+        tp_scaling_factor = 1.0
         if chop_val_1h > 61.8:
-            volatility_scaling_factor = 0.8  # Giảm 20% khoảng cách mục tiêu để dễ khớp khi đi ngang phân phối
-            log.info("  📊 [DYNAMIC SCALING] CHOP = %.1f (CHOPPY) -> Thu nhỏ khoảng cách TP/SL (x0.8) để dễ khớp lệnh.", chop_val_1h)
+            tp_scaling_factor = 0.85 # Thu nhỏ 15% khoảng cách TP để dễ chốt lời khi đi ngang phân phối
+            log.info("  📊 [DYNAMIC SCALING] CHOP = %.1f (CHOPPY) -> Thu nhỏ TP (x0.85) để chốt lời nhanh, GIỮ NGUYÊN SL an toàn chống quét râu.", chop_val_1h)
         elif chop_val_1h < 38.2:
-            volatility_scaling_factor = 1.25 # Nới rộng 25% khoảng cách mục tiêu để tối đa hóa trend
-            log.info("  📊 [DYNAMIC SCALING] CHOP = %.1f (TRENDING) -> Nới rộng khoảng cách TP/SL (x1.25) để gồng lời tốt hơn.", chop_val_1h)
+            tp_scaling_factor = 1.25 # Nới rộng 25% khoảng cách TP để tối đa hóa trend
+            log.info("  📊 [DYNAMIC SCALING] CHOP = %.1f (TRENDING) -> Nới rộng TP (x1.25) để gồng lời tốt hơn.", chop_val_1h)
 
-        atr_multiplier = 2.0 * volatility_scaling_factor  # Mức chuẩn cho Crypto (Trend Following)
+        # Mức nhân SL chuẩn (không bị siết ngắn bởi CHOPPY để chống quét râu)
+        atr_multiplier = 2.0
         if hmm_regime == "SIDEWAYS":
-            atr_multiplier = 2.5 * volatility_scaling_factor  # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu
+            atr_multiplier = 2.5 # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu râu
 
         # [NEW v6.11] LỊCH TIN CPI/PPI/NFP — chỉ áp dụng cho Crypto/Vàng (đúng
         # yêu cầu, không quét toàn bộ lịch kinh tế). Trong vùng ảnh hưởng tin:
-        # SL siết gọn hơn (sl_tighten_mult<1) để nếu bị quét thanh khoản do
-        # biến động tin tức thì lỗ nhỏ, và size sẽ giảm ở bước đặt lệnh (main.py).
+        # Size giảm ở bước đặt lệnh (main.py) để quản trị rủi ro vốn.
         news_risk = {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
         if atype in ("CRYPTO", "GOLD"):
             try:
@@ -841,17 +843,20 @@ class SignalEngine:
             except Exception as e:
                 log.debug("  Lịch tin tức lỗi (bỏ qua, không chặn): %s", e)
 
-        # B. Tính % SL với trần (cap) được nâng lên 4.5% để chịu nhiệt Altcoin
-        # Sàn dưới nâng lên 1.0% để tránh đặt SL quá sát khi thị trường đột ngột im ắng
-        sl_atr_pct = max(1.0, min(4.5, atr_pct_1h * atr_multiplier))
-        sl_atr_pct = sl_atr_pct * news_risk["sl_tighten_mult"]
+        # B. Tính % SL với trần (cap) 4.5% để chịu nhiệt Altcoin.
+        # SÀN DƯỚI AN TOÀN: Đặt tối thiểu 1.5% cho Crypto/Gold và 1.2% cho Stock
+        # để tuyệt đối tránh "SL quá ngắn" gây dính Stop Loss do râu nến nhiễu.
+        min_sl_floor = 1.5 if atype in ("CRYPTO", "GOLD") else 1.2
+        sl_atr_pct = max(min_sl_floor, min(4.5, atr_pct_1h * atr_multiplier))
+        sl_tighten = news_risk.get("sl_tighten_mult", 1.0)
+        sl_atr_pct = max(min_sl_floor, sl_atr_pct * sl_tighten)
         
         # [ANTI-MM] Thêm Dynamic Noise Buffer (0.3% - 0.5%) để giấu SL khỏi vùng phủ sóng MM
         mm_noise_buffer_pct = max(0.3, min(0.6, atr_pct_1h * 0.35))
         
         # C. Tỷ lệ R:R động
-        tp1_pct    = sl_atr_pct * 1.5 * volatility_scaling_factor  # Tối thiểu R:R 1:1.5 cho TP1
-        tp2_pct    = sl_atr_pct * 3.0 * volatility_scaling_factor  # R:R 1:3 cho TP2
+        tp1_pct    = sl_atr_pct * 1.5 * tp_scaling_factor  # Tối thiểu R:R 1:1.5 cho TP1
+        tp2_pct    = sl_atr_pct * 3.0 * tp_scaling_factor  # R:R 1:3 cho TP2
         
         fibo4l     = results.get("4h", {}).get("fibo", {}).get("levels", {})
 
