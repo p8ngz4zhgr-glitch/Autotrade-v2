@@ -72,9 +72,9 @@ Trạng thái trả về CHỈ DUY NHẤT 1 TỪ VỚI CHỮ IN HOA, TUYỆT Đ�
             _NEWS_RISK_STATE["active"] = True
             _NEWS_RISK_STATE["event"] = "Tin xấu thị trường (AI Scanner)"
             _NEWS_RISK_STATE["size_mult"] = 0.5  # Giảm 50% vốn vào lệnh
-            _NEWS_RISK_STATE["sl_tighten_mult"] = 0.7  # Siết SL 70%
+            _NEWS_RISK_STATE["sl_tighten_mult"] = 0.9  # Đảm bảo SL không bị siết quá ngắn gây dính râu
             _NEWS_RISK_STATE["last_check"] = time.time()
-            log.warning("📰 [NEWS RISK] PHÁT HIỆN TIN XẤU THỊ TRƯỜNG! Tự động giảm 50%% vốn vào lệnh (size_mult=0.5) & siết SL, BOT VẪN CHẠY BÌNH THƯỜNG. (LLM: %s)", result)
+            log.warning("📰 [NEWS RISK] PHÁT HIỆN TIN XẤU THỊ TRƯỜNG! Tự động giảm 50%% vốn vào lệnh (size_mult=0.5) & bảo vệ SL an toàn sàn >=1.5%%, BOT VẪN CHẠY BÌNH THƯỜNG. (LLM: %s)", result)
         else:
             _NEWS_RISK_STATE["active"] = False
             _NEWS_RISK_STATE["event"] = None
