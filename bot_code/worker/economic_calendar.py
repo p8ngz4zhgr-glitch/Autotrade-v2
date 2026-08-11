@@ -138,7 +138,7 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
             from analyzer.news_agent import get_news_agent_risk
             na_risk = get_news_agent_risk()
             if na_risk.get("active"):
-                log.warning("📰 [NEWS RISK - LLM] Cảnh báo tin xấu (%s) -> Giảm 50%% vốn vào lệnh (size_mult=0.5), siết SL x0.7 (Bot vẫn hoạt động).",
+                log.warning("📰 [NEWS RISK - LLM] Cảnh báo tin xấu (%s) -> Giảm 50%% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%%.",
                             na_risk.get("event"))
                 return na_risk
         except Exception as ex_na:
@@ -153,9 +153,9 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
             except Exception:
                 continue
             if (et - timedelta(hours=hours_before)) <= now <= (et + timedelta(hours=hours_after)):
-                log.warning("📰 [NEWS WINDOW - CALENDAR] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm 50%% vốn vào lệnh, siết SL.",
+                log.warning("📰 [NEWS WINDOW - CALENDAR] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm 50%% vốn vào lệnh, quản trị rủi ro.",
                             e["name"], e["time"])
-                return {"active": True, "event": e["name"], "size_mult": 0.5, "sl_tighten_mult": 0.7}
+                return {"active": True, "event": e["name"], "size_mult": 0.5, "sl_tighten_mult": 0.9}
         return {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
     except Exception as ex:
         log.warning("⚠️ news_risk_adjustment lỗi (%s) -> fail-open, không điều chỉnh gì.", ex)
