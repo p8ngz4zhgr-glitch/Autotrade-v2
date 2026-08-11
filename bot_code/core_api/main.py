@@ -338,17 +338,21 @@ def _build_pnl_report_text(db: Session, user_id: str = None, period: str = "24H"
         total_trades = stats_all.get("total_trades", 0)
         wins = stats_all.get("wins", 0)
         losses = stats_all.get("losses", 0)
-        total_pnl_pct = stats_all.get("total_pnl_pct", 0)
+        total_pnl_usd = stats_all.get("total_pnl_usd", 0.0)
+        total_pnl_pct = stats_all.get("total_pnl_pct", 0.0)
         
-        # Dự báo khả năng sinh lời của Bot dựa trên chỉ số thống kê thực tế
-        if wr >= 65 and pf >= 1.3:
-            rating = "🔥 RẤT CAO (Chiến lược Win Rate & Expectancy xuất sắc)"
-            proj_monthly = "+12% ~ +25% / tháng"
-        elif wr >= 50 or pf >= 1.0 or total_trades == 0:
-            rating = "⚡ ỔN ĐỊNH (Tăng trưởng bền vững, bảo vệ vốn tối ưu)"
-            proj_monthly = "+6% ~ +15% / tháng"
+        # Đánh giá khả năng sinh lời thực tế dựa trên PnL USD thực và Win Rate
+        if total_pnl_usd < 0:
+            rating = "🛡️ PHÒNG THỦ & PHỤC HỒI (Vốn đang bị sụt giảm, Bot siết SL & giảm 50% size để bảo vệ vốn)"
+            proj_monthly = "Tối ưu quản trị rủi ro phục hồi vốn"
+        elif wr >= 60 and pf >= 1.3 and total_pnl_usd > 0:
+            rating = "🔥 RẤT CAO (Tăng trưởng vốn thực tế xuất sắc)"
+            proj_monthly = "+10% ~ +22% / tháng"
+        elif total_pnl_usd >= 0:
+            rating = "⚡ ỔN ĐỊNH (Tăng trưởng bền vững & bảo toàn vốn)"
+            proj_monthly = "+5% ~ +12% / tháng"
         else:
-            rating = "🛡️ THỦ THẾ AN TOÀN (Tự động siết SL & giảm size bảo toàn vốn)"
+            rating = "⚖️ THEO DÕI THỊ TRƯỜNG"
             proj_monthly = "+3% ~ +8% / tháng"
             
         pos_str = ""
@@ -360,27 +364,30 @@ def _build_pnl_report_text(db: Session, user_id: str = None, period: str = "24H"
                 roe = float(p.get("pnl_pct", 0))
                 pnl_u = float(p.get("pnl", 0))
                 icon = "🟢" if roe >= 0 else "🔴"
-                pos_str += f"  • <b>{sym}</b> ({dir_}): {icon} <b>{roe:+.2f}%</b> (${pnl_u:+.2f})\n"
+                pos_str += f"  • <b>{sym}</b> ({dir_}): {icon} <b>{roe:+.2f}% ROE</b> (${pnl_u:+.2f})\n"
         else:
             pos_str += "\n\n📌 <b>Vị Thế Đang Chạy:</b> Chưa có lệnh mở (Đang scan điểm vào an toàn)"
+
+        period_pnl_u = stats_period.get("total_pnl_usd", 0.0)
+        period_pnl_p = stats_period.get("total_pnl_pct", 0.0)
 
         msg = (
             f"📊 <b>BÁO CÁO PHÂN TÍCH HIỆU SUẤT & LỜI LỖ ({period})</b>\n"
             f"👤 Tài khoản: <b>{user_id or 'HỆ THỐNG TỔNG'}</b> [{tier_label}]\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"💰 <b>Tài Sản & PnL Hiện Tại:</b>\n"
-            f"  • Vốn Equity: <b>${equity:.2f}</b>\n"
-            f"  • PnL lệnh đang mở (Unrealized): <b>${unrealized_pnl_usd:+.2f}</b>\n"
-            f"  • PnL chốt trong {period}: <b>{stats_period.get('total_pnl_pct', 0):+.2f}%</b>\n\n"
+            f"💰 <b>Tài Sản & PnL Thực Tế:</b>\n"
+            f"  • Vốn Equity Hiện Tại: <b>${equity:.2f}</b>\n"
+            f"  • PnL lệnh đang mở: <b>${unrealized_pnl_usd:+.2f}</b>\n"
+            f"  • PnL chốt trong {period}: <b>${period_pnl_u:+.2f} ({period_pnl_p:+.2f}% Vốn)</b>\n\n"
             f"📈 <b>Thống Kê Lịch Sử (90 Ngày):</b>\n"
+            f"  • Tăng trưởng vốn (Real ROI): <b>${total_pnl_usd:+.2f} ({total_pnl_pct:+.2f}% Vốn)</b>\n"
             f"  • Win Rate (Tỷ lệ thắng): <b>{wr}%</b> ({wins} Thắng / {losses} Thua)\n"
             f"  • Profit Factor (Hệ số lời/lỗ): <b>{pf}</b>\n"
-            f"  • Tổng số lệnh đã đóng: <b>{total_trades} lệnh</b>\n"
-            f"  • Tổng PnL tích lũy: <b>{total_pnl_pct:+.2f}%</b>\n\n"
+            f"  • Tổng số lệnh đã đóng: <b>{total_trades} lệnh</b>\n\n"
             f"🔮 <b>ĐÁNH GIÁ KHẢ NĂNG SINH LỜI BOT:</b>\n"
             f"  • Đánh giá hiệu suất: <b>{rating}</b>\n"
-            f"  • Mục tiêu sinh lời kỳ vọng: <b>{proj_monthly}</b>\n"
-            f"  • Quản trị rủi ro: <i>Kalman Filter + HMM Regime + Dynamic SL Floor (>=1.5%) + Noise Buffer</i>"
+            f"  • Dự báo mục tiêu: <b>{proj_monthly}</b>\n"
+            f"  • Cơ chế bảo mật: <i>Kalman Filter + HMM Regime + SL Floor (>=1.5%) + Noise Buffer</i>"
             f"{pos_str}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⏰ <i>Thời gian báo cáo: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</i>"
@@ -1687,8 +1694,8 @@ def get_market_depth(symbol: str = Query(default="BTCUSDT")):
 # ══════════════════════════════════════════════════════════════════
 
 def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict:
-    """[FIX v6.2] Tính win_rate/profit_factor THẬT từ TradeJournal thay vì số 0 cứng,
-    để user theo dõi được mục tiêu tỉ lệ thắng ngay trên dashboard."""
+    """[FIX v6.6] Tính win_rate, profit_factor và % ROI THỰC TẾ theo VỐN TÀI KHOẢN (Real Capital ROI)
+    thay vì cộng dồn ROE đòn bẩy ảo."""
     try:
         since = datetime.utcnow() - timedelta(days=days)
         q = db.query(TradeJournal).filter(TradeJournal.timestamp >= since)
@@ -1696,27 +1703,45 @@ def _compute_win_stats(db: Session, user_id: str = None, days: int = 30) -> dict
             q = q.filter(TradeJournal.user_id == user_id)
         rows = q.all()
         if not rows:
-            return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
+            return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_usd": 0.0, "total_pnl_pct": 0.0, "wins": 0, "losses": 0}
 
-        wins   = [r for r in rows if (r.pnl_pct or 0) > 0]
-        losses = [r for r in rows if (r.pnl_pct or 0) <= 0]
+        wins   = [r for r in rows if (r.pnl_usd or 0) > 0 or (r.pnl_pct or 0) > 0]
+        losses = [r for r in rows if (r.pnl_usd or 0) <= 0 and (r.pnl_pct or 0) <= 0]
         win_rate = round(len(wins) / len(rows) * 100, 1)
 
         gross_win  = sum((r.pnl_usd or 0) for r in wins)
         gross_loss = abs(sum((r.pnl_usd or 0) for r in losses))
+        total_pnl_usd = round(sum((r.pnl_usd or 0) for r in rows), 2)
+
         if gross_loss > 0:
             profit_factor = round(gross_win / gross_loss, 2)
         else:
             profit_factor = round(gross_win, 2) if gross_win > 0 else 0
 
+        user = db.query(User).filter(User.telegram_id == user_id).first() if user_id else None
+        equity = user.capital if user and user.capital else 0.0
+
+        # Tính ROI % thực tế của vốn (Real Capital ROI %)
+        initial_est = equity - total_pnl_usd
+        if initial_est > 0:
+            real_roi_pct = round((total_pnl_usd / initial_est) * 100, 2)
+        elif equity > 0:
+            real_roi_pct = round((total_pnl_usd / equity) * 100, 2)
+        else:
+            real_roi_pct = 0.0
+
         return {
-            "win_rate": win_rate, "profit_factor": profit_factor,
-            "total_trades": len(rows), "wins": len(wins), "losses": len(losses),
-            "total_pnl_pct": round(sum((r.pnl_pct or 0) for r in rows), 2),
+            "win_rate": win_rate, 
+            "profit_factor": profit_factor,
+            "total_trades": len(rows), 
+            "wins": len(wins), 
+            "losses": len(losses),
+            "total_pnl_usd": total_pnl_usd,
+            "total_pnl_pct": real_roi_pct,
         }
     except Exception as e:
         log.warning("_compute_win_stats error: %s", e)
-        return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_pct": 0}
+        return {"win_rate": 0, "profit_factor": 0, "total_trades": 0, "total_pnl_usd": 0.0, "total_pnl_pct": 0.0, "wins": 0, "losses": 0}
 
 @app.get("/api/state")
 def get_state(request: Request, db: Session = Depends(get_db), uid: str = Query(default="")):
