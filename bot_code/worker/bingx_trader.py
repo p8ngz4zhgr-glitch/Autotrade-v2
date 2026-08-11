@@ -876,9 +876,9 @@ class BingXExchange:
         if new_signal == "WAIT":
             is_trending = analysis_result.get("timeframes", {}).get("1h", {}).get("is_trending", True)
             
-            # Nếu đang âm >= 3% ROE hoặc mất trend khi âm -> Cắt lỗ sớm ngay!
-            if roe <= -3.0 or (roe < 0 and not is_trending):
-                log.info(f"📉 [EARLY CUT WAIT] Đóng cắt lỗ sớm {roe:.2f}% (Wait Regime / Suy yếu).")
+            # Chỉ cắt lỗ khi ROE âm >= -4.5% hoặc âm >= -2.5% mà xu hướng chính 1H/4H thực sự gãy hoàn toàn (is_trending == False)
+            if roe <= -4.5 or (roe <= -2.5 and not is_trending):
+                log.info(f"📉 [EARLY CUT WAIT] Đóng cắt lỗ khi tín hiệu gãy xu hướng {roe:.2f}% (Wait Regime / Suy yếu).")
                 self.close_position(symbol, current_qty, direction)
                 self.cancel_all_orders(symbol)
                 if redis_client:
