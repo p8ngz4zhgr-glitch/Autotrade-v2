@@ -617,8 +617,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         emoji = "🛡️"
         action_type = ""
 
-        DYNAMIC_SL_LIMIT = -8.0   # Siết ngưỡng Virtual SL tối đa về -8.0% ROE bảo vệ vốn
-        DYNAMIC_TP_LIMIT = 6.0    
+        # Nâng ngưỡng Virtual SL tối đa lên -35.0% ROE (đủ không gian gồng nhiễu nến 2.5% - 3.5% spot ở đòn bẩy 10x-20x)
+        # Loại bỏ triệt để việc cắt lỗ nhảm khi PnL vừa mới âm nhẹ -2% đến -5% ROE do râu nến nhiễu.
+        DYNAMIC_SL_LIMIT = -35.0   
+        DYNAMIC_TP_LIMIT = 8.0    
 
         # 🚨 [TẦNG ƯU TIÊN 0]: PHẢN XẠ TỦY SỐNG (CHỐT LỜI CỨNG)
         # Luôn chạy đầu tiên: Đã chạm TP là chốt ngay, ghi đè toàn bộ tín hiệu AI/HMM!
@@ -647,13 +649,13 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             is_sweep_same = (direction == "LONG" and sw_type == "BULLISH_SWEEP") or \
                             (direction == "SHORT" and sw_type == "BEARISH_SWEEP")
 
-            if is_sweep_against:
+            if is_sweep_against and not in_profit and pnl_pct <= -25.0:
                 action = "CLOSE_ALL"
-                action_type = "CHỐT SỚM (BẪY CÁ MẶP SWEEP)" if in_profit else "CẮT LỖ SỚM (SWEEP TRAP)"
+                action_type = "CẮT LỖ KHẨN CẤP (SWEEP TRAP MẠNH)"
                 emoji = "🦈"
                 trap_name = "Bearish Sweep (Quét đỉnh xả hàng)" if sw_type == "BEARISH_SWEEP" else "Bullish Sweep (Quét đáy ép bán)"
                 reason = (f"CẢNH BÁO CÁ MẶP: Phát hiện bẫy thanh khoản {trap_name} tại giá ${sw_price:.4f} "
-                          f"ngược chiều lệnh {direction} đang giữ (PnL: {pnl_pct:+.2f}%) -> Kích hoạt thoát lệnh khẩn cấp để bảo vệ tài sản.")
+                          f"ngược chiều lệnh {direction} khi PnL âm sâu ({pnl_pct:+.2f}%) -> Thoát lệnh bảo vệ tài sản.")
 
             elif is_sweep_same and not in_profit:
                 # MM đang chọc râu quét SL phe ta nhưng nến đã rút chân Reclaim -> Kích hoạt VIRTUAL SL bảo vệ, KHÔNG cắt lỗ ở giá xấu nhất râu!
@@ -663,14 +665,14 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                              f"Nến đã rút chân Reclaim (PnL hiện tại: {pnl_pct:+.2f}%%) -> GIỮ VỊ THẾ ẢO, từ chối cắt lỗ đúng đáy/đỉnh râu!", sym, sw_type)
                     _SENT_NOTIFICATIONS[vsl_key] = True
 
-            # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CẮT LỖ SỚM VỚI VIRTUAL SL BUFFER)
+            # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CHỈ CẮT LỖ KHI ÂM SÂU VƯỢT NGƯỠNG DYNAMIC SL LIMIT)
             elif pnl_pct <= DYNAMIC_SL_LIMIT:
                 action = "CLOSE_ALL"
-                action_type = "CẮT LỖ SỚM (VIRTUAL SL)"
+                action_type = "CẮT LỖ BẢO VỆ VỐN (VIRTUAL SL TOÀN DIỆN)"
                 emoji = "🚨"
-                reason = f"Trạng thái âm {pnl_pct:.2f}% vượt quá ngưỡng lỗ tối đa an toàn ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Cắt lỗ bảo toàn tài sản."
+                reason = f"Trạng thái âm {pnl_pct:.2f}% vượt quá ngưỡng lỗ tối đa cho phép ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Cắt lỗ bảo toàn tài sản."
 
-            # [TẦNG ƯU TIÊN 1.5]: CẢNH BÁO TIN XẤU / XUNG LỰC DÒNG TIỀN ĐẢO CHIỀU
+            # [TẦNG ƯU TIÊN 1.5]: CẢNH BÁO TIN XẤU VÀ DÒNG TIỀN (CHỈ CẮT KHI ÂM TRÊN -25% ROE)
             else:
                 news_risk_data = analysis.get("news_risk", {})
                 has_news_risk = news_risk_data.get("active", False) or (news_risk_data.get("sl_tighten_mult", 1.0) < 1.0)
@@ -679,57 +681,38 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 press_val = analysis.get("pressure", "NEUTRAL")
                 cvd_val = analysis.get("cvd_trend", "NEUTRAL")
 
-                is_pressure_against = (direction == "LONG" and (press_val == "BEARISH" or cvd_val in ("BEARISH", "BEARISH_DIV") or smart_score <= -20)) or \
-                                      (direction == "SHORT" and (press_val == "BULLISH" or cvd_val in ("BULLISH", "BULLISH_DIV") or smart_score >= 20))
+                is_pressure_against = (direction == "LONG" and (press_val == "BEARISH" or cvd_val in ("BEARISH", "BEARISH_DIV") or smart_score <= -25)) or \
+                                      (direction == "SHORT" and (press_val == "BULLISH" or cvd_val in ("BULLISH", "BULLISH_DIV") or smart_score >= 25))
 
-                if has_news_risk and pnl_pct < -2.0:
+                if has_news_risk and pnl_pct <= -25.0:
                     action = "CLOSE_ALL"
-                    action_type = "CẮT LỖ SỚM (NEWS RISK - CẢNH BÁO TIN XẤU)"
+                    action_type = "CẮT LỖ SỚM (NEWS RISK)"
                     emoji = "📰"
-                    reason = f"Cảnh báo tin xấu / rủi ro từ AI Scanner khi lệnh đang âm ({pnl_pct:+.2f}%) -> Cắt lỗ khẩn cấp bảo vệ tài sản."
+                    reason = f"Cảnh báo tin xấu từ AI Scanner khi lệnh âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ khẩn cấp."
 
-                elif is_pressure_against and pnl_pct < -2.5:
+                elif is_pressure_against and pnl_pct <= -25.0:
                     action = "CLOSE_ALL"
-                    action_type = "CẮT LỖ SỚM (DÒNG TIỀN SUY YẾU/ĐẢO CHIỀU)"
+                    action_type = "CẮT LỖ SỚM (DÒNG TIỀN ĐẢO CHIỀU MẠNH)"
                     emoji = "📉"
-                    reason = f"Áp lực mua/bán và Smart Money đảo chiều chống lại vị thế {direction} khi PnL âm ({pnl_pct:+.2f}%) -> Cắt lỗ sớm tránh lỗ sâu."
+                    reason = f"Smart Money đảo chiều chống lại vị thế khi PnL âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ sớm."
 
             if action == "KEEP":
-                # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK)
-                if is_reversal and conf >= 60:
+                # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK KHUNG LỚN)
+                if is_reversal and conf >= 70:
                     action = "CLOSE_ALL"
                     should_reverse = True
-                    action_type = "CHỐT LỜI SỚM (ĐẢO CHIỀU)" if in_profit else "CẮT LỖ SỚM"
+                    action_type = "CHỐT LỜI SỚM (ĐẢO CHIỀU)" if in_profit else "CẮT LỖ ĐẢO CHIỀU"
                     phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
                     emoji = "🚨"
-                    reason = f"Đang trong giai đoạn {phase_str}, phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Chốt lệnh khẩn cấp."
-                    
-                elif is_reversal and conf >= 40:
-                    action = "CLOSE_ALL"
-                    action_type = "CHỐT LỜI SỚM (PHÂN KỲ)" if in_profit else "CẮT LỖ SỚM"
-                    phase_str = "tiến về TP2" if is_scaled_out else "chưa chạm TP1"
-                    emoji = "⚠️"
-                    reason = f"Dòng tiền phân kỳ nhẹ khi lệnh đang {phase_str}, xu hướng báo {new_direction} -> Đóng lệnh chủ động thu tiền về."
+                    reason = f"Phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Đóng lệnh chuyển hướng."
 
-                # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT
-                elif is_trend_active:
-                    action = "KEEP"
-                    phase_str = f"đã qua TP{tp_progress}, tiến lên TP{tp_progress+1}" if is_scaled_out else "chờ chạm mốc TP1"
-                    reason = f"Xu thế {new_direction} đang tiếp diễn thuận lợi. Trạng thái: Đang {phase_str} (PnL: {pnl_pct:+.2f}%)."
-
-                # [TẦNG ƯU TIÊN 4]: THỊ TRƯỜNG MẤT ĐỘNG LƯỢNG (WAIT REGIME)
-                elif new_direction == "WAIT":
+                # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT HOẶC MẤT ĐỘNG LƯỢNG NGẮN HẠN
+                # Giữ nguyên vị thế khi tín hiệu báo WAIT hoặc nhiễu nến nhỏ, để lệnh tự do vận động đến TP hoặc SL chuẩn
+                else:
                     is_market_sideways = (hmm_regime == "SIDEWAYS")
                     current_tp_limit = DYNAMIC_TP_LIMIT if not is_scaled_out else (DYNAMIC_TP_LIMIT * 1.5)
                     
-                    # Tránh cắt lỗ hoảng loạn khi PnL chỉ mới âm nhẹ (-0.5% ~ -2.5% ROE) do nhiễu nến 15m.
-                    # Chỉ cắt lỗ khi PnL vọt quá ngưỡng Virtual SL an toàn (<= -8.0%), hoặc âm >= -4.0% và mất hoàn toàn trend Kalman/4H.
-                    if pnl_pct <= -4.0 and not is_trend_active:
-                        action = "CLOSE_ALL"
-                        action_type = "CẮT LỖ SỚM (GÃY XU HƯỚNG / WAIT)"
-                        emoji = "📉"
-                        reason = f"Tín hiệu AI chuyển sang WAIT và xu hướng chính đã gãy hẳn khi PnL âm ({pnl_pct:+.2f}%) -> Cắt lỗ chủ động bảo vệ tài sản."
-                    elif pnl_pct >= current_tp_limit and is_market_sideways:
+                    if pnl_pct >= current_tp_limit and is_market_sideways:
                         action = "CLOSE_ALL"
                         action_type = "CHỐT LỜI ĐỘNG (SIDEWAYS)"
                         emoji = "✅"
@@ -737,7 +720,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận {pnl_pct:.2f}% >= mục tiêu thu hoạch sớm ({current_tp_limit}%) -> Đóng lệnh an toàn."
                     else:
                         action = "HOLD"
-                        log.info(f"Tín hiệu {sym} báo WAIT nhưng PnL ({pnl_pct:+.2f}%) chưa vượt rủi ro và xu hướng chính chưa gãy. Tiếp tục neo lệnh giám sát.")
+                        log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}%% nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.")
 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
