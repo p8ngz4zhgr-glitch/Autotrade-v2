@@ -515,12 +515,19 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 is_sl_notified = _SENT_NOTIFICATIONS.get(sl_notif_key, False)
  
             if not is_sl_notified:
-                lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)" if target_lvl == 1 else f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
-                _tg_send(
-                    REGISTER_TOKEN, user.telegram_id, 
-                    f"🛡️ <b>TRAILING SL KÍCH HOẠT: {sym}</b>\n"
-                    f"Giá đã đi được 50% chặng đường tới TP{target_lvl}. Tự động dời Stoploss về {lvl_str} để bảo vệ lợi nhuận!"
-                )
+                if target_lvl >= 98:
+                    _tg_send(
+                        REGISTER_TOKEN, user.telegram_id, 
+                        f"🛡️ <b>TRAILING SL ATR (CHANDELIER): {sym}</b>\n"
+                        f"Giá tạo đỉnh/đáy mới! Tự động dời Stoploss đến <code>${new_sl_val:.4f}</code> để khóa lợi nhuận!"
+                    )
+                else:
+                    lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)" if target_lvl == 1 else f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
+                    _tg_send(
+                        REGISTER_TOKEN, user.telegram_id, 
+                        f"🛡️ <b>TRAILING SL KÍCH HOẠT: {sym}</b>\n"
+                        f"Giá đã đi được 50% chặng đường tới TP{target_lvl}. Tự động dời Stoploss về {lvl_str} để bảo vệ lợi nhuận!"
+                    )
                 _SENT_NOTIFICATIONS[sl_notif_key] = True
                 try: cache.setex(sl_notif_key, 86400, "1")
                 except: pass
