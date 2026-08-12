@@ -270,8 +270,16 @@ class BingXExchange:
 
                     if is_sl:
                         triggers[normalized_sym]["sl"] = stop_price
+                        if sym:
+                            if sym not in triggers:
+                                triggers[sym] = {}
+                            triggers[sym]["sl"] = stop_price
                     elif is_tp:
                         triggers[normalized_sym]["tp2"] = stop_price
+                        if sym:
+                            if sym not in triggers:
+                                triggers[sym] = {}
+                            triggers[sym]["tp2"] = stop_price
         return triggers
 
     def _safe_order(self, params: dict) -> dict:
@@ -652,7 +660,8 @@ class BingXExchange:
         if trigger_orders is None:
             log.warning("⚠️ %s: Không đọc được lệnh chờ hiện tại trên sàn -> bỏ qua chu kỳ này, không hành động.", symbol)
             return {"action": "NONE", "msg": "Không xác thực được trạng thái SL/TP hiện tại trên sàn."}
-        active_orders = trigger_orders.get(symbol, {})
+        clean_sym = symbol.replace("-", "")
+        active_orders = trigger_orders.get(symbol, {}) or trigger_orders.get(clean_sym, {})
         current_sl = float(active_orders.get("sl", 0))
 
         
@@ -808,7 +817,8 @@ class BingXExchange:
                     
                     chandelier_sl = peak_price - 2.5 * atr_val
                     update_threshold = entry_price * 0.0015
-                    if (chandelier_sl > current_sl + update_threshold) and (chandelier_sl < current_price):
+                    # Chỉ kích hoạt Chandelier Trailing SL khi vị thế ĐÃ CÓ LÃI và SL mới lớn hơn CẢ giá Entry lẫn SL hiện tại
+                    if (current_price > entry_price) and (chandelier_sl > entry_price) and (chandelier_sl > current_sl + update_threshold) and (chandelier_sl < current_price):
                         # Kiểm tra cooldown
                         try:
                             if redis_client.get(cooldown_key):
@@ -837,7 +847,8 @@ class BingXExchange:
                         
                     chandelier_sl = peak_price + 2.5 * atr_val
                     update_threshold = entry_price * 0.0015
-                    if (current_sl == 0 or chandelier_sl < current_sl - update_threshold) and (chandelier_sl > current_price):
+                    # Chỉ kích hoạt Chandelier Trailing SL khi vị thế ĐÃ CÓ LÃI và SL mới thấp hơn CẢ giá Entry lẫn SL hiện tại
+                    if (current_price < entry_price) and (chandelier_sl < entry_price) and (current_sl > 0 and chandelier_sl < current_sl - update_threshold) and (chandelier_sl > current_price):
                         # Kiểm tra cooldown
                         try:
                             if redis_client.get(cooldown_key):
