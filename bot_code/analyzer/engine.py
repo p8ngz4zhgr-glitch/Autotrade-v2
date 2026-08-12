@@ -827,14 +827,12 @@ class SignalEngine:
             tp_scaling_factor = 1.25 # Nới rộng 25% khoảng cách TP để tối đa hóa trend
             log.info("  📊 [DYNAMIC SCALING] CHOP = %.1f (TRENDING) -> Nới rộng TP (x1.25) để gồng lời tốt hơn.", chop_val_1h)
 
-        # Mức nhân SL chuẩn (không bị siết ngắn bởi CHOPPY để chống quét râu)
-        atr_multiplier = 2.0
+        # Mức nhân SL chuẩn (Nới rộng ATR 2.8x - 3.5x để gồng rung lắc, tuyệt đối không bị quét râu dính SL oan)
+        atr_multiplier = 2.8
         if hmm_regime == "SIDEWAYS":
-            atr_multiplier = 2.5 # Đi ngang giật râu nhiều -> Nới rộng SL để tránh nhiễu râu
+            atr_multiplier = 3.5 # Đi ngang giật râu hai đầu -> Nới rộng SL lên 3.5x ATR để chịu nhiệt hoàn hảo
 
-        # [NEW v6.11] LỊCH TIN CPI/PPI/NFP — chỉ áp dụng cho Crypto/Vàng (đúng
-        # yêu cầu, không quét toàn bộ lịch kinh tế). Trong vùng ảnh hưởng tin:
-        # Size giảm ở bước đặt lệnh (main.py) để quản trị rủi ro vốn.
+        # [NEW v6.11] LỊCH TIN CPI/PPI/NFP — chỉ áp dụng cho Crypto/Vàng
         news_risk = {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
         if atype in ("CRYPTO", "GOLD"):
             try:
@@ -843,16 +841,25 @@ class SignalEngine:
             except Exception as e:
                 log.debug("  Lịch tin tức lỗi (bỏ qua, không chặn): %s", e)
 
-        # B. Tính % SL với trần (cap) 4.5% để chịu nhiệt Altcoin.
-        # SÀN DƯỚI AN TOÀN: Đặt tối thiểu 1.5% cho Crypto/Gold và 1.2% cho Stock
-        # để tuyệt đối tránh "SL quá ngắn" gây dính Stop Loss do râu nến nhiễu.
-        min_sl_floor = 1.5 if atype in ("CRYPTO", "GOLD") else 1.2
-        sl_atr_pct = max(min_sl_floor, min(4.5, atr_pct_1h * atr_multiplier))
+        # B. Tính % SL Động với Dynamic Max Cap hợp lý cho từng tài sản & biến động thực tế
+        # SÀN DƯỚI AN TOÀN TRÂU HƠN: Đặt tối thiểu 2.5% cho Crypto, 2.0% cho Gold và 1.5% cho Stock
+        # để nến 15m/1h giật râu 1.5% - 2.0% hoàn toàn nằm TRONG khoảng gồng an toàn.
+        if atype == "CRYPTO":
+            min_sl_floor = 2.5
+            max_sl_cap = max(5.5, min(8.0, atr_pct_1h * 3.5))
+        elif atype == "GOLD":
+            min_sl_floor = 2.0
+            max_sl_cap = max(4.0, min(6.0, atr_pct_1h * 3.0))
+        else:
+            min_sl_floor = 1.5
+            max_sl_cap = max(3.0, min(4.5, atr_pct_1h * 2.5))
+
+        sl_atr_pct = max(min_sl_floor, min(max_sl_cap, atr_pct_1h * atr_multiplier))
         sl_tighten = news_risk.get("sl_tighten_mult", 1.0)
         sl_atr_pct = max(min_sl_floor, sl_atr_pct * sl_tighten)
         
-        # [ANTI-MM] Thêm Dynamic Noise Buffer (0.3% - 0.5%) để giấu SL khỏi vùng phủ sóng MM
-        mm_noise_buffer_pct = max(0.3, min(0.6, atr_pct_1h * 0.35))
+        # [ANTI-MM NOISE BUFFER] Thêm Dynamic Noise Buffer (0.6% - 1.2%) giấu SL vượt xa vùng quét râu cá mập
+        mm_noise_buffer_pct = max(0.6, min(1.2, atr_pct_1h * 0.45))
         
         # C. Tỷ lệ R:R động
         tp1_pct    = sl_atr_pct * 1.5 * tp_scaling_factor  # Tối thiểu R:R 1:1.5 cho TP1
