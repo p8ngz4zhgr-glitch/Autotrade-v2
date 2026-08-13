@@ -850,6 +850,35 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
     except Exception as e:
         log.warning("Evaluate reversal for %s %s error: %s", getattr(user, 'telegram_id', 'Unknown'), sym, e)
 
+def _cleanup_inactive_users():
+    """Tự động dọn dẹp người dùng không hoạt động và dữ liệu nhật ký quá hạn (>180 ngày)."""
+    db = SessionLocal()
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        # Hủy kích hoạt user không có API Key và không hoạt động > 30 ngày
+        inactive = db.query(User).filter(
+            User.is_active == True,
+            (User.api_key == None) | (User.api_key == ""),
+            User.registered_at <= cutoff
+        ).all()
+        for u in inactive:
+            u.is_active = False
+            log.info("🧹 [Cleanup] Tự động tạm khóa tài khoản không cài API key: %s", u.telegram_id)
+
+        # Xóa các bản ghi TradeJournal quá cũ (> 180 ngày)
+        journal_cutoff = datetime.utcnow() - timedelta(days=180)
+        deleted_count = db.query(TradeJournal).filter(TradeJournal.timestamp < journal_cutoff).delete(synchronize_session=False)
+        if deleted_count > 0:
+            log.info("🧹 [Cleanup] Đã dọn dẹp %d bản ghi nhật ký giao dịch cũ (>180 ngày).", deleted_count)
+
+        db.commit()
+    except Exception as e:
+        log.warning("⚠️ _cleanup_inactive_users error: %s", e)
+        db.rollback()
+    finally:
+        db.close()
+
+
 # ══════════════════════════════════════════════════════════════════
 # SYNC POSITIONS & BALANCE
 # ══════════════════════════════════════════════════════════════════
