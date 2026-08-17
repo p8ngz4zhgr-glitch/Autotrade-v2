@@ -719,89 +719,94 @@ class SignalEngine:
             resist_wall = ob_data.get("resist_wall", 0.0)
             support_wall = ob_data.get("support_wall", 0.0)
             
-            # 1. Lọc LỆNH LONG
-            if final == "LONG":
-                # Chặn LONG nếu có một bức tường BÁN khổng lồ ngay phía trên trong phạm vi 1.2%
-                if resist_wall > 0 and (price < resist_wall <= price * 1.012):
-                    diff_pct = (resist_wall - price) / price * 100
-                    diff_str = f"{diff_pct:.2f}%" if diff_pct >= 0.01 else "<0.01%"
-                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh LONG vì có Tường Bán Khổng Lồ (${resist_wall:.4f}, USD: {ob_data.get('resist_wall_usd', 0):,.0f}) ngay phía trên (cách {diff_str}).")
-                    final = "WAIT"
-                # Hoặc mất cân đối sổ lệnh thiên hẳn về phe Bán (Imbalance cực sâu)
-                elif imbalance < -0.6 or ratio < 0.35:
-                    log.warning(f"⛔ FILTER (L2 IMBALANCE): Chặn lệnh LONG do Sổ lệnh lệch bán cực mạnh (Imbalance: {imbalance:.2f}, Ratio: {ratio:.2f}).")
-                    final = "WAIT"
-                    
-            # 2. Lọc LỆNH SHORT
-            elif final == "SHORT":
-                # Chặn SHORT nếu có một bức tường MUA lớn ngay phía dưới trong phạm vi 1.2%
-                if support_wall > 0 and (price * 0.988 <= support_wall < price):
-                    diff_pct = (price - support_wall) / price * 100
-                    diff_str = f"{diff_pct:.2f}%" if diff_pct >= 0.01 else "<0.01%"
-                    log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh SHORT vì có Tường Mua Khổng Lồ (${support_wall:.4f}, USD: {ob_data.get('support_wall_usd', 0):,.0f}) ngay phía dưới (cách {diff_str}).")
-                    final = "WAIT"
-                # Hoặc mất cân đối sổ lệnh thiên hẳn về phe Mua (Imbalance cực cao)
-                elif imbalance > 0.6 or ratio > 2.8:
-                    log.warning(f"⛔ FILTER (L2 IMBALANCE): Chặn lệnh SHORT do Sổ lệnh lệch mua cực mạnh (Imbalance: {imbalance:.2f}, Ratio: {ratio:.2f}).")
-                    final = "WAIT"
+            # Chỉ áp dụng lọc tường L2 khi tín hiệu kỹ thuật yếu (Combined < 65).
+            # Với tín hiệu xu hướng mạnh (Combined >= 65), dòng tiền đẩy sẽ nuốt tường thanh khoản dễ dàng.
+            if combined < 65:
+                # 1. Lọc LỆNH LONG
+                if final == "LONG":
+                    if resist_wall > 0 and (price < resist_wall <= price * 1.003): # Thu hẹp phạm vi dính tường về <0.3%
+                        diff_pct = (resist_wall - price) / price * 100
+                        diff_str = f"{diff_pct:.2f}%" if diff_pct >= 0.01 else "<0.01%"
+                        log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh LONG vì có Tường Bán Khổng Lồ (${resist_wall:.4f}, USD: {ob_data.get('resist_wall_usd', 0):,.0f}) sát nút (cách {diff_str}).")
+                        final = "WAIT"
+                    elif imbalance < -0.75 or ratio < 0.25: # Nới lỏng ngưỡng Imbalance
+                        log.warning(f"⛔ FILTER (L2 IMBALANCE): Chặn lệnh LONG do Sổ lệnh lệch bán cực mạnh (Imbalance: {imbalance:.2f}, Ratio: {ratio:.2f}).")
+                        final = "WAIT"
+                        
+                # 2. Lọc LỆNH SHORT
+                elif final == "SHORT":
+                    if support_wall > 0 and (price * 0.997 <= support_wall < price): # Thu hẹp phạm vi dính tường về <0.3%
+                        diff_pct = (price - support_wall) / price * 100
+                        diff_str = f"{diff_pct:.2f}%" if diff_pct >= 0.01 else "<0.01%"
+                        log.warning(f"⛔ FILTER (L2 WALL): Chặn lệnh SHORT vì có Tường Mua Khổng Lồ (${support_wall:.4f}, USD: {ob_data.get('support_wall_usd', 0):,.0f}) sát nút (cách {diff_str}).")
+                        final = "WAIT"
+                    elif imbalance > 0.75 or ratio > 3.5: # Nới lỏng ngưỡng Imbalance
+                        log.warning(f"⛔ FILTER (L2 IMBALANCE): Chặn lệnh SHORT do Sổ lệnh lệch mua cực mạnh (Imbalance: {imbalance:.2f}, Ratio: {ratio:.2f}).")
+                        final = "WAIT"
+            else:
+                if resist_wall > 0 and final == "LONG" and (price < resist_wall <= price * 1.012):
+                    log.info(f"⚡ [L2 WALL PASSED] Phát hiện tường bán (${resist_wall:.4f}) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: {combined:.1f}) -> Cho phép vào lệnh bứt phá.")
+                elif support_wall > 0 and final == "SHORT" and (price * 0.988 <= support_wall < price):
+                    log.info(f"⚡ [L2 WALL PASSED] Phát hiện tường mua (${support_wall:.4f}) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: {combined:.1f}) -> Cho phép vào lệnh bứt phá.")
 
         # ══════════════════════════════════════════════════════════
         # S/R ZONES & VOLUME CONFIRMATION FILTERS
         # ══════════════════════════════════════════════════════════
         if final == "LONG":
-            # 1. Chặn LONG khi tiệm cận Kháng cự mà Volume không đủ bứt phá (Tránh đu đỉnh dính SL)
-            if at_res and not vol_bo_up:
+            # Chặn LONG khi tiệm cận Kháng cự mà Volume cực yếu & Combined không đủ mạnh
+            if at_res and not vol_bo_up and combined < 68:
                 log.warning(
                     f"⛔ FILTER (S/R RESISTANCE): Giá (${price:.4f}) tiệm cận Kháng Cự (${nearest_res:.4f}, cách {sr_data.get('resistance_dist_pct')}%) "
-                    f"nhưng Volume không đủ bứt phá (Vol ratio: {vol_ratio}x, Buy: {buy_pct}%) -> HỦY LỆNH LONG (Tránh đu đỉnh dính SL)."
+                    f"nhưng Volume yếu (Vol ratio: {vol_ratio}x, Buy: {buy_pct}%) -> HỦY LỆNH LONG (Tránh đu đỉnh)."
                 )
                 final = "WAIT"
 
         elif final == "SHORT":
-            # 2. Chặn SHORT khi tiệm cận Hỗ trợ mà Volume không đủ cắn xuống (Tránh dội ngược dính SL)
-            if at_supp and not vol_bo_down:
+            # Chặn SHORT khi tiệm cận Hỗ trợ mà Volume cực yếu & Combined không đủ mạnh
+            if at_supp and not vol_bo_down and combined < 68:
                 log.warning(
                     f"⛔ FILTER (S/R SUPPORT): Giá (${price:.4f}) tiệm cận Hỗ Trợ (${nearest_supp:.4f}, cách {sr_data.get('support_dist_pct')}%) "
-                    f"nhưng Volume không đủ cắn xuống (Vol ratio: {vol_ratio}x, Sell: {sell_pct}%) -> HỦY LỆNH SHORT (Tránh dội ngược dính SL)."
+                    f"nhưng Volume yếu (Vol ratio: {vol_ratio}x, Sell: {sell_pct}%) -> HỦY LỆNH SHORT (Tránh dội ngược)."
                 )
                 final = "WAIT"
 
         # 3. Kiểm tra dư địa Risk-to-Reward (R:R) so với mốc Kháng cự / Hỗ trợ gần nhất
+        # Nới lỏng: Với các lệnh có xu hướng mạnh (Combined >= 68), giá hoàn toàn có thể phá kháng cự/hỗ trợ,
+        # chỉ hủy lệnh khi cản cách <0.4% sát giá vào lệnh khiến không đủ không gian TP1.
         atr_pct_1h_est = results.get("1h", {}).get("atr_pct", 1.0)
-        sl_est_pct = max(1.0, min(4.5, atr_pct_1h_est * 2.0))
+        min_rr_dist_pct = 0.4 if combined >= 68 else 1.0
         if final == "LONG" and nearest_res > price:
             dist_res_pct = (nearest_res - price) / price * 100
-            if dist_res_pct < 1.15 * sl_est_pct:
+            if dist_res_pct < min_rr_dist_pct:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Kháng Cự gần nhất (${nearest_res:.4f}) chỉ có {dist_res_pct:.2f}% "
-                    f"quá hẹp so với SL dự kiến ({sl_est_pct:.2f}%) -> R:R < 1.15 -> HỦY LỆNH LONG."
+                    f"quá sát giá vào lệnh -> HỦY LỆNH LONG."
                 )
                 final = "WAIT"
 
         elif final == "SHORT" and nearest_supp > 0 and nearest_supp < price:
             dist_supp_pct = (price - nearest_supp) / price * 100
-            if dist_supp_pct < 1.15 * sl_est_pct:
+            if dist_supp_pct < min_rr_dist_pct:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Hỗ Trợ gần nhất (${nearest_supp:.4f}) chỉ có {dist_supp_pct:.2f}% "
-                    f"quá hẹp so với SL dự kiến ({sl_est_pct:.2f}%) -> R:R < 1.15 -> HỦY LỆNH SHORT."
+                    f"quá sát giá vào lệnh -> HỦY LỆNH SHORT."
                 )
                 final = "WAIT"
 
         # ══════════════════════════════════════════════════════════
-        # 2.6. [NEW v6.11] XÁC NHẬN ĐA KHUNG: 4H QUYẾT XU HƯỚNG LỚN,
-        # 15M TÌM ĐIỂM VÀO THEO ĐÚNG XU HƯỚNG ĐÓ
+        # 2.6. XÁC NHẬN ĐA KHUNG: 4H QUYẾT XU HƯỚNG LỚN, 15M TÌM ĐIỂM VÀO
         # ══════════════════════════════════════════════════════════
         trend_4h  = results.get("4h", {}).get("direction", "WAIT")
         trend_15m = results.get("15m", {}).get("direction", "WAIT")
 
         if final in ("LONG", "SHORT"):
-            if trend_4h in ("LONG", "SHORT") and trend_4h != final:
+            if trend_4h in ("LONG", "SHORT") and trend_4h != final and combined < 75:
                 log.warning("  ⛔ [4H TREND] %s: Xu hướng lớn 4H=%s ngược với tín hiệu %s "
                             "-> hạ về WAIT (không đánh ngược xu hướng lớn).", symbol, trend_4h, final)
                 final = "WAIT"
-            elif trend_4h == final and trend_15m != final:
-                log.info("  ⏳ [15M TRIGGER] %s: 4H đồng thuận %s nhưng nến 15m (%s) chưa xác nhận "
-                         "điểm vào -> chờ nến 15m tiếp theo.", symbol, final, trend_15m)
+            elif trend_4h == final and trend_15m != final and combined < 72:
+                log.info("  ⏳ [15M TRIGGER] %s: 4H đồng thuận %s nhưng nến 15m (%s) đang nhịp chỉnh "
+                         "-> chờ nến 15m tiếp theo.", symbol, final, trend_15m)
                 final = "WAIT"
 
 
