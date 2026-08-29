@@ -245,6 +245,16 @@ class TelegramBot:
             sml_line += ("\n🐋 <b>DÒNG TIỀN (4H)</b>: " + str(sml_4h.get("desc", "")))
         mkt_line  = ("\n🏛️ " + str(data.get("mkt_note","")) if data.get("mkt_note") else "")
         
+        trap_info = data.get("trap_analysis", {})
+        trap_line = ""
+        if trap_info.get("detected"):
+            t_type = "BẪY TĂNG GIÁ (BULL TRAP)" if trap_info.get("type") == "BULL_TRAP" else "BẪY GIẢM GIÁ (BEAR TRAP)"
+            t_sev = trap_info.get("severity", "MEDIUM")
+            t_price = trap_info.get("trap_price", 0.0)
+            reasons = "; ".join(trap_info.get("reasons", [])[:2])
+            trap_line = (f"\n⚠️ <b>{t_type} [{t_sev}]</b>: Mức giá <code>${t_price:.4f}</code>\n"
+                         f"   └ <i>{reasons}</i>")
+
         sweep_line = ("\n🔥 <b>BẪY THANH KHOẢN (" + str(sweep.get("type", "")) + ")</b>: Quét râu tại <code>$" + 
                       str(round(sweep.get("price", 0), 2)) + "</code>" if sweep.get("detected") else "")
 
@@ -278,7 +288,7 @@ class TelegramBot:
             f"💰 Giá       : <code>${round(data['price'],2)}</code>",
             f"🎯 Độ tin cậy: <b>{conf}%</b> <code>[{conf_bar}]</code>" + stat_note,
             "📊 Khung giờ : " + tf_line,
-            bo_line + wh_line + mkt_line + sweep_line + sml_line,
+            bo_line + wh_line + mkt_line + trap_line + sweep_line + sml_line,
             "",
             "⚡ <b>SMART SIGNALS</b>",
             "  ├ ADX (1H) : " + str(adx_1h.get("adx", 0)) + " (" + str(adx_1h.get("trend", "WEAK")) + ")",
