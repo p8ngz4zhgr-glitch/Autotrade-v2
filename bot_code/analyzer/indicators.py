@@ -1160,6 +1160,186 @@ class Indicators:
         return {"signal": "NONE", "score_adj": 0, "desc": "Không có vùng thanh khoản rõ ràng", "bull_mcp": bull_mcp, "bear_mcp": bear_mcp}
 
     @staticmethod
+    def detect_bull_bear_traps(opens: list, highs: list, lows: list, closes: list,
+                               volumes: list = None, taker_buy_vols: list = None,
+                               ob_data: dict = None, cvd_data: dict = None,
+                               mstruct: dict = None) -> dict:
+        """
+        Phân tích chuyên sâu Bẫy Tăng Giá (Bull Trap) & Bẫy Giảm Giá (Bear Trap).
+        Kết hợp: Nến (Râu nến/Thân nến), Dòng tiền (Taker Buy Delta), Khối lượng (Volume Exhaustion/Surge),
+        Phân kỳ CVD, Sổ lệnh L2 (Imbalance/Tường) và Cấu trúc thị trường (Swing High/Low).
+        """
+        EMPTY = {
+            "detected": False,
+            "type": "NONE",          # "BULL_TRAP", "BEAR_TRAP", "NONE"
+            "severity": "NONE",      # "HIGH", "MEDIUM", "LOW", "NONE"
+            "score_adj": 0,
+            "reasons": [],
+            "trap_price": 0.0,
+            "upper_wick_ratio": 0.0,
+            "lower_wick_ratio": 0.0,
+            "vol_ratio": 1.0,
+            "buy_ratio": 0.5
+        }
+        n = min(len(opens), len(highs), len(lows), len(closes))
+        if n < 5:
+            return EMPTY
+
+        o = [float(x) for x in opens[-n:]]
+        h = [float(x) for x in highs[-n:]]
+        l = [float(x) for x in lows[-n:]]
+        c = [float(x) for x in closes[-n:]]
+        v = [float(x) for x in volumes[-n:]] if volumes and len(volumes) >= n else [1.0] * n
+        tbv = [float(x) for x in taker_buy_vols[-n:]] if taker_buy_vols and len(taker_buy_vols) >= n else [vi * 0.5 for vi in v]
+
+        curr_p = c[-1]
+        rng = h[-1] - l[-1]
+        if rng <= 0:
+            return EMPTY
+
+        body = abs(c[-1] - o[-1])
+        upper_wick = h[-1] - max(c[-1], o[-1])
+        lower_wick = min(c[-1], o[-1]) - l[-1]
+
+        upper_wick_ratio = upper_wick / rng
+        lower_wick_ratio = lower_wick / rng
+
+        avg_vol = sum(v[:-1]) / max(len(v) - 1, 1) if len(v) > 1 else 1.0
+        vol_ratio = v[-1] / avg_vol if avg_vol > 0 else 1.0
+        buy_ratio = tbv[-1] / v[-1] if v[-1] > 0 else 0.5
+
+        swing_high = mstruct.get("last_swing_high", 0.0) if mstruct else 0.0
+        swing_low  = mstruct.get("last_swing_low", 0.0) if mstruct else 0.0
+
+        if swing_high == 0.0:
+            swing_high = max(h[-20:-1]) if len(h) >= 20 else max(h)
+        if swing_low == 0.0:
+            swing_low = min(l[-20:-1]) if len(l) >= 20 else min(l)
+
+        cvd_trend = cvd_data.get("trend", "NEUTRAL") if cvd_data else "NEUTRAL"
+        
+        ob_imbalance = ob_data.get("imbalance", 0.0) if ob_data else 0.0
+        ob_ratio     = ob_data.get("ratio", 1.0) if ob_data else 1.0
+        resist_wall  = ob_data.get("resist_wall", 0.0) if ob_data else 0.0
+        support_wall = ob_data.get("support_wall", 0.0) if ob_data else 0.0
+
+        bull_trap_score = 0
+        bull_trap_reasons = []
+
+        bear_trap_score = 0
+        bear_trap_reasons = []
+
+        # ══════════════════════════════════════════════════════════
+        # 1. PHÂN TÍCH BULL TRAP (BẪY TĂNG GIÁ)
+        # ══════════════════════════════════════════════════════════
+        # Dấu hiệu A: Quét đỉnh rút chân (Upthrust / Failed Breakout)
+        if h[-1] > swing_high and swing_high > 0:
+            if c[-1] < swing_high:
+                bull_trap_score += 35
+                bull_trap_reasons.append(f"Vượt đỉnh cũ ${swing_high:.4f} nhưng bị đạp đóng cửa bên dưới (Quét đỉnh xả hàng)")
+            elif upper_wick_ratio >= 0.40:
+                bull_trap_score += 25
+                bull_trap_reasons.append(f"Quét vượt đỉnh cũ với râu nến trên quá dài ({upper_wick_ratio*100:.1f}% nến)")
+        elif upper_wick_ratio >= 0.50 and c[-1] < o[-1]:
+            bull_trap_score += 20
+            bull_trap_reasons.append(f"Râu trên cực dài ({upper_wick_ratio*100:.1f}%) nến đỏ tạo áp lực xả mạnh")
+
+        # Dấu hiệu B: Xả khối lượng lớn / Kiệt sức volume ở đỉnh
+        if h[-1] >= swing_high * 0.998 and swing_high > 0:
+            if vol_ratio >= 1.3 and buy_ratio < 0.40:
+                bull_trap_score += 30
+                bull_trap_reasons.append(f"Volume đột biến ({vol_ratio:.1f}x) nhưng Taker Buy thấp ({buy_ratio*100:.0f}%) -> Cá mập xả hàng vào LONG retail")
+            elif vol_ratio < 0.60:
+                bull_trap_score += 15
+                bull_trap_reasons.append(f"Giá đẩy lên gần đỉnh nhưng cạn kiệt Volume ({vol_ratio:.2f}x) -> Thiếu lực mua tiếp diễn")
+
+        # Dấu hiệu C: Phân kỳ âm CVD tại đỉnh
+        if h[-1] >= swing_high * 0.995 and cvd_trend in ("BEARISH_DIV", "BEARISH"):
+            bull_trap_score += 25
+            bull_trap_reasons.append(f"Giá chạm đỉnh nhưng CVD Phân kỳ Âm ({cvd_trend}) -> Dòng tiền mua rút lui")
+
+        # Dấu hiệu D: Tường bán L2 chặn đứng hoặc Sổ lệnh lệch bán
+        if h[-1] >= swing_high * 0.995:
+            if ob_imbalance < -0.55 or ob_ratio < 0.35:
+                bull_trap_score += 20
+                bull_trap_reasons.append(f"Sổ lệnh L2 nghiêng hẳn về phe Bán (Imbalance: {ob_imbalance:.2f}) chặn đà tăng")
+            if resist_wall > 0 and curr_p < resist_wall <= curr_p * 1.005:
+                bull_trap_score += 15
+                bull_trap_reasons.append(f"Tường bán khổng lồ ${resist_wall:.4f} chèn ngay trên đỉnh")
+
+        # ══════════════════════════════════════════════════════════
+        # 2. PHÂN TÍCH BEAR TRAP (BẪY GIẢM GIÁ)
+        # ══════════════════════════════════════════════════════════
+        # Dấu hiệu A: Quét đáy rút chân (Spring / Failed Breakdown)
+        if l[-1] < swing_low and swing_low > 0:
+            if c[-1] > swing_low:
+                bear_trap_score += 35
+                bear_trap_reasons.append(f"Thủng đáy cũ ${swing_low:.4f} nhưng được kéo đóng cửa bên trên (Quét đáy gom hàng)")
+            elif lower_wick_ratio >= 0.40:
+                bear_trap_score += 25
+                bear_trap_reasons.append(f"Quét thủng đáy cũ với râu nến dưới quá dài ({lower_wick_ratio*100:.1f}% nến)")
+        elif lower_wick_ratio >= 0.50 and c[-1] > o[-1]:
+            bear_trap_score += 20
+            bear_trap_reasons.append(f"Râu dưới cực dài ({lower_wick_ratio*100:.1f}%) nến xanh bật nảy mạnh mẽ")
+
+        # Dấu hiệu B: Gom khối lượng lớn / Kiệt sức volume ở đáy
+        if l[-1] <= swing_low * 1.002 and swing_low > 0:
+            if vol_ratio >= 1.3 and buy_ratio > 0.60:
+                bear_trap_score += 30
+                bear_trap_reasons.append(f"Volume đột biến ({vol_ratio:.1f}x) và Taker Buy rất cao ({buy_ratio*100:.0f}%) -> Cá mập âm thầm gom hàng từ SHORT retail")
+            elif vol_ratio < 0.60:
+                bear_trap_score += 15
+                bear_trap_reasons.append(f"Giá đè xuống gần đáy nhưng cạn kiệt Volume ({vol_ratio:.2f}x) -> Thiếu lực bán đè tiếp")
+
+        # Dấu hiệu C: Phân kỳ dương CVD tại đáy
+        if l[-1] <= swing_low * 1.005 and cvd_trend in ("BULLISH_DIV", "BULLISH"):
+            bear_trap_score += 25
+            bear_trap_reasons.append(f"Giá chạm đáy nhưng CVD Phân kỳ Dương ({cvd_trend}) -> Dòng tiền bán suy yếu")
+
+        # Dấu hiệu D: Tường mua L2 đỡ giá hoặc Sổ lệnh lệch mua
+        if l[-1] <= swing_low * 1.005:
+            if ob_imbalance > 0.55 or ob_ratio > 2.8:
+                bear_trap_score += 20
+                bear_trap_reasons.append(f"Sổ lệnh L2 nghiêng hẳn về phe Mua (Imbalance: {ob_imbalance:.2f}) đỡ đáy")
+            if support_wall > 0 and curr_p * 0.995 <= support_wall < curr_p:
+                bear_trap_score += 15
+                bear_trap_reasons.append(f"Tường mua khổng lồ ${support_wall:.4f} chèn ngay dưới đáy")
+
+        # ══════════════════════════════════════════════════════════
+        # 3. KẾT LUẬN LOẠI BẪY VÀ MỨC ĐỘ NGUY HIỂM
+        # ══════════════════════════════════════════════════════════
+        if bull_trap_score >= bear_trap_score and bull_trap_score >= 35:
+            severity = "HIGH" if bull_trap_score >= 55 else "MEDIUM"
+            return {
+                "detected": True,
+                "type": "BULL_TRAP",
+                "severity": severity,
+                "score_adj": -30 if severity == "HIGH" else -18,
+                "reasons": bull_trap_reasons,
+                "trap_price": h[-1],
+                "upper_wick_ratio": round(upper_wick_ratio, 2),
+                "lower_wick_ratio": round(lower_wick_ratio, 2),
+                "vol_ratio": round(vol_ratio, 2),
+                "buy_ratio": round(buy_ratio, 2)
+            }
+        elif bear_trap_score > bull_trap_score and bear_trap_score >= 35:
+            severity = "HIGH" if bear_trap_score >= 55 else "MEDIUM"
+            return {
+                "detected": True,
+                "type": "BEAR_TRAP",
+                "severity": severity,
+                "score_adj": +30 if severity == "HIGH" else +18,
+                "reasons": bear_trap_reasons,
+                "trap_price": l[-1],
+                "upper_wick_ratio": round(upper_wick_ratio, 2),
+                "lower_wick_ratio": round(lower_wick_ratio, 2),
+                "vol_ratio": round(vol_ratio, 2),
+                "buy_ratio": round(buy_ratio, 2)
+            }
+
+        return EMPTY
+
+    @staticmethod
     def order_flow_fvg(highs: list, lows: list, closes: list, lookback: int = 50) -> dict:
         EMPTY = {"fvg_type": "NONE", "gap_top": 0, "gap_bottom": 0, "score_adj": 0, "bull_count": 0, "bear_count": 0}
         n = min(len(highs), len(lows), len(closes), lookback)
