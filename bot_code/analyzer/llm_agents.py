@@ -761,11 +761,17 @@ class MultiAgentPipeline:
         def inject(prompt):
             return (prompt + "\n\n--- KINH NGHIEM QUA KHU ---\n" + memory + "\n---")  if memory else prompt
 
-        # Inject L2 Orderbook and Liquidity Sweep into prompts for Stage 5
+        # Inject L2 Orderbook, Liquidity Sweep, and Bull/Bear Traps into prompts
         sweep = data.get("liquidity_sweep", {})
         ob    = data.get("orderbook", {})
+        trap_info = data.get("trap_analysis", {})
         
         extra_context = ""
+        if trap_info.get("detected"):
+            t_type = "BẪY TĂNG GIÁ (BULL TRAP)" if trap_info.get("type") == "BULL_TRAP" else "BẪY GIẢM GIÁ (BEAR TRAP)"
+            reasons = "; ".join(trap_info.get("reasons", []))
+            extra_context += f"- ⚠️ PHÂN TÍCH BẪY CÁ MẶP: {t_type} [Mức độ: {trap_info.get('severity')}] tại giá ${trap_info.get('trap_price')}. Chi tiết lý do: {reasons}.\n"
+
         if sweep.get("detected"):
             extra_context += f"- 🔥 BẪY THANH KHOẢN ({sweep.get('type')}): Đã quét râu tại mức giá {sweep.get('price')} kèm Volume lớn. Hãy phân tích đây là hành động săn thanh khoản của cá mập trước khi đảo chiều.\n"
             
