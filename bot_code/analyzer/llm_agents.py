@@ -217,21 +217,35 @@ class LLMChain:
     def _groq(self, prompt):
         if not self.groq_key:
             raise ValueError("No Groq key")
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": "Bearer " + self.groq_key,
-                     "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile",
-                  "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 300, "temperature": 0.3},
-            timeout=20)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "mixtral-8x7b-32768", "gemma2-9b-it"]
+        for model in models:
+            try:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": "Bearer " + self.groq_key,
+                             "Content-Type": "application/json"},
+                    json={"model": model,
+                          "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": 300, "temperature": 0.3},
+                    timeout=15)
+                if r.status_code in (400, 404, 410, 429):
+                    log.warning("Groq [%s] status %d — thử model tiếp theo", model, r.status_code)
+                    time.sleep(0.5)
+                    continue
+                r.raise_for_status()
+                res = r.json()["choices"][0]["message"]["content"].strip()
+                if res:
+                    log.info("  Groq [%s] OK", model)
+                    return res
+            except Exception as e:
+                log.warning("Groq [%s]: %s", model, e)
+                continue
+        raise RuntimeError("Groq: tất cả models thất bại")
 
     def _gemini(self, prompt):
         if not self.gemini_key:
             raise ValueError("No Gemini key")
-        for model in ["gemini-2.0-flash-lite", "gemini-2.0-flash"]:
+        for model in ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]:
             try:
                 r = requests.post(
                     "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -239,7 +253,7 @@ class LLMChain:
                     json={"contents": [{"parts": [{"text": prompt}]}],
                           "generationConfig": {"maxOutputTokens": 300, "temperature": 0.3}},
                     timeout=10)
-                if r.status_code in (429, 404, 403):
+                if r.status_code in (429, 404, 403, 400):
                     time.sleep(0.5)
                     continue
                 r.raise_for_status()
@@ -251,22 +265,36 @@ class LLMChain:
     def _mistral(self, prompt):
         if not self.mistral_key:
             raise ValueError("No Mistral key")
-        r = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={"Authorization": "Bearer " + self.mistral_key,
-                     "Content-Type": "application/json"},
-            json={"model": "mistral-small-latest",
-                  "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 300, "temperature": 0.3},
-            timeout=20)
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        models = ["mistral-small-latest", "mistral-medium-latest", "open-mistral-7b"]
+        for model in models:
+            try:
+                r = requests.post(
+                    "https://api.mistral.ai/v1/chat/completions",
+                    headers={"Authorization": "Bearer " + self.mistral_key,
+                             "Content-Type": "application/json"},
+                    json={"model": model,
+                          "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": 300, "temperature": 0.3},
+                    timeout=15)
+                if r.status_code in (400, 404, 410, 429):
+                    log.warning("Mistral [%s] status %d — thử model tiếp theo", model, r.status_code)
+                    time.sleep(0.5)
+                    continue
+                r.raise_for_status()
+                res = r.json()["choices"][0]["message"]["content"].strip()
+                if res:
+                    log.info("  Mistral [%s] OK", model)
+                    return res
+            except Exception as e:
+                log.warning("Mistral [%s]: %s", model, e)
+                continue
+        raise RuntimeError("Mistral: tất cả models thất bại")
 
     def _nvidia_nim(self, prompt, fast=False):
         if not self.nvidia_key:
             raise ValueError("No NVIDIA NIM key")
-        models = (["meta/llama-3.1-8b-instruct", "meta/llama-3.3-70b-instruct"] if fast
-                  else ["meta/llama-3.3-70b-instruct", "meta/llama-3.1-8b-instruct"])
+        models = (["nvidia/llama-3.1-nemotron-70b-instruct", "meta/llama-3.3-70b-instruct", "meta/llama3-70b-instruct", "mistralai/mistral-large-2-instruct", "meta/llama-3.1-8b-instruct"] if fast
+                  else ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.1-nemotron-70b-instruct", "meta/llama3-70b-instruct", "mistralai/mistral-large-2-instruct"])
         for model in models:
             try:
                 r = requests.post(
@@ -279,10 +307,10 @@ class LLMChain:
                           "temperature": 0.3,
                           "top_p":       0.9,
                           "stream":      False},
-                    timeout=60)
-                if r.status_code == 429:
-                    log.warning("NVIDIA NIM rate limit — thử model tiếp theo")
-                    time.sleep(2)
+                    timeout=20)
+                if r.status_code in (400, 404, 410, 429):
+                    log.warning("NVIDIA NIM [%s] status %d — thử model tiếp theo", model, r.status_code)
+                    time.sleep(0.5)
                     continue
                 r.raise_for_status()
                 result = r.json()["choices"][0]["message"]["content"].strip()
