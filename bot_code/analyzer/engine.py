@@ -658,9 +658,64 @@ class SignalEngine:
                 log.warning("⚠️ Lỗi phân tích L2 Orderbook/Liquidity cho %s: %s", symbol, e)
 
         # ══════════════════════════════════════════════════════════
-        # [SMC] BỘ LỌC & KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP
+        # PHÂN TÍCH CHUYÊN SÂU BẪY TĂNG GIÁ (BULL TRAP) & BẪY GIẢM GIÁ (BEAR TRAP)
         # ══════════════════════════════════════════════════════════
-        if sweep_data.get("detected"):
+        trap_analysis = {"detected": False, "type": "NONE", "severity": "NONE", "score_adj": 0, "reasons": []}
+        try:
+            tf_data = results.get("15m") or results.get("1h")
+            if tf_data:
+                opens_t  = tf_data.get("opens", []) or tf_data.get("open", [])
+                highs_t  = tf_data.get("highs", []) or tf_data.get("high", [])
+                lows_t   = tf_data.get("lows", []) or tf_data.get("low", [])
+                closes_t = tf_data.get("closes", []) or tf_data.get("close", [])
+                vols_t   = tf_data.get("vols", []) or tf_data.get("vol", [])
+                tbvols_t = tf_data.get("tbvols", []) or tf_data.get("tbvol", [])
+                mstruct_t = tf_data.get("market_structure", {})
+
+                trap_analysis = self.ind.detect_bull_bear_traps(
+                    opens_t, highs_t, lows_t, closes_t, vols_t, tbvols_t,
+                    ob_data=ob_data, cvd_data=cvd_1h, mstruct=mstruct_t
+                )
+                if trap_analysis.get("detected"):
+                    log.warning("⚠️ PHÁT HIỆN BẪY CHUYÊN SÂU [%s]: Type=%s | Severity=%s | Price=%.4f | Reasons: %s",
+                                symbol, trap_analysis["type"], trap_analysis["severity"],
+                                trap_analysis["trap_price"], "; ".join(trap_analysis["reasons"]))
+        except Exception as e:
+            log.warning("⚠️ Lỗi phân tích Trap cho %s: %s", symbol, e)
+
+        # ══════════════════════════════════════════════════════════
+        # [SMC & ANTI-TRAP] BỘ LỌC & KÍCH HOẠT VÀO LỆNH TỪ LIQUIDITY SWEEP / TRAPS
+        # ══════════════════════════════════════════════════════════
+        # 1. Ưu tiên xử lý bẫy chuyên sâu (Bull Trap / Bear Trap)
+        if trap_analysis.get("detected"):
+            t_type = trap_analysis.get("type")
+            t_sev = trap_analysis.get("severity")
+            t_price = trap_analysis.get("trap_price", price)
+
+            if t_type == "BULL_TRAP":
+                # Chặn tuyệt đối LONG khi gặp Bẫy Tăng Giá
+                if final == "LONG":
+                    log.warning(f"⛔ FILTER (BULL TRAP): Cá mập giăng bẫy tăng giá (Bull Trap @ ${t_price:.4f}) -> HỦY LỆNH LONG!")
+                    final = "WAIT"
+                # Đánh đảo chiều SHORT nếu gặp Bull Trap nguy hiểm cấp độ HIGH
+                elif final in ("SHORT", "WAIT") and t_sev == "HIGH" and combined <= 55:
+                    log.info(f"🎯 TRIGGER (BULL TRAP REVERSAL): Phát hiện Bẫy Tăng Giá mạnh mẽ -> KÍCH HOẠT SHORT ĐẢO CHIỀU @ ${t_price:.4f}")
+                    final = "SHORT"
+                    conf = round(min(95.0, max(conf, 78.0)), 1)
+
+            elif t_type == "BEAR_TRAP":
+                # Chặn tuyệt đối SHORT khi gặp Bẫy Giảm Giá
+                if final == "SHORT":
+                    log.warning(f"⛔ FILTER (BEAR TRAP): Cá mập giăng bẫy giảm giá (Bear Trap @ ${t_price:.4f}) -> HỦY LỆNH SHORT!")
+                    final = "WAIT"
+                # Đánh đảo chiều LONG nếu gặp Bear Trap nguy hiểm cấp độ HIGH
+                elif final in ("LONG", "WAIT") and t_sev == "HIGH" and combined >= 45:
+                    log.info(f"🎯 TRIGGER (BEAR TRAP REVERSAL): Phát hiện Bẫy Giảm Giá mạnh mẽ -> KÍCH HOẠT LONG ĐẢO CHIỀU @ ${t_price:.4f}")
+                    final = "LONG"
+                    conf = round(min(95.0, max(conf, 78.0)), 1)
+
+        # 2. Xử lý bổ trợ từ Liquidity Sweep
+        if sweep_data.get("detected") and not trap_analysis.get("detected"):
             sw_type = sweep_data.get("type")
             sw_price = sweep_data.get("price")
             
@@ -900,6 +955,14 @@ class SignalEngine:
                         sl = sw_sl
                         log.info("  🛡️ [ANTI-MM] Tối ưu SL LONG giấu ngoài râu Bullish Sweep (+0.35%% buffer): %.4f", sl)
                         
+            if trap_analysis.get("detected") and trap_analysis.get("type") == "BEAR_TRAP":
+                tr_p = trap_analysis.get("trap_price", 0.0)
+                if tr_p > 0 and tr_p < price:
+                    tr_sl = round(tr_p * 0.9965, 4)
+                    if tr_sl < price and ((price - tr_sl) / price * 100) <= sl_atr_pct * 2.2:
+                        sl = tr_sl
+                        log.info("  🛡️ [ANTI-TRAP] Tối ưu SL LONG giấu ngoài râu Bear Trap (+0.35%% buffer): %.4f", sl)
+                        
             # Tối ưu SL giấu dưới Mức Cản Phá (MCP) từ Smart Money Liquidity
             sml_mcp = sml_4h.get("mcp_price", 0) or sml_1h.get("mcp_price", 0)
             if sml_mcp > 0 and sml_mcp < price:
@@ -944,6 +1007,14 @@ class SignalEngine:
                     if sw_sl > price and ((sw_sl - price) / price * 100) <= sl_atr_pct * 2.0:
                         sl = sw_sl
                         log.info("  🛡️ [ANTI-MM] Tối ưu SL SHORT giấu ngoài râu Bearish Sweep (+0.35%% buffer): %.4f", sl)
+                        
+            if trap_analysis.get("detected") and trap_analysis.get("type") == "BULL_TRAP":
+                tr_p = trap_analysis.get("trap_price", 0.0)
+                if tr_p > 0 and tr_p > price:
+                    tr_sl = round(tr_p * 1.0035, 4)
+                    if tr_sl > price and ((tr_sl - price) / price * 100) <= sl_atr_pct * 2.2:
+                        sl = tr_sl
+                        log.info("  🛡️ [ANTI-TRAP] Tối ưu SL SHORT giấu ngoài râu Bull Trap (+0.35%% buffer): %.4f", sl)
                         
             # Tối ưu SL giấu trên Mức Cản Phá (MCP) từ Smart Money Liquidity
             sml_mcp = sml_4h.get("mcp_price", 0) or sml_1h.get("mcp_price", 0)
@@ -1381,6 +1452,7 @@ class SignalEngine:
             "orderbook": ob_data,
             "support_resistance": sr_data,
             "liquidity_sweep": sweep_data,
+            "trap_analysis": trap_analysis,
             "kalman": kalman_data,
             "hmm": {"regime": hmm_regime, "confidence": hmm_conf}, # Trả về dữ liệu HMM để hiển thị trên Telegram nếu cần
             "btc_correlation": btc_corr, "btc_hmm_regime": btc_hmm_regime, "btc_trend_now": btc_trend_now,
