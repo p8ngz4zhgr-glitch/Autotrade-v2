@@ -217,7 +217,7 @@ class LLMChain:
     def _groq(self, prompt):
         if not self.groq_key:
             raise ValueError("No Groq key")
-        models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-70b-8192", "mixtral-8x7b-32768", "gemma2-9b-it"]
+        models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "deepseek-r1-distill-llama-70b", "llama-3.2-11b-vision-preview", "llama-3.2-3b-preview"]
         for model in models:
             try:
                 r = requests.post(
@@ -227,10 +227,10 @@ class LLMChain:
                     json={"model": model,
                           "messages": [{"role": "user", "content": prompt}],
                           "max_tokens": 300, "temperature": 0.3},
-                    timeout=15)
-                if r.status_code in (400, 404, 410, 429):
-                    log.warning("Groq [%s] status %d — thử model tiếp theo", model, r.status_code)
-                    time.sleep(0.5)
+                    timeout=12)
+                if r.status_code in (400, 401, 403, 404, 410, 429):
+                    log.debug("Groq [%s] status %d", model, r.status_code)
+                    time.sleep(0.3)
                     continue
                 r.raise_for_status()
                 res = r.json()["choices"][0]["message"]["content"].strip()
@@ -238,14 +238,15 @@ class LLMChain:
                     log.info("  Groq [%s] OK", model)
                     return res
             except Exception as e:
-                log.warning("Groq [%s]: %s", model, e)
+                log.debug("Groq [%s]: %s", model, e)
                 continue
         raise RuntimeError("Groq: tất cả models thất bại")
 
     def _gemini(self, prompt):
         if not self.gemini_key:
             raise ValueError("No Gemini key")
-        for model in ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]:
+        models = ["gemini-2.0-flash-lite", "gemini-2.0-flash", "gemini-1.5-flash"]
+        for model in models:
             try:
                 r = requests.post(
                     "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -253,14 +254,17 @@ class LLMChain:
                     json={"contents": [{"parts": [{"text": prompt}]}],
                           "generationConfig": {"maxOutputTokens": 300, "temperature": 0.3}},
                     timeout=10)
-                if r.status_code in (429, 404, 403, 400):
-                    time.sleep(0.5)
+                if r.status_code in (400, 401, 403, 404, 429):
+                    time.sleep(0.3)
                     continue
                 r.raise_for_status()
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                res = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if res:
+                    log.info("  Gemini [%s] OK", model)
+                    return res
             except Exception:
                 continue
-        raise RuntimeError("Gemini all fail")
+        raise RuntimeError("Gemini: tất cả models thất bại")
 
     def _mistral(self, prompt):
         if not self.mistral_key:
@@ -275,10 +279,10 @@ class LLMChain:
                     json={"model": model,
                           "messages": [{"role": "user", "content": prompt}],
                           "max_tokens": 300, "temperature": 0.3},
-                    timeout=15)
-                if r.status_code in (400, 404, 410, 429):
-                    log.warning("Mistral [%s] status %d — thử model tiếp theo", model, r.status_code)
-                    time.sleep(0.5)
+                    timeout=12)
+                if r.status_code in (400, 401, 403, 404, 410, 429):
+                    log.debug("Mistral [%s] status %d", model, r.status_code)
+                    time.sleep(0.3)
                     continue
                 r.raise_for_status()
                 res = r.json()["choices"][0]["message"]["content"].strip()
@@ -286,15 +290,14 @@ class LLMChain:
                     log.info("  Mistral [%s] OK", model)
                     return res
             except Exception as e:
-                log.warning("Mistral [%s]: %s", model, e)
+                log.debug("Mistral [%s]: %s", model, e)
                 continue
         raise RuntimeError("Mistral: tất cả models thất bại")
 
     def _nvidia_nim(self, prompt, fast=False):
         if not self.nvidia_key:
             raise ValueError("No NVIDIA NIM key")
-        models = (["nvidia/llama-3.1-nemotron-70b-instruct", "meta/llama-3.3-70b-instruct", "meta/llama3-70b-instruct", "mistralai/mistral-large-2-instruct", "meta/llama-3.1-8b-instruct"] if fast
-                  else ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.1-nemotron-70b-instruct", "meta/llama3-70b-instruct", "mistralai/mistral-large-2-instruct"])
+        models = ["meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-r1", "nvidia/llama-3.1-nemotron-70b-instruct", "mistralai/mistral-large-2-instruct"]
         for model in models:
             try:
                 r = requests.post(
@@ -307,10 +310,9 @@ class LLMChain:
                           "temperature": 0.3,
                           "top_p":       0.9,
                           "stream":      False},
-                    timeout=20)
-                if r.status_code in (400, 404, 410, 429):
-                    log.warning("NVIDIA NIM [%s] status %d — thử model tiếp theo", model, r.status_code)
-                    time.sleep(0.5)
+                    timeout=10)
+                if r.status_code in (400, 401, 403, 404, 410, 429):
+                    log.debug("NVIDIA NIM [%s] status %d", model, r.status_code)
                     continue
                 r.raise_for_status()
                 result = r.json()["choices"][0]["message"]["content"].strip()
@@ -318,7 +320,7 @@ class LLMChain:
                     log.info("  NVIDIA NIM [%s] OK", model.split("/")[-1])
                     return result
             except Exception as e:
-                log.warning("NVIDIA NIM [%s]: %s", model, e)
+                log.debug("NVIDIA NIM [%s]: %s", model, e)
                 continue
         raise RuntimeError("NVIDIA NIM: tất cả models thất bại")
 
