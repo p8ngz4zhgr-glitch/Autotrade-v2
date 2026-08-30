@@ -826,13 +826,14 @@ class SignalEngine:
                 final = "WAIT"
 
         # 3. Kiểm tra dư địa Risk-to-Reward (R:R) so với mốc Kháng cự / Hỗ trợ gần nhất
-        # Nới lỏng: Với các lệnh có xu hướng mạnh (Combined >= 68), giá hoàn toàn có thể phá kháng cự/hỗ trợ,
-        # chỉ hủy lệnh khi cản cách <0.4% sát giá vào lệnh khiến không đủ không gian TP1.
+        # Với các lệnh có xu hướng mạnh (Combined >= 68) hoặc có Volume bứt phá (vol_bo_up/vol_bo_down),
+        # giá đang ở điểm nén Breakout -> cho phép vọt qua cản thay vì hủy lệnh.
         atr_pct_1h_est = results.get("1h", {}).get("atr_pct", 1.0)
-        min_rr_dist_pct = 0.4 if combined >= 68 else 1.0
         if final == "LONG" and nearest_res > price:
             dist_res_pct = (nearest_res - price) / price * 100
-            if dist_res_pct < min_rr_dist_pct:
+            if combined >= 68 or vol_bo_up:
+                log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Kháng Cự (${nearest_res:.4f}, cách {dist_res_pct:.2f}%) với lực mua xu hướng RẤT MẠNH (Combined: {combined:.1f}%) -> Cho phép bứt phá.")
+            elif dist_res_pct < 1.0:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Kháng Cự gần nhất (${nearest_res:.4f}) chỉ có {dist_res_pct:.2f}% "
                     f"quá sát giá vào lệnh -> HỦY LỆNH LONG."
@@ -841,7 +842,9 @@ class SignalEngine:
 
         elif final == "SHORT" and nearest_supp > 0 and nearest_supp < price:
             dist_supp_pct = (price - nearest_supp) / price * 100
-            if dist_supp_pct < min_rr_dist_pct:
+            if combined >= 68 or vol_bo_down:
+                log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Hỗ Trợ (${nearest_supp:.4f}, cách {dist_supp_pct:.2f}%) với lực bán xu hướng RẤT MẠNH (Combined: {combined:.1f}%) -> Cho phép bứt phá.")
+            elif dist_supp_pct < 1.0:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Hỗ Trợ gần nhất (${nearest_supp:.4f}) chỉ có {dist_supp_pct:.2f}% "
                     f"quá sát giá vào lệnh -> HỦY LỆNH SHORT."
