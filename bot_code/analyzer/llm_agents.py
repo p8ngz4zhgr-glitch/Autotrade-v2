@@ -43,7 +43,7 @@ class _CircuitBreaker:
         self._recent_fail_at[name] = time.time()
         if n >= self.MAX_FAILS:
             self._down_until[name] = time.time() + self.COOLDOWN
-            log.warning("🔴 [%s] Circuit breaker OPEN — skip %ds", name, self.COOLDOWN)
+            log.debug("🔴 [%s] Circuit breaker OPEN — skip %ds", name, self.COOLDOWN)
 
     def recently_failed(self, name: str, window: float = 90) -> bool:
         """[NEW v6.7] Có thất bại trong window giây gần nhất không — dùng để XẾP
@@ -178,19 +178,26 @@ class LLMChain:
         log.info("Chiếu slot AI: %d → %s", m, names[s])
         return s
 
+    def _has_key(self, name: str) -> bool:
+        if name == "Groq":
+            return bool(self.groq_key and self.groq_key.strip())
+        if name == "NVIDIA":
+            return bool(self.nvidia_key and self.nvidia_key.strip())
+        if name == "Mistral":
+            return bool(self.mistral_key and self.mistral_key.strip())
+        if name == "Gemini":
+            return bool(self.gemini_key and self.gemini_key.strip())
+        return True
+
     def _ordered(self, rotation_list):
         """
-        [NEW v6.7] _slot() gán 1 provider "chính" cho CẢ khung 15 phút theo giờ
-        đồng hồ — không biết/không quan tâm provider đó có đang rate-limit ngay
-        lúc này hay không. Khi provider đó dính 429, breaker CỨNG (3 lần liên
-        tiếp) khó mở vì hay có 1 lần thành công xen kẽ làm reset bộ đếm — nên
-        gần như MỌI lệnh gọi trong cả 15 phút đó vẫn thử nó ĐẦU TIÊN rồi mới
-        rơi xuống provider dự phòng, tốn thời gian lặp lại vô ích.
-        Sửa: xếp SAU (không chặn hẳn) provider vừa thất bại trong 90s gần nhất,
-        ưu tiên thử các provider "có vẻ khoẻ" trước — độc lập với breaker cứng
-        (breaker cứng vẫn giữ nguyên để chặn hẳn khi thật sự down lâu).
+        [NEW v6.8] Ưu tiên provider có API Key hợp lệ và không dính gần thất bại.
         """
-        return sorted(rotation_list, key=lambda item: _cb.recently_failed(item[0]))
+        return sorted(rotation_list, key=lambda item: (
+            not self._has_key(item[0]),
+            not _cb.is_up(item[0]),
+            _cb.recently_failed(item[0])
+        ))
 
     def _prompt(self, data):
         fibo  = data.get("fibo", {})
@@ -495,8 +502,11 @@ class LLMChain:
         }
 
         for name, fn in self._ordered(rotation.get(slot, rotation[0])):
+            if not self._has_key(name):
+                log.debug("  ⏭️  [%s] chưa cấu hình API Key — skip", name)
+                continue
             if not _cb.is_up(name):
-                log.info("  ⏭️  [%s] circuit open — skip", name)
+                log.debug("  ⏭️  [%s] circuit open — skip", name)
                 continue
             try:
                 result = fn(prompt)
@@ -506,10 +516,10 @@ class LLMChain:
                     return result.strip(), name
                 _cb.fail(name)
             except Exception as e:
-                log.warning("  Agent [%s] lỗi: %s", name, e)
+                log.debug("  Agent [%s] chuyển dự phòng: %s", name, e)
                 _cb.fail(name)
 
-        log.warning("⚠️ Tất cả LLM lỗi hoặc circuit open, fallback sang Rule Base Engine")
+        log.info("ℹ️ Tự động chuyển sang Rule-based Engine phân tích kỹ thuật")
         return self._rule(data), "Rule-based"
 
     def run(self, data):
@@ -589,8 +599,11 @@ class LLMChain:
         }
 
         for name, fn in self._ordered(rotation.get(slot, rotation[0])):
+            if not self._has_key(name):
+                log.debug("  ⏭️  [%s] chưa cấu hình API Key — skip", name)
+                continue
             if not _cb.is_up(name):
-                log.info("  ⏭️  [%s] circuit open — skip", name)
+                log.debug("  ⏭️  [%s] circuit open — skip", name)
                 continue
             try:
                 result = fn(prompt)
@@ -600,7 +613,7 @@ class LLMChain:
                     return result.strip()
                 _cb.fail(name)
             except Exception as e:
-                log.warning("  Agent [%s] lỗi: %s", name, e)
+                log.debug("  Agent [%s] chuyển dự phòng: %s", name, e)
                 _cb.fail(name)
         return ""
 
