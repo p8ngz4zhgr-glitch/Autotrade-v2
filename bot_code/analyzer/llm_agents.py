@@ -304,7 +304,14 @@ class LLMChain:
     def _nvidia_nim(self, prompt, fast=False):
         if not self.nvidia_key:
             raise ValueError("No NVIDIA NIM key")
-        models = ["meta/llama-3.3-70b-instruct", "deepseek-ai/deepseek-r1", "nvidia/llama-3.1-nemotron-70b-instruct", "mistralai/mistral-large-2-instruct"]
+        models = [
+            "meta/llama-3.3-70b-instruct",
+            "meta/llama-3.1-70b-instruct",
+            "nvidia/llama-3.1-nemotron-70b-instruct",
+            "meta/llama-3.1-8b-instruct",
+            "deepseek-ai/deepseek-r1",
+            "mistralai/mistral-large-2-instruct"
+        ]
         for model in models:
             try:
                 r = requests.post(
