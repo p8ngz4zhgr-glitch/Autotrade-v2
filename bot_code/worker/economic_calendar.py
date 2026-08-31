@@ -125,12 +125,12 @@ def get_high_impact_events(days_ahead: int = 7) -> list:
 
 def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
     """
-    Kết quả dùng trực tiếp cho engine.py/bingx_trader.py/main.py:
-    {"active": bool, "event": str|None, "size_mult": float, "sl_tighten_mult": float}
-    - size_mult 0.5: giảm 50% khối lượng giao dịch trong vùng ảnh hưởng tin xấu.
-    - sl_tighten_mult 0.7: SL siết còn 70% khoảng cách bình thường (gọn hơn,
-      lỗ nhỏ hơn nếu bị quét thanh khoản do biến động tin tức).
-    Fail-open: lỗi bất kỳ -> {"active": False, size_mult=1.0, sl_tighten_mult=1.0}
+    Kết quả dùng trực tiếp cho engine.py/bingx_trader.py/main.py/main_scanner.py:
+    {"active": bool, "event": str|None, "pause_trading": bool, "size_mult": float, "sl_tighten_mult": float}
+    - pause_trading True: Tạm dừng mở vị thế hoàn toàn trong 15 phút trước/sau tin cực lớn (CPI, FOMC, NFP).
+    - size_mult 0.5: giảm 50% khối lượng giao dịch trong vùng ảnh hưởng tin rộng.
+    - sl_tighten_mult 0.9: SL siết còn 90% khoảng cách bình thường.
+    Fail-open: lỗi bất kỳ -> {"active": False, "event": None, "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
     """
     try:
         # 1. Kiểm tra rủi ro tin xấu từ AI LLM News Agent
@@ -140,6 +140,7 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
             if na_risk.get("active"):
                 log.warning("📰 [NEWS RISK - LLM] Cảnh báo tin xấu (%s) -> Giảm 50%% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%%.",
                             na_risk.get("event"))
+                na_risk["pause_trading"] = na_risk.get("pause_trading", False)
                 return na_risk
         except Exception as ex_na:
             log.debug("Lỗi lấy news_agent_risk: %s", ex_na)
@@ -152,12 +153,20 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
                 et = datetime.fromisoformat(e["time"])
             except Exception:
                 continue
+            
+            # Cửa sổ ngắt lệnh cứng 15 phút trước/sau giờ ra tin
+            if (et - timedelta(minutes=15)) <= now <= (et + timedelta(minutes=15)):
+                log.warning("🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ 15p ra tin lớn: %s (%s) -> TẠM DỪNG MỞ VỊ THẾ BẢO VỆ VỐN!",
+                            e["name"], e["time"])
+                return {"active": True, "event": e["name"], "pause_trading": True, "size_mult": 0.0, "sl_tighten_mult": 1.0}
+
+            # Cửa sổ ảnh hưởng rộng (12h trước -> 6h sau) -> giảm 50% vốn
             if (et - timedelta(hours=hours_before)) <= now <= (et + timedelta(hours=hours_after)):
                 log.warning("📰 [NEWS WINDOW - CALENDAR] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm 50%% vốn vào lệnh, quản trị rủi ro.",
                             e["name"], e["time"])
-                return {"active": True, "event": e["name"], "size_mult": 0.5, "sl_tighten_mult": 0.9}
-        return {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
+                return {"active": True, "event": e["name"], "pause_trading": False, "size_mult": 0.5, "sl_tighten_mult": 0.9}
+        return {"active": False, "event": None, "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
     except Exception as ex:
         log.warning("⚠️ news_risk_adjustment lỗi (%s) -> fail-open, không điều chỉnh gì.", ex)
-        return {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
+        return {"active": False, "event": None, "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
 
