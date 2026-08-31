@@ -896,11 +896,15 @@ class SignalEngine:
             atr_multiplier = 3.5 # Đi ngang giật râu hai đầu -> Nới rộng SL lên 3.5x ATR để chịu nhiệt hoàn hảo
 
         # [NEW v6.11] LỊCH TIN CPI/PPI/NFP — chỉ áp dụng cho Crypto/Vàng
-        news_risk = {"active": False, "event": None, "size_mult": 1.0, "sl_tighten_mult": 1.0}
+        news_risk = {"active": False, "event": None, "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
         if atype in ("CRYPTO", "GOLD"):
             try:
                 from worker.economic_calendar import news_risk_adjustment
                 news_risk = news_risk_adjustment()
+                if news_risk.get("pause_trading") and final != "WAIT":
+                    log.warning("🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ ra tin vĩ mô lớn (%s) -> Tự động chuyển tín hiệu %s %s về WAIT!",
+                                news_risk.get("event"), symbol, final)
+                    final = "WAIT"
             except Exception as e:
                 log.debug("  Lịch tin tức lỗi (bỏ qua, không chặn): %s", e)
 
