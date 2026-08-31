@@ -852,20 +852,33 @@ class SignalEngine:
                 final = "WAIT"
 
         # ══════════════════════════════════════════════════════════
-        # 2.6. XÁC NHẬN ĐA KHUNG: 4H QUYẾT XU HƯỚNG LỚN, 15M TÌM ĐIỂM VÀO
+        # 2.6. XÁC NHẬN ĐA KHUNG ĐỘNG (DYNAMIC MULTI-TIMEFRAME REGIME SCORE)
         # ══════════════════════════════════════════════════════════
         trend_4h  = results.get("4h", {}).get("direction", "WAIT")
         trend_15m = results.get("15m", {}).get("direction", "WAIT")
 
+        trade_regime = "NORMAL"
+        mtf_size_mult = 1.0
+
         if final in ("LONG", "SHORT"):
-            if trend_4h in ("LONG", "SHORT") and trend_4h != final and combined < 75:
-                log.warning("  ⛔ [4H TREND] %s: Xu hướng lớn 4H=%s ngược với tín hiệu %s "
-                            "-> hạ về WAIT (không đánh ngược xu hướng lớn).", symbol, trend_4h, final)
-                final = "WAIT"
-            elif trend_4h == final and trend_15m != final and combined < 72:
-                log.info("  ⏳ [15M TRIGGER] %s: 4H đồng thuận %s nhưng nến 15m (%s) đang nhịp chỉnh "
-                         "-> chờ nến 15m tiếp theo.", symbol, final, trend_15m)
-                final = "WAIT"
+            if trend_4h == final:
+                log.info("  🟢 [MTF ALIGNMENT] %s: Khung 4H đồng thuận %s -> Thưởng điểm +10, kích hoạt 100%% Size Vốn.", symbol, final)
+                conf = min(98.0, conf + 10.0)
+                trade_regime = "TREND_FOLLOWING"
+                mtf_size_mult = 1.0
+            elif trend_4h in ("LONG", "SHORT") and trend_4h != final:
+                if combined >= 65:
+                    log.info("  ⚡ [COUNTER-TREND SCALP] %s: 4H=%s ngược với %s nhưng Score=%.1f >= 65 "
+                             "-> Kích hoạt lệnh Sóng Hồi Nhanh (Giảm Size 50%%, TP1 chốt nhanh).", symbol, trend_4h, final, combined)
+                    trade_regime = "COUNTER_TREND"
+                    mtf_size_mult = 0.5
+                else:
+                    log.warning("  ⛔ [4H TREND] %s: 4H=%s ngược với %s và Score=%.1f < 65 -> Hạ về WAIT.", symbol, trend_4h, final, combined)
+                    final = "WAIT"
+            elif trend_4h == "WAIT" or hmm_regime == "SIDEWAYS":
+                log.info("  ↔️ [SIDEWAY RANGE] %s: 4H/HMM đi ngang -> Kích hoạt chế độ Sideway (Size 75%%).", symbol)
+                trade_regime = "SIDEWAY_RANGE"
+                mtf_size_mult = 0.75
 
 
 
@@ -1464,6 +1477,8 @@ class SignalEngine:
             "hmm": {"regime": hmm_regime, "confidence": hmm_conf}, # Trả về dữ liệu HMM để hiển thị trên Telegram nếu cần
             "btc_correlation": btc_corr, "btc_hmm_regime": btc_hmm_regime, "btc_trend_now": btc_trend_now,
             "news_risk": news_risk,
+            "trade_regime": trade_regime,
+            "position_size_mult": round(mtf_size_mult * news_risk.get("size_mult", 1.0), 2),
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
         }
