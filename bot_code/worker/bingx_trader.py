@@ -412,6 +412,26 @@ class BingXExchange:
         if res.get("code") == 0:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
+            
+            # Tự động tạo 2 mốc TP (TP1 chốt 50% + TP2 chốt 50%) nếu chưa có tp_levels
+            if not tp_levels and tp_price > 0 and sl_price > 0 and current_price > 0:
+                sl_dist = abs(current_price - sl_price)
+                if sl_dist > 0:
+                    if side == "BUY":
+                        tp1_p = round(current_price + 1.5 * sl_dist, 4)
+                        if tp1_p < tp_price:
+                            tp_levels = [
+                                {"level": 1, "price": tp1_p, "close_pct": 0.5},
+                                {"level": 2, "price": tp_price, "close_pct": 0.5}
+                            ]
+                    else:
+                        tp1_p = round(current_price - 1.5 * sl_dist, 4)
+                        if tp1_p > tp_price:
+                            tp_levels = [
+                                {"level": 1, "price": tp1_p, "close_pct": 0.5},
+                                {"level": 2, "price": tp_price, "close_pct": 0.5}
+                            ]
+
             self._place_sl_tp(symbol, side, safe_qty, sl_price, tp_price, tp_levels)
             return {"ok": True, "order_id": order_id, "qty": safe_qty}
             
