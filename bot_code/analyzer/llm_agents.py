@@ -568,6 +568,57 @@ class LLMChain:
         elif "SIGNAL: WAIT" in s5_raw.upper():
             signal_direction = "WAIT"
 
+        # Đồng bộ hóa plan và sửa văn bản Stage 5 nếu có sự lệch hướng SL/TP (Class 1)
+        price = data["price"]
+        plan_sl = data["plan"].get("sl", price)
+        plan_tp1 = data["plan"].get("tp1", price)
+        plan_tp2 = data["plan"].get("tp2", price)
+
+        if signal_direction == "SHORT":
+            if plan_sl < price or plan_tp1 > price:
+                sl_dist = abs(price - plan_sl) if plan_sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(plan_tp1 - price) if plan_tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(plan_tp2 - price) if plan_tp2 != price else round(price * 0.070, 2)
+                new_sl = round(price + sl_dist, 2)
+                new_tp1 = round(price - tp1_dist, 2)
+                new_tp2 = round(price - tp2_dist, 2)
+                data["plan"]["sl"] = new_sl
+                data["plan"]["tp1"] = new_tp1
+                data["plan"]["tp2"] = new_tp2
+                if "tp_levels" in data["plan"]:
+                    data["plan"]["tp_levels"] = [
+                        {"level": 1, "price": new_tp1, "close_pct": 0.5},
+                        {"level": 2, "price": new_tp2, "close_pct": 0.5}
+                    ]
+                if "FINAL_VERDICT" in s5:
+                    v_text = s5["FINAL_VERDICT"]
+                    v_text = re.sub(r"SL:\s*\$?\d+(\.\d+)?", f"SL: ${new_sl}", v_text)
+                    v_text = re.sub(r"TP1:\s*\$?\d+(\.\d+)?", f"TP1: ${new_tp1}", v_text)
+                    v_text = re.sub(r"TP2:\s*\$?\d+(\.\d+)?", f"TP2: ${new_tp2}", v_text)
+                    s5["FINAL_VERDICT"] = v_text
+        elif signal_direction == "LONG":
+            if plan_sl > price or plan_tp1 < price:
+                sl_dist = abs(plan_sl - price) if plan_sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(price - plan_tp1) if plan_tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(price - plan_tp2) if plan_tp2 != price else round(price * 0.070, 2)
+                new_sl = round(price - sl_dist, 2)
+                new_tp1 = round(price + tp1_dist, 2)
+                new_tp2 = round(price + tp2_dist, 2)
+                data["plan"]["sl"] = new_sl
+                data["plan"]["tp1"] = new_tp1
+                data["plan"]["tp2"] = new_tp2
+                if "tp_levels" in data["plan"]:
+                    data["plan"]["tp_levels"] = [
+                        {"level": 1, "price": new_tp1, "close_pct": 0.5},
+                        {"level": 2, "price": new_tp2, "close_pct": 0.5}
+                    ]
+                if "FINAL_VERDICT" in s5:
+                    v_text = s5["FINAL_VERDICT"]
+                    v_text = re.sub(r"SL:\s*\$?\d+(\.\d+)?", f"SL: ${new_sl}", v_text)
+                    v_text = re.sub(r"TP1:\s*\$?\d+(\.\d+)?", f"TP1: ${new_tp1}", v_text)
+                    v_text = re.sub(r"TP2:\s*\$?\d+(\.\d+)?", f"TP2: ${new_tp2}", v_text)
+                    s5["FINAL_VERDICT"] = v_text
+
         stat_adj_conf = None
         stat_explain  = ""
         if signal_direction != "WAIT":
@@ -740,6 +791,24 @@ class LLMChain:
         price, sl, tp1, tp2, rr = (data["price"], data["plan"]["sl"],
                                     data["plan"]["tp1"], data["plan"]["tp2"],
                                     data.get("rr_ratio", 2.0))
+
+        if consensus_signal == "SHORT":
+            if sl < price or tp1 > price:
+                sl_dist = abs(price - sl) if sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(tp1 - price) if tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(tp2 - price) if tp2 != price else round(price * 0.070, 2)
+                sl = round(price + sl_dist, 2)
+                tp1 = round(price - tp1_dist, 2)
+                tp2 = round(price - tp2_dist, 2)
+        elif consensus_signal == "LONG":
+            if sl > price or tp1 < price:
+                sl_dist = abs(sl - price) if sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(price - tp1) if tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(price - tp2) if tp2 != price else round(price * 0.070, 2)
+                sl = round(price - sl_dist, 2)
+                tp1 = round(price + tp1_dist, 2)
+                tp2 = round(price + tp2_dist, 2)
+
         return (
             "Ban la CIO — nguoi ra quyet dinh cuoi cung.\n"
             "YEU CAU: Bat dau bang [FINAL_VERDICT] trong ngoac vuong.\n\n"
@@ -865,6 +934,57 @@ class MultiAgentPipeline:
             signal_direction = "SHORT"
         elif "SIGNAL: WAIT" in s5_raw.upper():
             signal_direction = "WAIT"
+
+        # Đồng bộ hóa plan và sửa văn bản Stage 5 nếu có sự lệch hướng SL/TP
+        price = data["price"]
+        plan_sl = data["plan"].get("sl", price)
+        plan_tp1 = data["plan"].get("tp1", price)
+        plan_tp2 = data["plan"].get("tp2", price)
+
+        if signal_direction == "SHORT":
+            if plan_sl < price or plan_tp1 > price:
+                sl_dist = abs(price - plan_sl) if plan_sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(plan_tp1 - price) if plan_tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(plan_tp2 - price) if plan_tp2 != price else round(price * 0.070, 2)
+                new_sl = round(price + sl_dist, 2)
+                new_tp1 = round(price - tp1_dist, 2)
+                new_tp2 = round(price - tp2_dist, 2)
+                data["plan"]["sl"] = new_sl
+                data["plan"]["tp1"] = new_tp1
+                data["plan"]["tp2"] = new_tp2
+                if "tp_levels" in data["plan"]:
+                    data["plan"]["tp_levels"] = [
+                        {"level": 1, "price": new_tp1, "close_pct": 0.5},
+                        {"level": 2, "price": new_tp2, "close_pct": 0.5}
+                    ]
+                if "FINAL_VERDICT" in s5:
+                    v_text = s5["FINAL_VERDICT"]
+                    v_text = re.sub(r"SL:\s*\$?\d+(\.\d+)?", f"SL: ${new_sl}", v_text)
+                    v_text = re.sub(r"TP1:\s*\$?\d+(\.\d+)?", f"TP1: ${new_tp1}", v_text)
+                    v_text = re.sub(r"TP2:\s*\$?\d+(\.\d+)?", f"TP2: ${new_tp2}", v_text)
+                    s5["FINAL_VERDICT"] = v_text
+        elif signal_direction == "LONG":
+            if plan_sl > price or plan_tp1 < price:
+                sl_dist = abs(plan_sl - price) if plan_sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(price - plan_tp1) if plan_tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(price - plan_tp2) if plan_tp2 != price else round(price * 0.070, 2)
+                new_sl = round(price - sl_dist, 2)
+                new_tp1 = round(price + tp1_dist, 2)
+                new_tp2 = round(price + tp2_dist, 2)
+                data["plan"]["sl"] = new_sl
+                data["plan"]["tp1"] = new_tp1
+                data["plan"]["tp2"] = new_tp2
+                if "tp_levels" in data["plan"]:
+                    data["plan"]["tp_levels"] = [
+                        {"level": 1, "price": new_tp1, "close_pct": 0.5},
+                        {"level": 2, "price": new_tp2, "close_pct": 0.5}
+                    ]
+                if "FINAL_VERDICT" in s5:
+                    v_text = s5["FINAL_VERDICT"]
+                    v_text = re.sub(r"SL:\s*\$?\d+(\.\d+)?", f"SL: ${new_sl}", v_text)
+                    v_text = re.sub(r"TP1:\s*\$?\d+(\.\d+)?", f"TP1: ${new_tp1}", v_text)
+                    v_text = re.sub(r"TP2:\s*\$?\d+(\.\d+)?", f"TP2: ${new_tp2}", v_text)
+                    s5["FINAL_VERDICT"] = v_text
 
         stat_adj_conf = None
         stat_explain  = ""
@@ -992,6 +1112,24 @@ class MultiAgentPipeline:
         price, sl, tp1, tp2, rr = (data["price"], data["plan"]["sl"],
                                     data["plan"]["tp1"], data["plan"]["tp2"],
                                     data.get("rr_ratio", 2.0))
+
+        if consensus_signal == "SHORT":
+            if sl < price or tp1 > price:
+                sl_dist = abs(price - sl) if sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(tp1 - price) if tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(tp2 - price) if tp2 != price else round(price * 0.070, 2)
+                sl = round(price + sl_dist, 2)
+                tp1 = round(price - tp1_dist, 2)
+                tp2 = round(price - tp2_dist, 2)
+        elif consensus_signal == "LONG":
+            if sl > price or tp1 < price:
+                sl_dist = abs(sl - price) if sl != price else round(price * 0.025, 2)
+                tp1_dist = abs(price - tp1) if tp1 != price else round(price * 0.035, 2)
+                tp2_dist = abs(price - tp2) if tp2 != price else round(price * 0.070, 2)
+                sl = round(price - sl_dist, 2)
+                tp1 = round(price + tp1_dist, 2)
+                tp2 = round(price + tp2_dist, 2)
+
         return (
             "Ban la CIO — nguoi ra quyet dinh cuoi cung.\n"
             "YEU CAU: Bat dau bang [FINAL_VERDICT] trong ngoac vuong.\n\n"
