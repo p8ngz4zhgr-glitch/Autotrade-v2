@@ -1065,9 +1065,14 @@ class SignalEngine:
                 tp2 = atr_tp2_s
 
         else:
-            sl  = round(price * (1 - sl_atr_pct / 100), 2)
-            tp1 = atr_tp1
-            tp2 = atr_tp2
+            if combined_bear > combined_bull or results.get("overall_bias") == "BEARISH":
+                sl  = round(price * (1 + (sl_atr_pct + mm_noise_buffer_pct) / 100), 2)
+                tp1 = atr_tp1_s
+                tp2 = atr_tp2_s
+            else:
+                sl  = round(price * (1 - (sl_atr_pct + mm_noise_buffer_pct) / 100), 2)
+                tp1 = atr_tp1
+                tp2 = atr_tp2
 
         if final == "LONG":
             if tp2 <= tp1:
