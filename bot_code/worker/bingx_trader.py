@@ -734,6 +734,28 @@ class BingXExchange:
                     pass
             return {"action": "CLOSE", "type": f"CHỐT LỜI NHANH (+${net_pnl_usd:.2f} USD NET)", "roe": roe}
 
+        # 0.5. TỰ ĐỘNG DỜI SL VỀ HÒA VỐN (BREAKEVEN) TRƯỚC/KHI CÓ TIN VĨ MÔ LỚN (NFP/CPI/FOMC)
+        try:
+            from worker.economic_calendar import news_risk_adjustment
+            news_risk = news_risk_adjustment()
+            if news_risk.get("active"):
+                be_p = self.breakeven_price(direction, entry_price)
+                is_profitable = (direction == "LONG" and current_price > entry_price) or \
+                                (direction == "SHORT" and current_price < entry_price)
+                if is_profitable:
+                    sl_at_be = (direction == "LONG" and current_sl >= be_p - (entry_price * 0.0002)) or \
+                               (direction == "SHORT" and current_sl > 0 and current_sl <= be_p + (entry_price * 0.0002))
+                    if not sl_at_be:
+                        log.info(f"📰 [NEWS BREAKEVEN PROTECTION] {symbol} {direction}: Đang trong vùng ảnh hưởng tin vĩ mô ({news_risk.get('event')}) & Vị thế đang CÓ LÃI -> Tự động dời SL về Hòa Vốn (${be_p:.4f}) bảo vệ vốn!")
+                        self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, be_p, plan.get("tp_levels", []), current_price)
+                        return {
+                            "action": "NEWS_BREAKEVEN",
+                            "new_sl": be_p,
+                            "msg": f"Đã tự động dời SL về Hòa Vốn (${be_p}) bảo vệ trước tin vĩ mô ({news_risk.get('event')})."
+                        }
+        except Exception as ex_news_be:
+            log.debug("Lỗi news breakeven protection: %s", ex_news_be)
+
         # 1. TÍNH TOÁN 4 MỐC TP & TRAILING SL ĐA CẤP (50% SANG TP KẾ TIẾP -> DỜI SL VỀ TP TRƯỚC)
         raw_tp_levels = plan.get("tp_levels", [])
         tp_list = []
