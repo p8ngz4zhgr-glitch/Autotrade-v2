@@ -127,12 +127,15 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
     """
     Kết quả dùng trực tiếp cho engine.py/bingx_trader.py/main.py/main_scanner.py:
     {"active": bool, "event": str|None, "pause_trading": bool, "size_mult": float, "sl_tighten_mult": float}
-    - pause_trading True: Tạm dừng mở vị thế hoàn toàn trong 15 phút trước/sau tin cực lớn (CPI, FOMC, NFP).
+    - pause_trading True: Tạm dừng mở vị thế hoàn toàn trong cửa sổ ngắt lệnh vĩ mô (mặc định 90 phút trước/sau tin lớn NFP, CPI, FOMC).
     - size_mult 0.5: giảm 50% khối lượng giao dịch trong vùng ảnh hưởng tin rộng.
     - sl_tighten_mult 0.9: SL siết còn 90% khoảng cách bình thường.
     Fail-open: lỗi bất kỳ -> {"active": False, "event": None, "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
     """
     try:
+        # Lấy cấu hình thời gian ngắt lệnh vĩ mô (mặc định 90 phút trước và sau giờ ra tin)
+        blackout_mins = int(os.getenv("MACRO_BLACKOUT_MINUTES", "90"))
+
         # 1. Kiểm tra rủi ro tin xấu từ AI LLM News Agent
         try:
             from analyzer.news_agent import get_news_agent_risk
@@ -145,7 +148,7 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
         except Exception as ex_na:
             log.debug("Lỗi lấy news_agent_risk: %s", ex_na)
 
-        # 2. Kiểm tra lịch tin vĩ mô (CPI/PPI/NFP...)
+        # 2. Kiểm tra lịch tin vĩ mô (CPI/PPI/NFP/FOMC...)
         events = get_high_impact_events(days_ahead=3)
         now = datetime.utcnow()
         for e in events:
@@ -154,10 +157,10 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
             except Exception:
                 continue
             
-            # Cửa sổ ngắt lệnh cứng 15 phút trước/sau giờ ra tin
-            if (et - timedelta(minutes=15)) <= now <= (et + timedelta(minutes=15)):
-                log.warning("🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ 15p ra tin lớn: %s (%s) -> TẠM DỪNG MỞ VỊ THẾ BẢO VỆ VỐN!",
-                            e["name"], e["time"])
+            # Cửa sổ ngắt lệnh cứng (mặc định 90 phút trước/sau giờ ra tin lớn)
+            if (et - timedelta(minutes=blackout_mins)) <= now <= (et + timedelta(minutes=blackout_mins)):
+                log.warning("🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ %d phút ra tin lớn: %s (%s) -> TẠM DỪNG MỞ VỊ THẾ BẢO VỆ VỐN!",
+                            blackout_mins, e["name"], e["time"])
                 return {"active": True, "event": e["name"], "pause_trading": True, "size_mult": 0.0, "sl_tighten_mult": 1.0}
 
             # Cửa sổ ảnh hưởng rộng (12h trước -> 6h sau) -> giảm 50% vốn
