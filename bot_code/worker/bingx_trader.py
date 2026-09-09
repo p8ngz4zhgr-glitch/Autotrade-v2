@@ -720,24 +720,25 @@ class BingXExchange:
         # 0. CHỐT LỜI CẤP THỦ CÔNG / CỦA BINGX (Cho phép vị thế chạy tới các mốc TP1-TP4 chuẩn)
         # Bỏ quy tắc ép chốt lời quá sớm $0.20 USD để lệnh gồng đủ tỷ lệ Risk:Reward 1:1.5 -> 1:3 chuẩn thuật toán.
 
-        # 0.5. TỰ ĐỘNG DỜI SL VỀ HÒA VỐN (BREAKEVEN) TRƯỚC/KHI CÓ TIN VĨ MÔ LỚN (NFP/CPI/FOMC)
+        # 0.5. TỰ ĐỘNG DỜI SL VỀ HÒA VỐN (BREAKEVEN) TRONG CỬA SỔ RA TIN VĨ MÔ LỚN (NFP/CPI/FOMC)
+        # Chỉ kích hoạt khi thực sự trong cửa sổ ngắt lệnh (pause_trading=True) VÀ vị thế đã đạt lãi tối thiểu +0.8%
+        # Tránh dời SL quá sớm khi lãi +0.02% gây dính SL hòa vốn oan do biến động tự nhiên.
         try:
             from worker.economic_calendar import news_risk_adjustment
             news_risk = news_risk_adjustment()
-            if news_risk.get("active"):
-                be_p = self.breakeven_price(direction, entry_price)
-                is_profitable = (direction == "LONG" and current_price > entry_price) or \
-                                (direction == "SHORT" and current_price < entry_price)
-                if is_profitable:
+            if news_risk.get("pause_trading"):
+                pnl_pct = ((current_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - current_price) / entry_price * 100)
+                if pnl_pct >= 0.8:
+                    be_p = self.breakeven_price(direction, entry_price)
                     sl_at_be = (direction == "LONG" and current_sl >= be_p - (entry_price * 0.0002)) or \
                                (direction == "SHORT" and current_sl > 0 and current_sl <= be_p + (entry_price * 0.0002))
                     if not sl_at_be:
-                        log.info(f"📰 [NEWS BREAKEVEN PROTECTION] {symbol} {direction}: Đang trong vùng ảnh hưởng tin vĩ mô ({news_risk.get('event')}) & Vị thế đang CÓ LÃI -> Tự động dời SL về Hòa Vốn (${be_p:.4f}) bảo vệ vốn!")
+                        log.info(f"📰 [MACRO BREAKEVEN PROTECTION] {symbol} {direction}: Đang trong cửa sổ ra tin vĩ mô lớn ({news_risk.get('event')}) & Vị thế đạt lãi +{pnl_pct:.2f}% >= +0.8% -> Dời SL về Hòa Vốn (${be_p:.4f}) bảo vệ vốn!")
                         self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, be_p, plan.get("tp_levels", []), current_price)
                         return {
                             "action": "NEWS_BREAKEVEN",
                             "new_sl": be_p,
-                            "msg": f"Đã tự động dời SL về Hòa Vốn (${be_p}) bảo vệ trước tin vĩ mô ({news_risk.get('event')})."
+                            "msg": f"Đã tự động dời SL về Hòa Vốn (${be_p}) bảo vệ trước tin vĩ mô lớn ({news_risk.get('event')})."
                         }
         except Exception as ex_news_be:
             log.debug("Lỗi news breakeven protection: %s", ex_news_be)
