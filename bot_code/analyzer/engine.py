@@ -1,6 +1,7 @@
 # ═══════════════════════════════════════════════════════════
 # 5. SIGNAL ENGINE — v6.1 (Parallel TF + Smart Confidence)
 # ═══════════════════════════════════════════════════════════
+import os
 import time
 import logging
 import math
