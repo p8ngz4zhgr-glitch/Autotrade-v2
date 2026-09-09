@@ -717,22 +717,8 @@ class BingXExchange:
 
         net_pnl_usd = gross_pnl_usd - fee_usd
 
-        # 0. CHỐT LỜI NHANH TRONG KHOẢNG $0.20 - $0.50 USD (ĐÃ TRỪ PHÍ GIAO DỊCH SÀN 2 CHIỀU)
-        # Tự động chốt 100% vị thế khi đạt từ 0.20$ USD lãi ròng trở lên,
-        # tránh gồng lệnh chờ TP xa rồi bị giá đảo chiều dính SL.
-        if net_pnl_usd >= 0.20:
-            log.info(f"🎯 [QUICK USD TP] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} USD "
-                     f"(Thô: +${gross_pnl_usd:.2f}, Phí 2 chiều: -${fee_usd:.2f}) >= $0.20 USD -> "
-                     f"CHỐT TOÀN BỘ 100% VỊ THẾ NGAY, KHÔNG GỒNG TRÁNH SL!")
-            self.close_position(symbol, current_qty, direction)
-            self.cancel_all_orders(symbol)
-            if redis_client:
-                try:
-                    redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
-                    redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
-                except Exception:
-                    pass
-            return {"action": "CLOSE", "type": f"CHỐT LỜI NHANH (+${net_pnl_usd:.2f} USD NET)", "roe": roe}
+        # 0. CHỐT LỜI CẤP THỦ CÔNG / CỦA BINGX (Cho phép vị thế chạy tới các mốc TP1-TP4 chuẩn)
+        # Bỏ quy tắc ép chốt lời quá sớm $0.20 USD để lệnh gồng đủ tỷ lệ Risk:Reward 1:1.5 -> 1:3 chuẩn thuật toán.
 
         # 0.5. TỰ ĐỘNG DỜI SL VỀ HÒA VỐN (BREAKEVEN) TRƯỚC/KHI CÓ TIN VĨ MÔ LỚN (NFP/CPI/FOMC)
         try:
