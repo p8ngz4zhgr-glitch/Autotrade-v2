@@ -1354,6 +1354,22 @@ class SignalEngine:
             log.warning("  ⚠️ [VOLUME GIẢ] %s 1h: z-score=%.2f bất thường nhưng giá không xác nhận "
                         "-> giảm độ tin cậy tín hiệu.", symbol, vol_1h.get("vol_zscore", 0))
 
+        # [NEW v6.14] DXY (DOLLAR INDEX) & US10Y (TREASURY YIELD) MACRO FACTOR
+        # Đánh giá Bối cảnh Vĩ mô DXY/US10Y dưới dạng 'Hệ số Điều chỉnh Xác suất Bayes' (Probabilistic Modifier).
+        # TUYỆT ĐỐI KHÔNG tự tiện phát lệnh SHORT hay LONG phụ thuộc vào DXY/US10Y đơn thuần.
+        # Nòng cốt vào lệnh vẫn là Tín hiệu Kỹ thuật thuần túy (Price Action + Kalman + CVD + HMM).
+        if final in ("LONG", "SHORT"):
+            try:
+                from analyzer.macro_analyzer import get_macro_market_context, evaluate_macro_signal_modifier
+                macro_ctx = get_macro_market_context()
+                macro_mod, macro_size_mult, macro_sl_buff, macro_reason = evaluate_macro_signal_modifier(final, macro_ctx)
+                likelihood *= macro_mod
+                if macro_mod != 1.0:
+                    log.info("  💵 [MACRO PROBABILITY MODIFIER] %s %s -> Tỷ lệ Likelihood x%.2f (%s)",
+                             symbol, final, macro_mod, macro_reason)
+            except Exception as e_macro:
+                log.debug("Lỗi tính chỉ số Macro DXY/US10Y/Fed: %s", e_macro)
+
         if final in ("LONG", "SHORT"):
             bayes_odds = base_odds * likelihood
             p_win = bayes_odds / (1 + bayes_odds)
