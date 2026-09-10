@@ -1310,6 +1310,47 @@ def _execute_for_user(user: User, signal: dict):
             if qty <= 0:
                 return
 
+        # [NEW v6.15] ĐIỀU CHỈNH KHỐI LƯỢNG THEO KỲ VỌNG LÃI SUẤT FED (FED RATE POLICY)
+        try:
+            from analyzer.macro_analyzer import get_macro_market_context
+            m_ctx = get_macro_market_context()
+            fed_size = m_ctx.get("fed_size_mult", 1.0)
+            if fed_size != 1.0:
+                qty = round(qty * fed_size, 4)
+                log.info("💵 [FED RATE SIZING] %s: Điều chỉnh vốn vĩ mô x%.2f (Fed: %s | Cut Prob: %.1f%%) -> Qty: %.4f",
+                         sym, fed_size, m_ctx.get("fed_stance"), m_ctx.get("fed_rate_cut_prob", 50), qty)
+        except Exception as ex_m_size:
+            log.debug("Lỗi tính Fed size: %s", ex_m_size)
+
+        # [NEW v6.15] CHẾ ĐỘ BẢO VỆ THÀNH QUẢ KHI ĐẠT CHỈ TIÊU NGÀY ($5 - $10 USD)
+        # Đạt chỉ tiêu $5 - $10 USD/ngày -> KHÔNG KHOÁ HOÀN TOÀN BOT!
+        # Chuyển sang Profit Trail Lock: Yêu cầu độ tự tin >= 70%, đi vốn x0.5 để tiếp tục gia tăng lợi nhuận an toàn.
+        today_pnl = 0.0
+        try:
+            tj_db = SessionLocal()
+            since_24h = datetime.utcnow() - timedelta(hours=24)
+            rows_24h = tj_db.query(TradeJournal).filter(
+                TradeJournal.user_id == str(user.telegram_id),
+                TradeJournal.timestamp >= since_24h
+            ).all()
+            today_pnl = sum(r.pnl_usd or 0.0 for r in rows_24h)
+            tj_db.close()
+        except Exception as ex_pnl:
+            log.debug("Lỗi tính PnL 24h: %s", ex_pnl)
+
+        if today_pnl >= 5.0:
+            req_conf = 70
+            if signal.get("confidence", 70) < req_conf:
+                log.info("🏆 User %s đã đạt chỉ tiêu ngày (+%.2f USD >= $5.00). Chế độ Bảo Vệ Thành Quả yêu cầu conf >= %d%% (hiện tại: %s%%) -> Bỏ qua lệnh này.",
+                         user.telegram_id, today_pnl, req_conf, signal.get("confidence"))
+                return
+            qty = round(qty * 0.5, 4)
+            log.info("🏆 User %s đã đạt chỉ tiêu ngày (+%.2f USD). Chế độ Bảo Vệ Thành Quả kích hoạt: Tiếp tục mở lệnh với vốn x0.5 (Qty: %.4f) để gia tăng lợi nhuận an toàn.",
+                     user.telegram_id, today_pnl, qty)
+
+        if qty <= 0:
+            return
+
         entry_features = {
             "symbol": sym, "direction": direction,
             "confidence": signal.get("confidence", 70),
