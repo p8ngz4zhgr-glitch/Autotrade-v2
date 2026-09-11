@@ -744,6 +744,38 @@ class SignalEngine:
                     final = "SHORT"
                     conf = round(min(95, conf + 15.0), 1)
 
+        # 3. [GIANLUCA BRUNI SET UP] PHÂN TÍCH QUÉT THANH KHOẢN HỘP PHIÊN Á (ASIAN SESSION SWEEP)
+        bruni_data = {"detected": False}
+        try:
+            from analyzer.bruni_analyzer import analyze_bruni_asian_sweep
+            tf15 = results.get("15m", {})
+            c15 = tf15.get("closes") or tf15.get("close", [])
+            h15 = tf15.get("highs") or tf15.get("high", [])
+            l15 = tf15.get("lows") or tf15.get("low", [])
+            o15 = tf15.get("opens") or tf15.get("open", [])
+            if c15 and len(c15) >= 32:
+                bruni_data = analyze_bruni_asian_sweep(c15, h15, l15, o15, price)
+                if bruni_data.get("detected"):
+                    b_sig = bruni_data.get("signal")
+                    if b_sig == "LONG":
+                        if final == "SHORT":
+                            log.warning("⛔ [BRUNI FILTER] Quét đáy Hộp Phiên Á (Bear Trap) -> HỦY LỆNH SHORT!")
+                            final = "WAIT"
+                        elif final in ("LONG", "WAIT") and combined >= 40:
+                            log.info("🏆 [GIANLUCA BRUNI TRIGGER] %s -> KÍCH HOẠT LONG BẮT ĐÁY HỘP PHIÊN Á!", bruni_data.get("reason"))
+                            final = "LONG"
+                            conf = round(min(95.0, max(conf + 15.0, 78.0)), 1)
+                    elif b_sig == "SHORT":
+                        if final == "LONG":
+                            log.warning("⛔ [BRUNI FILTER] Quét đỉnh Hộp Phiên Á (Bull Trap) -> HỦY LỆNH LONG!")
+                            final = "WAIT"
+                        elif final in ("SHORT", "WAIT") and combined <= 60:
+                            log.info("🏆 [GIANLUCA BRUNI TRIGGER] %s -> KÍCH HOẠT SHORT ĐÓN XẢ HỘP PHIÊN Á!", bruni_data.get("reason"))
+                            final = "SHORT"
+                            conf = round(min(95.0, max(conf + 15.0, 78.0)), 1)
+        except Exception as e_bruni:
+            log.debug("Lỗi phân tích Bruni Sweep: %s", e_bruni)
+
         # ══════════════════════════════════════════════════════════
         # S/R ZONES & VOLUME PROFILE ANALYSIS
         # ══════════════════════════════════════════════════════════
@@ -1359,6 +1391,11 @@ class SignalEngine:
         # TUYỆT ĐỐI KHÔNG tự tiện phát lệnh SHORT hay LONG phụ thuộc vào DXY/US10Y đơn thuần.
         # Nòng cốt vào lệnh vẫn là Tín hiệu Kỹ thuật thuần túy (Price Action + Kalman + CVD + HMM).
         if final in ("LONG", "SHORT"):
+            if bruni_data.get("detected") and bruni_data.get("signal") == final:
+                likelihood *= 1.25
+                log.info("  🏆 [BRUNI PROBABILITY MODIFIER] %s %s -> Tỷ lệ Likelihood x1.25 (Thưởng +25%% do trùng khớp bẫy thanh khoản Hộp Phiên Á)",
+                         symbol, final)
+
             try:
                 from analyzer.macro_analyzer import get_macro_market_context, evaluate_macro_signal_modifier
                 macro_ctx = get_macro_market_context()
