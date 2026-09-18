@@ -204,6 +204,74 @@ class Indicators:
         return round(v, 2)
 
     @staticmethod
+    def pythagoras_ma(closes: list) -> dict:
+        """
+        Bộ chỉ báo Hỗ trợ / Kháng cự & Xu hướng Động Pythagoras MA (144, 258, 369).
+        - MA144: Đường Xu hướng Ngắn/Trung hạn Pythagoras
+        - MA258: Đường Xu hướng Trung/Dài hạn Pythagoras
+        - MA369: Đường Xu hướng Chu kỳ Lớn Pythagoras
+        """
+        closes = [c for c in closes if c and c > 0]
+        if not closes:
+            return {
+                "ema144": 0.0, "ema258": 0.0, "ema369": 0.0,
+                "pytha_trend": "NEUTRAL", "signal": "NEUTRAL",
+                "score_adj": 0, "nearest_support": 0.0, "nearest_resistance": 0.0,
+                "desc": "Chưa có dữ liệu cho Pythagoras MA"
+            }
+
+        price = closes[-1]
+        ema144 = Indicators.ema(closes, 144)
+        ema258 = Indicators.ema(closes, 258)
+        ema369 = Indicators.ema(closes, 369)
+
+        pytha_bull = price > ema144 > ema258 > ema369
+        pytha_bear = price < ema144 < ema258 < ema369
+
+        trend = "NEUTRAL"
+        signal = "NEUTRAL"
+        score_adj = 0
+        desc = ""
+
+        if pytha_bull:
+            trend = "BULLISH"
+            signal = "LONG"
+            score_adj = 12
+            desc = f"Hệ thống Pythagoras MA (144: {ema144:.2f}, 258: {ema258:.2f}, 369: {ema369:.2f}) ĐỒNG THUẬN TĂNG MẠNH ME"
+        elif pytha_bear:
+            trend = "BEARISH"
+            signal = "SHORT"
+            score_adj = -12
+            desc = f"Hệ thống Pythagoras MA (144: {ema144:.2f}, 258: {ema258:.2f}, 369: {ema369:.2f}) ĐỒNG THUẬN GIẢM MẠNH MẼ"
+        elif price > ema144:
+            trend = "BULLISH_BIAS"
+            score_adj = 5
+            desc = f"Giá ({price:.2f}) nằm trên Pythagoras MA144 ({ema144:.2f})"
+        elif price < ema144:
+            trend = "BEARISH_BIAS"
+            score_adj = -5
+            desc = f"Giá ({price:.2f}) nằm dưới Pythagoras MA144 ({ema144:.2f})"
+
+        mas = [ema144, ema258, ema369]
+        supports = [m for m in mas if m > 0 and m < price]
+        resistances = [m for m in mas if m > 0 and m > price]
+
+        nearest_supp = max(supports) if supports else 0.0
+        nearest_res = min(resistances) if resistances else 0.0
+
+        return {
+            "ema144": ema144,
+            "ema258": ema258,
+            "ema369": ema369,
+            "pytha_trend": trend,
+            "signal": signal,
+            "score_adj": score_adj,
+            "nearest_support": nearest_supp,
+            "nearest_resistance": nearest_res,
+            "desc": desc
+        }
+
+    @staticmethod
     def _ema_series(values: list[float], period: int) -> list[float]:
         if len(values) < period:
             return [values[-1]] if values else []
