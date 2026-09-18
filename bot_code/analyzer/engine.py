@@ -31,21 +31,23 @@ class SignalEngine:
         self._BTC_CACHE_TTL = 240  # giây — ngắn hơn chu kỳ quét 15p nhưng đủ tránh fetch lặp lại
 
     def _fetcher(self, symbol):
-        if symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"):
-            return self.crypto, "CRYPTO"
-        if symbol in ("TSLA", "NVDA", "SPY", "QQQ"):
-            return self.stock, "STOCK"
-        if symbol == "NCCOGOLD2USD-USDT":
+        s_clean = symbol.upper().replace("-", "").replace("_", "")
+        if "NCCOGOLD" in s_clean or "GOLD" in s_clean or "XAU" in s_clean:
             return self.stock, "GOLD"
+        if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"):
+            return self.crypto, "CRYPTO"
+        if s_clean in ("TSLA", "NVDA", "SPY", "QQQ"):
+            return self.stock, "STOCK"
         return self.crypto, "CRYPTO"
 
     def is_tradeable(self, symbol):
-        if symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"):
-            return True, "Crypto 24/7"
-        if symbol in ("TSLA", "NVDA", "SPY", "QQQ"):
-            return self.stock.market_open()
-        if symbol == "NCCOGOLD2USD-USDT":
+        s_clean = symbol.upper().replace("-", "").replace("_", "")
+        if "NCCOGOLD" in s_clean or "GOLD" in s_clean or "XAU" in s_clean:
             return self.stock.is_gold_open()
+        if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"):
+            return True, "Crypto 24/7"
+        if s_clean in ("TSLA", "NVDA", "SPY", "QQQ"):
+            return self.stock.market_open()
         return True, "OK"
 
     def analyze_tf(self, symbol, interval, fetcher):
@@ -72,6 +74,7 @@ class SignalEngine:
         elliott = self.ind.elliott_wave_analysis(closes, highs, lows)
         fvg = self.ind.order_flow_fvg(highs, lows, closes)
         sm_liq = self.ind.smart_money_liquidity(closes, highs, lows, vols, tbvols)
+        pythagoras = self.ind.pythagoras_ma(closes)
 
         ema20  = self.ind.ema(closes, 20)
         ema50  = self.ind.ema(closes, 50)
@@ -222,6 +225,9 @@ class SignalEngine:
 
         # 13. Smart Money Liquidity (weight 15)
         score += sm_liq.get("score_adj", 0)
+
+        # 14. Pythagoras Moving Averages (MA 144, 258, 369)
+        score += pythagoras.get("score_adj", 0)
         
         score = max(5, min(95, score))
 
@@ -279,7 +285,7 @@ class SignalEngine:
             "breakout": bo, "whale": whale, "volume": vol_d,
             "candle": candle, "market_structure": mstruct,
             "elliott": elliott,
-            "fvg": fvg, "sm_liq": sm_liq,
+            "fvg": fvg, "sm_liq": sm_liq, "pythagoras": pythagoras,
             "atr": round(atr, 4), "atr_pct": round(atr_pct, 3),
             "is_trending": is_trending, "adx_data": adx_data, "chop_data": chop_data, "price": price,
             "high": highs, "low": lows, "close": closes,
@@ -1030,6 +1036,15 @@ class SignalEngine:
                     sl = min(sl, sr_sl) if sl > 0 else sr_sl
                     log.info("  🛡️ [S/R ZONE] Tối ưu SL LONG giấu ngoài Vùng Hỗ Trợ: %.4f", sl)
 
+            # Tối ưu SL giấu dưới Hỗ Trợ Động Pythagoras MA (144, 258, 369)
+            pytha_supp = results.get("1h", {}).get("pythagoras", {}).get("nearest_support", 0.0) or \
+                         results.get("15m", {}).get("pythagoras", {}).get("nearest_support", 0.0)
+            if pytha_supp > 0 and pytha_supp < price:
+                p_sl = round(pytha_supp * 0.9965, 2)
+                if p_sl < price and ((price - p_sl) / price * 100) <= sl_atr_pct * 2.2:
+                    sl = min(sl, p_sl) if sl > 0 else p_sl
+                    log.info("  🛡️ [PYTHAGORAS MA] Tối ưu SL LONG giấu dưới Hỗ Trợ Động MA (144/258/369): %.4f", sl)
+
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
@@ -1082,6 +1097,15 @@ class SignalEngine:
                 if sr_sl > price and ((sr_sl - price) / price * 100) <= sl_atr_pct * 2.2:
                     sl = max(sl, sr_sl) if sl > 0 else sr_sl
                     log.info("  🛡️ [S/R ZONE] Tối ưu SL SHORT giấu ngoài Vùng Kháng Cự: %.4f", sl)
+
+            # Tối ưu SL giấu trên Kháng Cự Động Pythagoras MA (144, 258, 369)
+            pytha_res = results.get("1h", {}).get("pythagoras", {}).get("nearest_resistance", 0.0) or \
+                        results.get("15m", {}).get("pythagoras", {}).get("nearest_resistance", 0.0)
+            if pytha_res > price:
+                p_sl = round(pytha_res * 1.0035, 2)
+                if p_sl > price and ((p_sl - price) / price * 100) <= sl_atr_pct * 2.2:
+                    sl = max(sl, p_sl) if sl > 0 else p_sl
+                    log.info("  🛡️ [PYTHAGORAS MA] Tối ưu SL SHORT giấu trên Kháng Cự Động MA (144/258/369): %.4f", sl)
 
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
@@ -1429,7 +1453,7 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.60   # Tối ưu win rate: Nâng chuẩn lên 60% thay vì 55%
+            MIN_P_WIN = 0.55   # Điều chỉnh sàn p_win về 55% theo yêu cầu
             if p_win < MIN_P_WIN:
                 log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
                             p_win * 100, MIN_P_WIN * 100)
