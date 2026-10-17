@@ -206,27 +206,43 @@ class Indicators:
     @staticmethod
     def pythagoras_ma(closes: list) -> dict:
         """
-        Bộ chỉ báo Hỗ trợ / Kháng cự & Xu hướng Động Pythagoras MA (144, 258, 369).
-        - MA144: Đường Xu hướng Ngắn/Trung hạn Pythagoras
-        - MA258: Đường Xu hướng Trung/Dài hạn Pythagoras
-        - MA369: Đường Xu hướng Chu kỳ Lớn Pythagoras
+        Bộ chỉ báo Hỗ trợ / Kháng cự & Xu hướng Động Pythagoras EMA (147, 258, 369).
+        - EMA147: Đường Xu hướng Ngắn/Trung hạn Pythagoras (1-4-7)
+        - EMA258: Đường Xu hướng Trung/Dài hạn Pythagoras (2-5-8)
+        - EMA369: Đường Xu hướng Chu kỳ Lớn Pythagoras (3-6-9)
         """
         closes = [c for c in closes if c and c > 0]
         if not closes:
             return {
-                "ema144": 0.0, "ema258": 0.0, "ema369": 0.0,
+                "ema147": 0.0, "ema144": 0.0, "ema258": 0.0, "ema369": 0.0,
                 "pytha_trend": "NEUTRAL", "signal": "NEUTRAL",
                 "score_adj": 0, "nearest_support": 0.0, "nearest_resistance": 0.0,
-                "desc": "Chưa có dữ liệu cho Pythagoras MA"
+                "desc": "Chưa có dữ liệu cho Pythagoras EMA (147, 258, 369)",
+                "bull_band": False, "bear_band": False,
+                "pullback_long": False, "pullback_short": False
             }
 
         price = closes[-1]
-        ema144 = Indicators.ema(closes, 144)
+        ema147 = Indicators.ema(closes, 147)
         ema258 = Indicators.ema(closes, 258)
         ema369 = Indicators.ema(closes, 369)
 
-        pytha_bull = price > ema144 > ema258 > ema369
-        pytha_bear = price < ema144 < ema258 < ema369
+        pytha_bull = price > ema147 > ema258 > ema369
+        pytha_bear = price < ema147 < ema258 < ema369
+
+        # Phát hiện điểm vào lệnh kéo ngược (Pullback Entry) chạm dải EMA Pitago rồi bật lại
+        pullback_long = False
+        pullback_short = False
+        if len(closes) >= 2:
+            prev_price = closes[-2]
+            # Pullback LONG: Xu hướng tăng (EMA147 > EMA258 > EMA369), nến trước chạm/nhúng sát EMA147-EMA258 rồi nến này bật tăng lên trên EMA147
+            if ema147 > ema258 > ema369:
+                if prev_price <= ema147 * 1.003 and price > ema147:
+                    pullback_long = True
+            # Pullback SHORT: Xu hướng giảm (EMA147 < EMA258 < EMA369), nến trước nảy lên kiểm tra EMA147-EMA258 rồi nến này quay đầu giảm dưới EMA147
+            elif ema147 < ema258 < ema369:
+                if prev_price >= ema147 * 0.997 and price < ema147:
+                    pullback_short = True
 
         trend = "NEUTRAL"
         signal = "NEUTRAL"
@@ -236,23 +252,23 @@ class Indicators:
         if pytha_bull:
             trend = "BULLISH"
             signal = "LONG"
-            score_adj = 12
-            desc = f"Hệ thống Pythagoras MA (144: {ema144:.2f}, 258: {ema258:.2f}, 369: {ema369:.2f}) ĐỒNG THUẬN TĂNG MẠNH ME"
+            score_adj = 15 if pullback_long else 12
+            desc = f"Dải EMA Pitago (147: {ema147:.2f}, 258: {ema258:.2f}, 369: {ema369:.2f}) ĐỒNG THUẬN TĂNG MẠNH MẼ" + (" [PULLBACK VÀO LỆNH LONG]" if pullback_long else "")
         elif pytha_bear:
             trend = "BEARISH"
             signal = "SHORT"
-            score_adj = -12
-            desc = f"Hệ thống Pythagoras MA (144: {ema144:.2f}, 258: {ema258:.2f}, 369: {ema369:.2f}) ĐỒNG THUẬN GIẢM MẠNH MẼ"
-        elif price > ema144:
+            score_adj = -15 if pullback_short else -12
+            desc = f"Dải EMA Pitago (147: {ema147:.2f}, 258: {ema258:.2f}, 369: {ema369:.2f}) ĐỒNG THUẬN GIẢM MẠNH MẼ" + (" [PULLBACK VÀO LỆNH SHORT]" if pullback_short else "")
+        elif price > ema147:
             trend = "BULLISH_BIAS"
             score_adj = 5
-            desc = f"Giá ({price:.2f}) nằm trên Pythagoras MA144 ({ema144:.2f})"
-        elif price < ema144:
+            desc = f"Giá ({price:.2f}) nằm trên Dải EMA Pitago 147 ({ema147:.2f})"
+        elif price < ema147:
             trend = "BEARISH_BIAS"
             score_adj = -5
-            desc = f"Giá ({price:.2f}) nằm dưới Pythagoras MA144 ({ema144:.2f})"
+            desc = f"Giá ({price:.2f}) nằm dưới Dải EMA Pitago 147 ({ema147:.2f})"
 
-        mas = [ema144, ema258, ema369]
+        mas = [ema147, ema258, ema369]
         supports = [m for m in mas if m > 0 and m < price]
         resistances = [m for m in mas if m > 0 and m > price]
 
@@ -260,7 +276,8 @@ class Indicators:
         nearest_res = min(resistances) if resistances else 0.0
 
         return {
-            "ema144": ema144,
+            "ema147": ema147,
+            "ema144": ema147,  # Giữ alias ema144 cho tính tương thích
             "ema258": ema258,
             "ema369": ema369,
             "pytha_trend": trend,
@@ -268,7 +285,11 @@ class Indicators:
             "score_adj": score_adj,
             "nearest_support": nearest_supp,
             "nearest_resistance": nearest_res,
-            "desc": desc
+            "desc": desc,
+            "bull_band": pytha_bull,
+            "bear_band": pytha_bear,
+            "pullback_long": pullback_long,
+            "pullback_short": pullback_short
         }
 
     @staticmethod
