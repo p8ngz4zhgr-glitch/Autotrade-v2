@@ -1,5 +1,6 @@
 """ API"""
 import os
+import uvicorn
 import sys
 import json
 import asyncio
@@ -558,11 +559,16 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI (ĐƯA LÊN ĐẦU ĐỂ PHỤC VỤ QUYẾT ĐỊNH ĐỘNG)
         in_profit = False
         pnl_pct = 0.0
+        net_pnl_usd = 0.0
         
         if entry > 0:
             in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
             # Công thức tính toán ROE chuẩn hóa theo đòn bẩy 
             pnl_pct = ((current_price - entry) / entry) * 100 * leverage if direction == "LONG" else ((entry - current_price) / entry) * 100 * leverage
+            gross_pnl_usd = (current_price - entry) * qty if direction == "LONG" else (entry - current_price) * qty
+            fee_usd = qty * entry * 0.0010
+            pos_api_pnl = float(p.get("pnl", 0))
+            net_pnl_usd = pos_api_pnl if pos_api_pnl != 0 else (gross_pnl_usd - fee_usd)
 
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
         
@@ -719,15 +725,22 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     is_market_sideways = (hmm_regime == "SIDEWAYS")
                     current_tp_limit = DYNAMIC_TP_LIMIT if not is_scaled_out else (DYNAMIC_TP_LIMIT * 1.5)
                     
-                    if pnl_pct >= current_tp_limit and is_market_sideways:
+                    # [CHỐT LỜI ĐỘNG]: Mục tiêu 1.0 - 1.5 USD (thay vì 0.2 - 0.5 USD cũ)
+                    if net_pnl_usd >= 1.50:
                         action = "CLOSE_ALL"
-                        action_type = "CHỐT LỜI ĐỘNG (SIDEWAYS)"
+                        action_type = "CHỐT LỜI ĐỘNG (1.0 - 1.5 USD)"
+                        emoji = "💰"
+                        phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
+                        reason = f"Đạt mục tiêu chốt lời động tối đa (+${net_pnl_usd:.2f} >= 1.50 USD, ROE: {pnl_pct:+.2f}%) trong {phase_str} -> Khóa lợi nhuận an toàn."
+                    elif is_market_sideways and (net_pnl_usd >= 1.00 or pnl_pct >= current_tp_limit):
+                        action = "CLOSE_ALL"
+                        action_type = "CHỐT LỜI ĐỘNG (SIDEWAYS >= 1.0 USD)"
                         emoji = "✅"
                         phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
-                        reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận {pnl_pct:.2f}% >= mục tiêu thu hoạch sớm ({current_tp_limit}%) -> Đóng lệnh an toàn."
+                        reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận +${net_pnl_usd:.2f} (>= 1.0 USD, ROE: {pnl_pct:.2f}%) -> Đóng lệnh an toàn."
                     else:
                         action = "HOLD"
-                        log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}%% nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.")
+                        log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}%% (+${net_pnl_usd:.2f} USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.")
 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
@@ -1494,11 +1507,7 @@ def health():
     }
 
 
-# THÊM ĐOẠN NÀY VÀO CUỐI FILE
-if __name__ == "__main__":
-    # Lấy port từ Render (mặc định là 10000 nếu chạy cục bộ)
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -3479,3 +3488,7 @@ def get_miniapp_connect(request: Request):
 def get_miniapp_dashboard(request: Request):
     return HTMLResponse(content=MINIAPP_DASHBOARD_HTML, status_code=200)
 
+if __name__ == "__main__":
+    # Lấy port từ Render (mặc định là 10000 nếu chạy cục bộ)
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
