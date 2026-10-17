@@ -912,10 +912,25 @@ class BingXExchange:
                 except: pass
             return {"action": "CLOSE", "type": "CẮT LỖ BẢO VỆ TÀI KHOẢN (ROE <= -35.0%)", "roe": roe}
 
+        # 2.5. CHỐT LỜI ĐỘNG (DYNAMIC TAKE PROFIT 1.0 - 1.5 USD)
+        # Nâng cấp ngưỡng chốt lời động lên 1.0 - 1.5 USD (loại bỏ hoàn toàn mức chốt non 0.2 - 0.5 USD)
+        # Khi lãi ròng đạt ngưỡng tối đa 1.50 USD -> Khóa lợi nhuận ngay lập tức
+        if net_pnl_usd >= 1.50:
+            log.info(f"💰 [CHỐT LỜI ĐỘNG 1.5 USD] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} >= 1.50 USD (ROE: {roe:.2f}%) -> Khóa lợi nhuận an toàn!")
+            self.close_position(symbol, current_qty, direction)
+            self.cancel_all_orders(symbol)
+            if redis_client:
+                try: 
+                    redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                    redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
+                except: pass
+            return {"action": "CLOSE", "type": "CHỐT LỜI ĐỘNG (1.0 - 1.5 USD)", "roe": roe}
+
         new_signal = analysis_result.get("final", "WAIT")
         if new_signal == "WAIT":
-            if roe >= 6.0 or net_pnl_usd >= 0.20:
-                log.info(f"💰 [EARLY TP WAIT] Đóng chốt lời chủ động {roe:.2f}% khi AI chuyển WAIT.")
+            # Khi AI chuyển sang WAIT, chỉ chốt lời động khi lãi ròng đạt từ 1.00 USD trở lên (không chốt 0.2 - 0.5 USD)
+            if net_pnl_usd >= 1.00:
+                log.info(f"💰 [CHỐT LỜI ĐỘNG WAIT] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} >= 1.00 USD (ROE: {roe:.2f}%) khi AI chuyển WAIT -> Chốt lời động an toàn!")
                 self.close_position(symbol, current_qty, direction)
                 self.cancel_all_orders(symbol)
                 if redis_client:
@@ -923,7 +938,7 @@ class BingXExchange:
                         redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
                         redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
                     except: pass
-                return {"action": "CLOSE", "type": "CHỐT LỜI ĐỘNG (WAIT)", "roe": roe}
+                return {"action": "CLOSE", "type": "CHỐT LỜI ĐỘNG (WAIT >= 1.0 USD)", "roe": roe}
         
         # 3. ĐẢO CHIỀU HOÀN TOÀN
         elif (direction == "LONG" and new_signal == "SHORT") or \
