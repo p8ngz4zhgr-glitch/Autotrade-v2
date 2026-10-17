@@ -226,8 +226,14 @@ class SignalEngine:
         # 13. Smart Money Liquidity (weight 15)
         score += sm_liq.get("score_adj", 0)
 
-        # 14. Pythagoras Moving Averages (MA 144, 258, 369)
+        # 14. Pythagoras EMA Bands (147, 258, 369) - Hỗ trợ xu hướng và vào lệnh
         score += pythagoras.get("score_adj", 0)
+        if pythagoras.get("bull_band"):
+            # Đồng thuận tăng theo dải EMA Pitago 147-258-369 -> củng cố vào lệnh LONG
+            score = max(score, 68)
+        elif pythagoras.get("bear_band"):
+            # Đồng thuận giảm theo dải EMA Pitago 147-258-369 -> củng cố vào lệnh SHORT
+            score = min(score, 32)
         
         score = max(5, min(95, score))
 
@@ -599,6 +605,33 @@ class SignalEngine:
                 conf = round(conf * 0.85, 1)
                 if conf < 55:
                     final = "WAIT"
+
+        # [HỖ TRỢ VÀO LỆNH THEO DẢI EMA PITAGO 147 - 258 - 369]
+        pytha_1h = results.get("1h", {}).get("pythagoras", {})
+        pytha_15m = results.get("15m", {}).get("pythagoras", {})
+        pytha_bull = pytha_1h.get("bull_band") or pytha_15m.get("bull_band")
+        pytha_bear = pytha_1h.get("bear_band") or pytha_15m.get("bear_band")
+        pull_long = pytha_1h.get("pullback_long") or pytha_15m.get("pullback_long")
+        pull_short = pytha_1h.get("pullback_short") or pytha_15m.get("pullback_short")
+
+        if pytha_bull:
+            if final == "LONG":
+                conf = min(98.0, conf + (10.0 if pull_long else 6.0))
+                log.info("  🚀 [PYTHAGORAS EMA 147-258-369] Dải EMA Pitago đồng thuận TĂNG %s -> Củng cố vào lệnh LONG (+Conf: %.1f%%)",
+                         "(Pullback Entry)" if pull_long else "", conf)
+            elif final == "WAIT" and combined >= 48:
+                final = "LONG"
+                conf = round(max(70.0, min(95.0, combined + 15.0)), 1)
+                log.info("  ⚡ [PYTHAGORAS TRIGGER] Kích hoạt vào lệnh LONG theo Dải EMA Pitago (147-258-369 đồng thuận tăng, Conf=%.1f%%)!", conf)
+        elif pytha_bear:
+            if final == "SHORT":
+                conf = min(98.0, conf + (10.0 if pull_short else 6.0))
+                log.info("  🚀 [PYTHAGORAS EMA 147-258-369] Dải EMA Pitago đồng thuận GIẢM %s -> Củng cố vào lệnh SHORT (+Conf: %.1f%%)",
+                         "(Pullback Entry)" if pull_short else "", conf)
+            elif final == "WAIT" and combined <= 52:
+                final = "SHORT"
+                conf = round(max(70.0, min(95.0, (100 - combined) + 15.0)), 1)
+                log.info("  ⚡ [PYTHAGORAS TRIGGER] Kích hoạt vào lệnh SHORT theo Dải EMA Pitago (147-258-369 đồng thuận giảm, Conf=%.1f%%)!", conf)
 
         # Áp dụng TF penalty vào confidence
         if tf_penalty > 0:
@@ -1036,14 +1069,14 @@ class SignalEngine:
                     sl = min(sl, sr_sl) if sl > 0 else sr_sl
                     log.info("  🛡️ [S/R ZONE] Tối ưu SL LONG giấu ngoài Vùng Hỗ Trợ: %.4f", sl)
 
-            # Tối ưu SL giấu dưới Hỗ Trợ Động Pythagoras MA (144, 258, 369)
+            # Tối ưu SL giấu dưới Hỗ Trợ Động Pythagoras EMA (147, 258, 369)
             pytha_supp = results.get("1h", {}).get("pythagoras", {}).get("nearest_support", 0.0) or \
                          results.get("15m", {}).get("pythagoras", {}).get("nearest_support", 0.0)
             if pytha_supp > 0 and pytha_supp < price:
                 p_sl = round(pytha_supp * 0.9965, 2)
                 if p_sl < price and ((price - p_sl) / price * 100) <= sl_atr_pct * 2.2:
                     sl = min(sl, p_sl) if sl > 0 else p_sl
-                    log.info("  🛡️ [PYTHAGORAS MA] Tối ưu SL LONG giấu dưới Hỗ Trợ Động MA (144/258/369): %.4f", sl)
+                    log.info("  🛡️ [PYTHAGORAS EMA] Tối ưu SL LONG giấu dưới Hỗ Trợ Động EMA (147/258/369): %.4f", sl)
 
             if fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
@@ -1098,14 +1131,14 @@ class SignalEngine:
                     sl = max(sl, sr_sl) if sl > 0 else sr_sl
                     log.info("  🛡️ [S/R ZONE] Tối ưu SL SHORT giấu ngoài Vùng Kháng Cự: %.4f", sl)
 
-            # Tối ưu SL giấu trên Kháng Cự Động Pythagoras MA (144, 258, 369)
+            # Tối ưu SL giấu trên Kháng Cự Động Pythagoras EMA (147, 258, 369)
             pytha_res = results.get("1h", {}).get("pythagoras", {}).get("nearest_resistance", 0.0) or \
                         results.get("15m", {}).get("pythagoras", {}).get("nearest_resistance", 0.0)
             if pytha_res > price:
                 p_sl = round(pytha_res * 1.0035, 2)
                 if p_sl > price and ((p_sl - price) / price * 100) <= sl_atr_pct * 2.2:
                     sl = max(sl, p_sl) if sl > 0 else p_sl
-                    log.info("  🛡️ [PYTHAGORAS MA] Tối ưu SL SHORT giấu trên Kháng Cự Động MA (144/258/369): %.4f", sl)
+                    log.info("  🛡️ [PYTHAGORAS EMA] Tối ưu SL SHORT giấu trên Kháng Cự Động EMA (147/258/369): %.4f", sl)
 
             if fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
