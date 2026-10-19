@@ -121,3 +121,93 @@ class QuantRiskManager:
         # Áp dụng Fractional Kelly và giới hạn trần (Max 20% vốn)
         safe_kelly = max(0.01, min(0.20, kelly_pct * fraction))
         return safe_kelly
+
+    def calculate_anti_liquidation_buffer(self, entry_price: float, sl_price: float, leverage: int, direction: str) -> dict:
+        """
+        Tính toán khoảng đệm thanh lý (Anti-Liquidation Buffer):
+        Đảm bảo giá thanh lý của sàn luôn nằm ngoài điểm cắt lỗ (Stop Loss) ít nhất 3x.
+        """
+        if entry_price <= 0 or leverage <= 0:
+            return {"safe": False, "liq_price": 0, "liq_dist_pct": 0, "sl_dist_pct": 0}
+
+        sl_dist_pct = abs(entry_price - sl_price) / entry_price * 100.0
+        liq_dist_pct = (0.90 / leverage) * 100.0
+
+        if direction == "LONG":
+            liq_price = entry_price * (1.0 - 0.90 / leverage)
+            is_safe = (liq_price < sl_price) and (liq_dist_pct >= sl_dist_pct * 2.5)
+        else:
+            liq_price = entry_price * (1.0 + 0.90 / leverage)
+            is_safe = (liq_price > sl_price) and (liq_dist_pct >= sl_dist_pct * 2.5)
+
+        return {
+            "safe": is_safe,
+            "liq_price": round(liq_price, 4),
+            "liq_dist_pct": round(liq_dist_pct, 2),
+            "sl_dist_pct": round(sl_dist_pct, 2),
+            "safety_multiple": round(liq_dist_pct / sl_dist_pct, 1) if sl_dist_pct > 0 else 99.0
+        }
+
+    def calculate_m5_scalp_sizing(
+        self,
+        capital: float,
+        entry_price: float,
+        sl_price: float,
+        direction: str,
+        risk_pct: float = 1.0,
+        leverage: int = 10,
+        target_daily_usd: float = 30.0
+    ) -> dict:
+        """
+        Tính toán quy mô lệnh cho chiến lược Scalping M5 với mục tiêu $20 - $50/ngày.
+        """
+        if capital <= 0 or entry_price <= 0 or sl_price <= 0:
+            return {"error": "Invalid inputs"}
+
+        sl_pct = abs(entry_price - sl_price) / entry_price
+        sl_pct = max(0.003, min(0.03, sl_pct)) # Kẹp trong khoảng 0.3% - 3.0%
+
+        risk_usd = capital * (risk_pct / 100.0)
+        notional_usd = risk_usd / sl_pct
+
+        # Khống chế đòn bẩy để bảo vệ tài khoản
+        max_safe_lev = min(leverage, max(3, int(0.60 / sl_pct)))
+        margin_usd = notional_usd / max_safe_lev
+
+        # Nếu ký quỹ vượt 25% vốn, điều chỉnh giảm
+        if margin_usd > capital * 0.25:
+            margin_usd = capital * 0.25
+            notional_usd = margin_usd * max_safe_lev
+            risk_usd = notional_usd * sl_pct
+
+        contract_qty = notional_usd / entry_price
+        buffer_info = self.calculate_anti_liquidation_buffer(entry_price, sl_price, max_safe_lev, direction)
+
+        # TP1 (1.5R - chốt 60%) và TP2 (2.5R - chốt 40%)
+        dist = abs(entry_price - sl_price)
+        tp1 = entry_price + (dist * 1.5 if direction == "LONG" else -dist * 1.5)
+        tp2 = entry_price + (dist * 2.5 if direction == "LONG" else -dist * 2.5)
+
+        avg_profit_per_win = (0.60 * 1.5 * risk_usd) + (0.40 * 2.5 * risk_usd) # 1.9R
+        wins_needed_for_target = math.ceil(target_daily_usd / avg_profit_per_win) if avg_profit_per_win > 0 else 1
+
+        return {
+            "direction": direction,
+            "capital": capital,
+            "entry_price": round(entry_price, 4),
+            "sl_price": round(sl_price, 4),
+            "tp1_price": round(tp1, 4),
+            "tp2_price": round(tp2, 4),
+            "contract_qty": round(contract_qty, 4),
+            "margin_usd": round(margin_usd, 2),
+            "notional_usd": round(notional_usd, 2),
+            "risk_usd": round(risk_usd, 2),
+            "leverage": max_safe_lev,
+            "liq_price": buffer_info["liq_price"],
+            "safety_multiple": buffer_info["safety_multiple"],
+            "anti_liquidation_guarantee": buffer_info["safe"],
+            "avg_profit_win_usd": round(avg_profit_per_win, 2),
+            "target_daily_usd": target_daily_usd,
+            "wins_needed": wins_needed_for_target
+        }
+

@@ -1335,9 +1335,9 @@ def _execute_for_user(user: User, signal: dict):
         except Exception as ex_m_size:
             log.debug("Lỗi tính Fed size: %s", ex_m_size)
 
-        # [NEW v6.15] CHẾ ĐỘ BẢO VỆ THÀNH QUẢ KHI ĐẠT CHỈ TIÊU NGÀY ($5 - $10 USD)
-        # Đạt chỉ tiêu $5 - $10 USD/ngày -> KHÔNG KHOÁ HOÀN TOÀN BOT!
-        # Chuyển sang Profit Trail Lock: Yêu cầu độ tự tin >= 70%, đi vốn x0.5 để tiếp tục gia tăng lợi nhuận an toàn.
+        # ══════════════════════════════════════════════════════════
+        # [M5 SCALPING] QUẢN LÝ VỐN, CHỐNG CHÁY & MỤC TIÊU NGÀY ($20 - $50 USD)
+        # ══════════════════════════════════════════════════════════
         today_pnl = 0.0
         try:
             tj_db = SessionLocal()
@@ -1351,15 +1351,32 @@ def _execute_for_user(user: User, signal: dict):
         except Exception as ex_pnl:
             log.debug("Lỗi tính PnL 24h: %s", ex_pnl)
 
-        if today_pnl >= 5.0:
-            req_conf = 70
-            if signal.get("confidence", 70) < req_conf:
-                log.info("🏆 User %s đã đạt chỉ tiêu ngày (+%.2f USD >= $5.00). Chế độ Bảo Vệ Thành Quả yêu cầu conf >= %d%% (hiện tại: %s%%) -> Bỏ qua lệnh này.",
-                         user.telegram_id, today_pnl, req_conf, signal.get("confidence"))
-                return
-            qty = round(qty * 0.5, 4)
-            log.info("🏆 User %s đã đạt chỉ tiêu ngày (+%.2f USD). Chế độ Bảo Vệ Thành Quả kích hoạt: Tiếp tục mở lệnh với vốn x0.5 (Qty: %.4f) để gia tăng lợi nhuận an toàn.",
-                     user.telegram_id, today_pnl, qty)
+        # 1. Chặn lỗ tối đa trong ngày (Daily Loss Circuit Breaker)
+        max_daily_loss = float(os.getenv("DAILY_MAX_LOSS_USD", "15.0"))
+        if today_pnl <= -max_daily_loss:
+            log.error("🚨 [CIRCUIT BREAKER] User %s: Đã chạm ngưỡng cắt lỗ tối đa ngày (-$%.2f)! Dừng vào lệnh để bảo toàn vốn 100%%.",
+                      user.telegram_id, max_daily_loss)
+            return
+
+        # 2. Khóa lợi nhuận khi đạt mục tiêu ngày ($20 - $50 USD)
+        target_daily = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
+        if today_pnl >= target_daily:
+            log.info("🏆 [TARGET LOCK] User %s đã đạt mục tiêu ngày (+%.2f USD >= $%.2f). Tự động KHÓA LỢI NHUẬN để bảo toàn thành quả!",
+                     user.telegram_id, today_pnl, target_daily)
+            return
+
+        # 3. Bảo vệ chống cháy tài khoản (Anti-Liquidation Shield)
+        # Đảm bảo đòn bẩy không quá cao, ngưỡng thanh lý cách ít nhất gấp 3x so với khoảng cách Stop Loss
+        max_safe_lev = min(user.leverage or 10, max(2, int(0.60 / sl_pct)))
+        effective_leverage = max(2, max_safe_lev)
+
+        # Khống chế ký quỹ tối đa không vượt 30% tài khoản
+        notional = entry * qty
+        req_margin = notional / effective_leverage
+        if req_margin > user.capital * 0.30:
+            req_margin = user.capital * 0.30
+            qty = round((req_margin * effective_leverage) / entry, 4)
+            log.info("🛡️ [ANTI-EXHAUSTION] Giảm Margin về $%.2f (30%% vốn) -> Qty mới: %.4f", req_margin, qty)
 
         if qty <= 0:
             return
@@ -1395,12 +1412,12 @@ def _execute_for_user(user: User, signal: dict):
 
         bx   = get_bx(user)
         side = "BUY" if direction == "LONG" else "SELL"
-        bx.set_leverage(sym, leverage=user.leverage)
+        bx.set_leverage(sym, leverage=effective_leverage)
         bx.cancel_all_orders(sym)
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
         sig_rr    = signal.get("rr_ratio", 1.5)
         tp_levels = signal.get("plan", {}).get("tp_levels", [])
-        res = bx.place_order(sym, side, qty, sl, tp2, leverage=user.leverage, p_win=sig_p_win, rr_ratio=sig_rr, tp_levels=tp_levels)
+        res = bx.place_order(sym, side, qty, sl, tp2, leverage=effective_leverage, p_win=sig_p_win, rr_ratio=sig_rr, tp_levels=tp_levels)
 
         if res.get("ok"):
             cache = _get_active_redis()

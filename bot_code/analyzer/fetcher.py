@@ -41,8 +41,8 @@ class CryptoFetcher:
     BBT = "https://api.bybit.com"
     HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-    BGX_IV = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-    BBT_IV = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+    BGX_IV = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
+    BBT_IV = {"5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
 
     def __init__(self):
         self._session = _make_session(retries=2, backoff=0.3)
@@ -413,8 +413,8 @@ class StockFetcher:
     CGK    = "https://api.coingecko.com/api/v3"
     # Sửa GC%3DF thành GC=F để API requests không bị lỗi encode
     YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC=F"}
-    YH_IV  = {"15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
-    YH_RNG = {"15m": "5d", "1h": "30d", "4h": "30d", "1d": "6mo"}
+    YH_IV  = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
+    YH_RNG = {"5m": "1d", "15m": "5d", "1h": "30d", "4h": "30d", "1d": "6mo"}
     PLIM   = {"TSLA": (10, 5000), "NVDA": (10, 5000),
                "SPY": (100, 1500), "QQQ": (100, 1500), "NCCOGOLD2USD-USDT": (1500, 6000)}
 

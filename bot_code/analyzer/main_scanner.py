@@ -376,10 +376,13 @@ class SignalBot:
 
     def _build_schedule(self):
         schedule.clear()
-        schedule.every(15).minutes.do(self.run_crypto)
+        # Chế độ Scalping M5: Quét crypto mỗi 3 phút để bắt kịp nhịp nến 5m
+        crypto_interval = 3 if getattr(cfg, "M5_SCALP_MODE", True) else 15
+        schedule.every(crypto_interval).minutes.do(self.run_crypto)
         schedule.every(30).minutes.do(self.run_stocks)
         schedule.every().hour.at(":30").do(self._hourly_report)
         schedule.every(4).minutes.do(self._self_ping)
+        self.log.info("📅 Đã cài đặt lịch quét: Crypto/%dp (M5 Scalp Mode: %s)", crypto_interval, getattr(cfg, "M5_SCALP_MODE", True))
 
     def start(self):
         self.log.info("━" * 45)

@@ -30,6 +30,15 @@ class Config:
         self.RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
         self.ADMIN_SECRET        = os.getenv("ADMIN_SECRET", "admin123")
 
+        # ── Cấu hình Scalping M5 & Quản trị rủi ro ($20 - $50 / ngày) ──
+        self.M5_SCALP_MODE            = os.getenv("M5_SCALP_MODE", "true").lower() == "true"
+        self.DAILY_PROFIT_TARGET_USD  = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
+        self.DAILY_MAX_LOSS_USD       = float(os.getenv("DAILY_MAX_LOSS_USD", "15.0"))
+        self.MAX_RISK_PER_TRADE_PCT   = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.0"))
+        self.MAX_SAFE_LEVERAGE        = int(os.getenv("MAX_SAFE_LEVERAGE", "15"))
+        self.CONSECUTIVE_LOSS_LIMIT   = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
+        self.AUTO_BREAKEVEN_ON_TP1    = os.getenv("AUTO_BREAKEVEN_ON_TP1", "true").lower() == "true"
+
         self._validate()
 
     def _validate(self):

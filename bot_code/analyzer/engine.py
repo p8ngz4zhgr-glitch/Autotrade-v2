@@ -14,7 +14,8 @@ log = logging.getLogger("analyzer.engine")
 
 
 class SignalEngine:
-    TIMEFRAMES = ["15m", "1h", "4h", "1d"]
+    # Hỗ trợ Scalping M5 kết hợp xu hướng đa khung 15m, 1h, 4h
+    TIMEFRAMES = ["5m", "15m", "1h", "4h"]
 
     # [FIX] Dùng chung 1 ThreadPoolExecutor thay vì tạo mới mỗi lần full_analysis
     # max_workers=4 khớp với số TF để tất cả chạy song song
@@ -992,29 +993,39 @@ class SignalEngine:
             except Exception as e:
                 log.debug("  Lịch tin tức lỗi (bỏ qua, không chặn): %s", e)
 
-        # B. Tính % SL Động với Dynamic Max Cap hợp lý cho từng tài sản & biến động thực tế
-        # SÀN DƯỚI AN TOÀN TRÂU HƠN: Đặt tối thiểu 2.5% cho Crypto, 2.0% cho Gold và 1.5% cho Stock
-        # để nến 15m/1h giật râu 1.5% - 2.0% hoàn toàn nằm TRONG khoảng gồng an toàn.
-        if atype == "CRYPTO":
-            min_sl_floor = 2.5
-            max_sl_cap = max(5.5, min(8.0, atr_pct_1h * 3.5))
-        elif atype == "GOLD":
-            min_sl_floor = 2.0
-            max_sl_cap = max(4.0, min(6.0, atr_pct_1h * 3.0))
-        else:
-            min_sl_floor = 1.5
-            max_sl_cap = max(3.0, min(4.5, atr_pct_1h * 2.5))
+        # B. Tính % SL Động và Take Profit tối ưu cho Scalping M5 hoặc Swing
+        from analyzer.config import Config
+        cfg = Config()
+        m5_res = results.get("5m")
 
-        sl_atr_pct = max(min_sl_floor, min(max_sl_cap, atr_pct_1h * atr_multiplier))
-        sl_tighten = news_risk.get("sl_tighten_mult", 1.0)
-        sl_atr_pct = max(min_sl_floor, sl_atr_pct * sl_tighten)
-        
-        # [ANTI-MM NOISE BUFFER] Thêm Dynamic Noise Buffer (0.6% - 1.2%) giấu SL vượt xa vùng quét râu cá mập
-        mm_noise_buffer_pct = max(0.6, min(1.2, atr_pct_1h * 0.45))
-        
-        # C. Tỷ lệ R:R động ngắn hạn thực tế (Scalp / Day Trading) - Dễ khớp cắn TP1 & dời SL về Breakeven
-        tp1_pct    = max(1.2, sl_atr_pct * 0.60 * tp_scaling_factor)  # TP1 thực tế ~1.2% - 1.8% giá
-        tp2_pct    = max(2.4, sl_atr_pct * 1.25 * tp_scaling_factor)  # TP2 thực tế ~2.4% - 3.5% giá
+        if getattr(cfg, "M5_SCALP_MODE", True) and m5_res:
+            # ── CHẾ ĐỘ SCALPING M5 ($20 - $50 / NGÀY) ──
+            # SL chặt chẽ dựa trên ATR(5m), tỷ lệ R:R = 1:2 (TP1 = 1.5R, TP2 = 2.5R)
+            atr_pct_m5 = m5_res.get("atr_pct", 0.4)
+            sl_atr_pct = max(0.35, min(1.1, atr_pct_m5 * 1.3))
+            mm_noise_buffer_pct = max(0.08, min(0.25, atr_pct_m5 * 0.25))
+            tp1_pct = sl_atr_pct * 1.5   # 1.5R: Khớp nhanh trong 10-25 phút
+            tp2_pct = sl_atr_pct * 2.5   # 2.5R: Runner
+            log.info("  ⚡ [M5 SCALP PLAN] SL: %.2f%% (+Buffer %.2f%%) | TP1: %.2f%% (1.5R) | TP2: %.2f%% (2.5R)",
+                     sl_atr_pct, mm_noise_buffer_pct, tp1_pct, tp2_pct)
+        else:
+            # ── CHẾ ĐỘ GỐC (SWING 15M/1H/4H) ──
+            if atype == "CRYPTO":
+                min_sl_floor = 2.5
+                max_sl_cap = max(5.5, min(8.0, atr_pct_1h * 3.5))
+            elif atype == "GOLD":
+                min_sl_floor = 2.0
+                max_sl_cap = max(4.0, min(6.0, atr_pct_1h * 3.0))
+            else:
+                min_sl_floor = 1.5
+                max_sl_cap = max(3.0, min(4.5, atr_pct_1h * 2.5))
+
+            sl_atr_pct = max(min_sl_floor, min(max_sl_cap, atr_pct_1h * atr_multiplier))
+            sl_tighten = news_risk.get("sl_tighten_mult", 1.0)
+            sl_atr_pct = max(min_sl_floor, sl_atr_pct * sl_tighten)
+            mm_noise_buffer_pct = max(0.6, min(1.2, atr_pct_1h * 0.45))
+            tp1_pct    = max(1.2, sl_atr_pct * 0.60 * tp_scaling_factor)
+            tp2_pct    = max(2.4, sl_atr_pct * 1.25 * tp_scaling_factor)
         
         fibo4l     = results.get("4h", {}).get("fibo", {}).get("levels", {})
 
