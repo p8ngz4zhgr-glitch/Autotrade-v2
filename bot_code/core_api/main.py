@@ -567,7 +567,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             pnl_pct = ((current_price - entry) / entry) * 100 * leverage if direction == "LONG" else ((entry - current_price) / entry) * 100 * leverage
             gross_pnl_usd = (current_price - entry) * qty if direction == "LONG" else (entry - current_price) * qty
             fee_usd = qty * entry * 0.0010
-            pos_api_pnl = float(p.get("pnl", 0))
+            pos_api_pnl = float(pos.get("pnl", 0))
             net_pnl_usd = pos_api_pnl if pos_api_pnl != 0 else (gross_pnl_usd - fee_usd)
 
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
@@ -599,12 +599,12 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # ══════════════════════════════════════════════════════════
         tp_levels = []
         for lv in tp_levels_raw:
-            p = float(lv.get("price", 0))
-            if direction == "LONG" and p <= entry:
-                p = 0
-            elif direction == "SHORT" and p >= entry:
-                p = 0
-            tp_levels.append({"level": lv.get("level"), "price": p, "close_pct": lv.get("close_pct", 0.25)})
+            lvl_p = float(lv.get("price", 0))
+            if direction == "LONG" and lvl_p <= entry:
+                lvl_p = 0
+            elif direction == "SHORT" and lvl_p >= entry:
+                lvl_p = 0
+            tp_levels.append({"level": lv.get("level"), "price": lvl_p, "close_pct": lv.get("close_pct", 0.25)})
 
         tp1 = tp_levels[0]["price"] if tp_levels else 0
 
