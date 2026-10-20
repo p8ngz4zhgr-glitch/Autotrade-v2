@@ -39,6 +39,12 @@ class Config:
         self.CONSECUTIVE_LOSS_LIMIT   = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
         self.AUTO_BREAKEVEN_ON_TP1    = os.getenv("AUTO_BREAKEVEN_ON_TP1", "true").lower() == "true"
 
+        # ── Tích hợp Chiến lược Các Huyền Thoại (Famous Traders Framework) ──
+        self.ENABLE_ELDER_TRIPLE_SCREEN = os.getenv("ENABLE_ELDER_TRIPLE_SCREEN", "true").lower() == "true"
+        self.ENABLE_ICT_SWEEP_FILTER    = os.getenv("ENABLE_ICT_SWEEP_FILTER", "true").lower() == "true"
+        self.ENABLE_MINERVINI_VCP       = os.getenv("ENABLE_MINERVINI_VCP", "true").lower() == "true"
+        self.ENABLE_WILLIAMS_SCALING    = os.getenv("ENABLE_WILLIAMS_SCALING", "true").lower() == "true"
+
         self._validate()
 
     def _validate(self):

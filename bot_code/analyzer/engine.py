@@ -9,6 +9,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from analyzer.fetcher import CryptoFetcher, StockFetcher
 from analyzer.indicators import Indicators
+from analyzer.legendary_traders import LegendaryTradersFramework
 
 log = logging.getLogger("analyzer.engine")
 
@@ -953,6 +954,76 @@ class SignalEngine:
                 trade_regime = "SIDEWAY_RANGE"
                 mtf_size_mult = 0.75
 
+        # ══════════════════════════════════════════════════════════
+        # 2.7. LEGENDARY TRADERS STRATEGY FRAMEWORK (ELDER, ICT/SMC, MINERVINI, WILLIAMS)
+        # ══════════════════════════════════════════════════════════
+        m5_data = results.get("5m", {})
+        m15_data = results.get("15m", {})
+        h1_data = results.get("1h", {})
+
+        elder_res = {"allowed_direction": "BOTH", "score_boost": 0, "description": "Elder Triple Screen: N/A"}
+        ict_res = {"sweep_detected": False, "type": "NONE", "safe_sl": 0.0}
+        minervini_res = {"is_contracted": False, "status": "NORMAL", "score_boost": 0}
+        williams_res = {}
+
+        if m5_data and h1_data:
+            try:
+                # 1. Alexander Elder Triple Screen (H1 -> M15 -> M5)
+                h1_closes = h1_data.get("closes", []) or h1_data.get("close", [])
+                m15_closes = m15_data.get("closes", []) or m15_data.get("close", [])
+                m5_closes = m5_data.get("closes", []) or m5_data.get("close", [])
+
+                h1_ema50 = h1_data.get("ema50", price)
+                h1_ema200 = h1_data.get("ema200", price)
+                m15_rsi = m15_data.get("rsi", 50.0)
+                m5_rsi = m5_data.get("rsi", 50.0)
+
+                elder_res = LegendaryTradersFramework.elder_triple_screen(
+                    h1_closes, m15_closes, m5_closes, h1_ema50, h1_ema200, m15_rsi, m5_rsi
+                )
+
+                # Nguyên tắc vàng Elder: Tuyệt đối KHÔNG bơi ngược dòng thủy triều lớn H1
+                if final == "LONG" and elder_res.get("allowed_direction") == "SELL_ONLY":
+                    log.warning("⛔ [ELDER TRIPLE SCREEN] H1 DOWNTREND (Thủy triều rút) -> Chặn lệnh LONG trên M5 để tránh dính SL!", symbol)
+                    final = "WAIT"
+                elif final == "SHORT" and elder_res.get("allowed_direction") == "BUY_ONLY":
+                    log.warning("⛔ [ELDER TRIPLE SCREEN] H1 UPTREND (Thủy triều dâng) -> Chặn lệnh SHORT trên M5 để tránh dính SL!", symbol)
+                    final = "WAIT"
+                elif elder_res.get("m5_trigger"):
+                    conf = min(99.0, conf + elder_res.get("score_boost", 15))
+
+                # 2. ICT / Smart Money Concepts: Liquidity Sweep & Stop Run
+                m5_highs = m5_data.get("highs", []) or m5_data.get("high", [])
+                m5_lows = m5_data.get("lows", []) or m5_data.get("low", [])
+                m5_opens = m5_data.get("opens", []) or m5_closes
+
+                if m5_highs and m5_lows and m5_closes:
+                    ict_res = LegendaryTradersFramework.ict_liquidity_sweep(
+                        m5_highs, m5_lows, m5_closes, m5_opens, lookback=24
+                    )
+                    if ict_res.get("sweep_detected"):
+                        log.info("  🎯 [ICT SMC SWEEP] %s: %s", symbol, ict_res.get("reason"))
+                        if final == "LONG" and ict_res.get("type") == "BULLISH_SWEEP":
+                            conf = min(99.0, conf + 15)
+                        elif final == "SHORT" and ict_res.get("type") == "BEARISH_SWEEP":
+                            conf = min(99.0, conf + 15)
+
+                # 3. Mark Minervini: Volatility Contraction Pattern (VCP)
+                minervini_res = LegendaryTradersFramework.minervini_vcp_filter(
+                    m5_highs, m5_lows, m5_closes, [2.0, 1.8, 1.5, 1.2, 1.0]
+                )
+                if minervini_res.get("status") == "HIGH_VOLATILITY_CHOP" and final in ("LONG", "SHORT") and combined < 70:
+                    log.warning("⛔ [MINERVINI VCP] Thị trường đang bão hòa râu nến (Chop rác) -> Hạ về WAIT tránh quét SL!", symbol)
+                    final = "WAIT"
+
+                # 4. Larry Williams: Scale-Out 60/40 & ATR Trailing Stop
+                atr_m5_val = m5_data.get("atr", price * 0.005)
+                williams_res = LegendaryTradersFramework.larry_williams_targets(
+                    price, final if final in ("LONG", "SHORT") else "LONG", atr_m5_val, capital_usd=116.0, leverage=5.0
+                )
+            except Exception as e_leg:
+                log.debug("Lỗi tính toán Legendary Traders Framework: %s", e_leg)
+
 
 
        # ══════════════════════════════════════════════════════════
@@ -999,15 +1070,18 @@ class SignalEngine:
         m5_res = results.get("5m")
 
         if getattr(cfg, "M5_SCALP_MODE", True) and m5_res:
-            # ── CHẾ ĐỘ SCALPING M5 ($20 - $50 / NGÀY) ──
-            # SL chặt chẽ dựa trên ATR(5m), tỷ lệ R:R = 1:2 (TP1 = 1.5R, TP2 = 2.5R)
+            # ── CHẾ ĐỘ SCALPING M5 CHỐNG QUÉT RÂU (ANTI-WHIPSAW SHIELD) ──
+            # Nới rộng SL tối thiểu từ 0.35% lên 0.95% - 1.8% để tránh bị râu nến M5 quét dính SL oan uổng
             atr_pct_m5 = m5_res.get("atr_pct", 0.4)
-            sl_atr_pct = max(0.35, min(1.1, atr_pct_m5 * 1.3))
-            mm_noise_buffer_pct = max(0.08, min(0.25, atr_pct_m5 * 0.25))
-            tp1_pct = sl_atr_pct * 1.5   # 1.5R: Khớp nhanh trong 10-25 phút
-            tp2_pct = sl_atr_pct * 2.5   # 2.5R: Runner
-            log.info("  ⚡ [M5 SCALP PLAN] SL: %.2f%% (+Buffer %.2f%%) | TP1: %.2f%% (1.5R) | TP2: %.2f%% (2.5R)",
-                     sl_atr_pct, mm_noise_buffer_pct, tp1_pct, tp2_pct)
+            atr_pct_15m = results.get("15m", {}).get("atr_pct", atr_pct_m5 * 1.5)
+            # Lấy mốc biến động kết hợp giữa M5 và M15 để giấu SL ngoài tầm với của bẫy Market Maker
+            base_atr = max(atr_pct_m5, atr_pct_15m * 0.85)
+            sl_atr_pct = max(0.95, min(1.85, base_atr * 1.6))
+            mm_noise_buffer_pct = max(0.15, min(0.35, base_atr * 0.35))
+            tp1_pct = max(0.90, sl_atr_pct * 1.1)   # TP1 (1.1R): Khớp nhanh để dời SL về Breakeven (0 đồng rủi ro)
+            tp2_pct = sl_atr_pct * 2.0              # TP2 (2.0R): Khóa lợi nhuận mục tiêu
+            log.info("  🛡️ [ANTI-WHIPSAW M5 SCALP] SL: %.2f%% (+Buffer %.2f%% = %.2f%%) | TP1: %.2f%% | TP2: %.2f%%",
+                     sl_atr_pct, mm_noise_buffer_pct, (sl_atr_pct + mm_noise_buffer_pct), tp1_pct, tp2_pct)
         else:
             # ── CHẾ ĐỘ GỐC (SWING 15M/1H/4H) ──
             if atype == "CRYPTO":
@@ -1607,6 +1681,12 @@ class SignalEngine:
             "position_size_mult": round(mtf_size_mult * news_risk.get("size_mult", 1.0), 2),
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
+            "legendary_traders": {
+                "elder": elder_res,
+                "ict": ict_res,
+                "minervini": minervini_res,
+                "williams": williams_res,
+            },
         }
 
 
