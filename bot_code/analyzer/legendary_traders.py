@@ -173,6 +173,12 @@ class LegendaryTradersFramework:
         is_squeeze = curr_bbw < avg_bbw_10 * 0.85
         contraction_ratio = avg_recent / (avg_prev if avg_prev > 0 else 1)
 
+        # Tính độ định hướng (Directional Efficiency) của 5 nến gần nhất:
+        # Nếu giá đi thẳng 1 chiều (Trend Expansion) -> Không phải Chop!
+        net_move = abs(closes[-1] - closes[-5]) if len(closes) >= 5 else 0
+        total_travel = sum(recent_ranges) if sum(recent_ranges) > 0 else 1
+        efficiency = net_move / total_travel  # Gần 1 là xu hướng mạnh, gần 0 là quét râu 2 đầu
+
         if is_squeeze and contraction_ratio < 0.70:
             return {
                 "is_contracted": True,
@@ -182,13 +188,24 @@ class LegendaryTradersFramework:
                 "desc": f"Minervini VCP: Nén chặt biên độ (Biên độ giảm {round((1-contraction_ratio)*100)}%, BB thắt nút). Sẵn sàng bùng nổ theo xu hướng!"
             }
         elif contraction_ratio > 1.4:
-            return {
-                "is_contracted": False,
-                "status": "HIGH_VOLATILITY_CHOP",
-                "contraction_ratio": round(contraction_ratio, 2),
-                "score_boost": -15,
-                "desc": "Thị trường biến động râu nến hỗn loạn (Chop rộng). Minervini khuyến nghị đứng ngoài quan sát."
-            }
+            if efficiency >= 0.40:
+                # Xu hướng đang bứt phá mạnh mẽ (Breakout / Trend Expansion)
+                return {
+                    "is_contracted": False,
+                    "status": "TREND_EXPANSION",
+                    "contraction_ratio": round(contraction_ratio, 2),
+                    "score_boost": 10,
+                    "desc": f"Minervini Momentum: Nến mở rộng theo xu hướng một chiều rõ nét (Độ hiệu quả {efficiency*100:.0f}%). Cho phép vào lệnh theo trend!"
+                }
+            else:
+                # Quét râu hai đầu hỗn loạn không rõ hướng -> True Chop
+                return {
+                    "is_contracted": False,
+                    "status": "HIGH_VOLATILITY_CHOP",
+                    "contraction_ratio": round(contraction_ratio, 2),
+                    "score_boost": -15,
+                    "desc": "Thị trường biến động râu nến hỗn loạn 2 đầu (Chop rộng). Minervini khuyến nghị đứng ngoài quan sát."
+                }
 
         return {"is_contracted": False, "status": "NORMAL", "contraction_ratio": 1.0, "score_boost": 0, "desc": "Biên độ bình thường."}
 

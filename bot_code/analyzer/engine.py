@@ -581,9 +581,15 @@ class SignalEngine:
         log.info("  TF=%.1f Smart=%+.1f Combined=%.1f L:%d S:%d",
                  avg_score, smart, combined, longs, shorts)
 
-        # Scale down threshold khi thiếu TF
-        min_long_tfs  = min(3, tf_count - 1)
-        min_short_tfs = min(3, tf_count - 1)
+        # Scale down threshold khi thiếu TF hoặc khi Xu hướng Lớn (4H + 1H) đã đồng thuận
+        dir_4h = results.get("4h", {}).get("direction", "WAIT")
+        dir_1h = results.get("1h", {}).get("direction", "WAIT")
+        macro_trend_long = (dir_4h == "LONG" and dir_1h == "LONG")
+        macro_trend_short = (dir_4h == "SHORT" and dir_1h == "SHORT")
+
+        # Khi 4H và 1H cùng tăng, nhịp điều chỉnh pullback trên M15/M5 là cơ hội vàng để mua (chỉ cần >= 2 TF)
+        min_long_tfs  = 2 if macro_trend_long else min(3, tf_count - 1)
+        min_short_tfs = 2 if macro_trend_short else min(3, tf_count - 1)
 
         final, conf = None, 50.0
         for tf_n, bo in [("1H", bo_1h), ("4H", bo_4h)]:
@@ -597,10 +603,14 @@ class SignalEngine:
                     break
 
         if final is None:
-            long_ok  = longs >= min_long_tfs  and combined >= 62 and smart >= -10
-            short_ok = shorts >= min_short_tfs and combined <= 38 and smart <= 10
-            if   long_ok  or combined >= 68: final = "LONG";  conf = round(min(95, combined), 1)
-            elif short_ok or combined <= 32: final = "SHORT"; conf = round(min(95, 100-combined), 1)
+            # Nếu có sóng chủ 4H+1H bảo kê, hạ ngưỡng combined xuống 58% để bắt nhịp pullback đẹp
+            long_thresh = 58 if macro_trend_long else 62
+            short_thresh = 42 if macro_trend_short else 38
+
+            long_ok  = longs >= min_long_tfs  and combined >= long_thresh and smart >= -10
+            short_ok = shorts >= min_short_tfs and combined <= short_thresh and smart <= 10
+            if   long_ok  or combined >= 66: final = "LONG";  conf = round(min(95, combined), 1)
+            elif short_ok or combined <= 34: final = "SHORT"; conf = round(min(95, 100-combined), 1)
             else:                             final = "WAIT";  conf = round(min(95, max(30, combined)), 1)
             
             if cvd_tr in ("BEARISH_DIV","BULLISH_DIV") and abs(smart) < 20:
@@ -905,23 +915,23 @@ class SignalEngine:
         atr_pct_1h_est = results.get("1h", {}).get("atr_pct", 1.0)
         if final == "LONG" and nearest_res > price:
             dist_res_pct = (nearest_res - price) / price * 100
-            if combined >= 68 or vol_bo_up:
-                log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Kháng Cự (${nearest_res:.4f}, cách {dist_res_pct:.2f}%) với lực mua xu hướng RẤT MẠNH (Combined: {combined:.1f}%) -> Cho phép bứt phá.")
-            elif dist_res_pct < 1.0:
+            if combined >= 62 or vol_bo_up or macro_trend_long:
+                log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Kháng Cự (${nearest_res:.4f}, cách {dist_res_pct:.2f}%) với xu hướng thuận dòng -> Cho phép bứt phá theo trend.")
+            elif dist_res_pct < 0.30:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Kháng Cự gần nhất (${nearest_res:.4f}) chỉ có {dist_res_pct:.2f}% "
-                    f"quá sát giá vào lệnh -> HỦY LỆNH LONG."
+                    f"quá sát nút (<0.3%) và không có lực đẩy -> HỦY LỆNH LONG."
                 )
                 final = "WAIT"
 
         elif final == "SHORT" and nearest_supp > 0 and nearest_supp < price:
             dist_supp_pct = (price - nearest_supp) / price * 100
-            if combined >= 68 or vol_bo_down:
-                log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Hỗ Trợ (${nearest_supp:.4f}, cách {dist_supp_pct:.2f}%) với lực bán xu hướng RẤT MẠNH (Combined: {combined:.1f}%) -> Cho phép bứt phá.")
-            elif dist_supp_pct < 1.0:
+            if combined >= 62 or vol_bo_down or macro_trend_short:
+                log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Hỗ Trợ (${nearest_supp:.4f}, cách {dist_supp_pct:.2f}%) với xu hướng thuận dòng -> Cho phép bứt phá theo trend.")
+            elif dist_supp_pct < 0.30:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Hỗ Trợ gần nhất (${nearest_supp:.4f}) chỉ có {dist_supp_pct:.2f}% "
-                    f"quá sát giá vào lệnh -> HỦY LỆNH SHORT."
+                    f"quá sát nút (<0.3%) và không có lực đẩy -> HỦY LỆNH SHORT."
                 )
                 final = "WAIT"
 
@@ -1571,17 +1581,22 @@ class SignalEngine:
             # khoá 1 phần lời — đúng cảm giác "SL vẫn nhiều". EV dương trên giấy
             # không đồng nghĩa tỉ lệ THẮNG > 50%. Thêm sàn p_win RIÊNG, độc lập với
             # EV, để ép hệ thống chỉ vào lệnh khi tự tin THẮNG nhiều hơn thua.
-            MIN_P_WIN = 0.55   # Điều chỉnh sàn p_win về 55% theo yêu cầu
+            # Sàn p_win linh hoạt theo bối cảnh:
+            # - Với lệnh thuận sóng chủ (4H/1H đồng thuận hoặc Elder Triple Screen): sàn 48% (với R:R 1:2.0 là cực kỳ có lời)
+            # - Với lệnh thị trường trung lập: sàn 52%
+            is_trend_aligned = (trade_regime == "TREND_FOLLOWING") or (trend_4h == final and final != "WAIT")
+            MIN_P_WIN = 0.48 if is_trend_aligned else 0.52
+
             if p_win < MIN_P_WIN:
-                log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% -> hạ về WAIT",
-                            p_win * 100, MIN_P_WIN * 100)
+                log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% (Trend Aligned: %s) -> hạ về WAIT",
+                            p_win * 100, MIN_P_WIN * 100, is_trend_aligned)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
-            elif ev_ratio < 0.15:
-                log.warning("  ⚠️ EV(%.2f) quá thấp, hạ cấp thành WAIT", ev_ratio)
+            elif ev_ratio < 0.12:
+                log.warning("  ⚠️ EV(%.2f) quá thấp (<0.12), hạ cấp thành WAIT", ev_ratio)
                 final = "WAIT"
                 conf = round(conf * 0.8, 1)
-            elif ev_ratio > 0.5:
+            elif ev_ratio > 0.4:
                 conf = round(min(95, conf + (ev_ratio * 5)), 1)
 
             # [NEW v6.5] CHẶN CỨNG khi funding quá đông cùng chiều lệnh định vào —

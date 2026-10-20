@@ -64,17 +64,17 @@ _SENT_NOTIFICATIONS = {}
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 72.0, "max_risk_pct": 2.0,
+        "min_confidence": 68.0, "max_risk_pct": 2.0,
         "max_positions": 5, "leverage": 5, "target_monthly": "5-8%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
-        "min_confidence": 75.0, "max_risk_pct": 1.5,
+        "min_confidence": 70.0, "max_risk_pct": 1.5,
         "max_positions": 3, "leverage": 5, "target_monthly": "4-6%",
     },
     "TIER3": {
         "label": "Ca Map", "min_capital": 2000, "max_capital": float("inf"),
-        "min_confidence": 80.0, "max_risk_pct": 1.0,
+        "min_confidence": 75.0, "max_risk_pct": 1.0,
         "max_positions": 5, "leverage": 3, "target_monthly": "3-5%",
     },
 }

@@ -226,17 +226,32 @@ class SignalBot:
         panel_dir  = result.get("stat_direction", "WAIT")
         panel_conf = result.get("stat_confidence")
 
-        if panel_dir == "WAIT" or panel_dir != engine_dir:
-            self.log.warning("  🧠 [VETO] %s: Engine đề xuất %s nhưng Hội đồng 12-agent = %s -> HUỶ vào lệnh.",
+        if panel_dir != "WAIT" and panel_dir != engine_dir:
+            # Hội đồng AI chỉ ra hướng ĐỐI NGHỊCH hoàn toàn (ví dụ Engine LONG mà Panel SHORT) -> Phủ quyết cứng
+            self.log.warning("  🧠 [HARD VETO] %s: Engine đề xuất %s nhưng Hội đồng 12-agent phản đối (%s) -> HUỶ vào lệnh.",
                               sym, engine_dir, panel_dir)
             self.tg.send(
                 f"🧠 <b>HỘI ĐỒNG 12-AGENT PHỦ QUYẾT: {sym}</b>\n"
-                f"Engine đề xuất <b>{engine_dir}</b> nhưng hội đồng phản biện kết luận "
-                f"<b>{panel_dir}</b> -> Đã HUỶ, không vào lệnh."
+                f"Engine đề xuất <b>{engine_dir}</b> nhưng hội đồng phản biện chỉ ra hướng ngược chiều "
+                f"<b>{panel_dir}</b> -> Đã HUỶ để phòng vệ rủi ro."
             )
             data["final"] = "WAIT"
             data["veto_reason"] = f"panel={panel_dir} vs engine={engine_dir}"
             return data
+        elif panel_dir == "WAIT" and panel_dir != engine_dir:
+            # Hội đồng AI thận trọng (chấm WAIT do chưa hoàn hảo 100%):
+            # Nếu Engine định lượng có Confidence >= 70% và thuận xu hướng -> Cho phép vào lệnh với Size cẩn trọng (x0.75) thay vì hủy bỏ
+            eng_conf = data.get("confidence", 0)
+            if eng_conf >= 70.0:
+                data["position_size_mult"] = round(data.get("position_size_mult", 1.0) * 0.75, 2)
+                self.log.info("  🛡️ [PRUDENT ENTRY] %s: Hội đồng AI phân vân (WAIT) nhưng Điểm Kỹ Thuật Cao (%.1f%%) -> Giữ lệnh %s, giảm Size x0.75 bảo toàn vốn.",
+                              sym, eng_conf, engine_dir)
+            else:
+                self.log.warning("  🧠 [SOFT VETO] %s: Engine %s có Conf thấp (%.1f%% < 70%%) và Hội đồng AI chấm WAIT -> HUỶ lệnh.",
+                                  sym, engine_dir, eng_conf)
+                data["final"] = "WAIT"
+                data["veto_reason"] = f"panel=WAIT and conf={eng_conf:.1f}% < 70%"
+                return data
 
         if panel_conf is not None:
             old_conf = data.get("confidence", 0)
