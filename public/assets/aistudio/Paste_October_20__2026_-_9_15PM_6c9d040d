@@ -1,0 +1,206 @@
+2026-10-20T14:12:14.248707652Z 2026-10-20 14:12:14,248 [INFO]   [Bayes EV] LONG ETHUSDT: P(win)=60.6%, EV_Ratio=0.47 (Likelihood=1.88)
+2026-10-20T14:12:14.971815841Z 2026-10-20 14:12:14,971 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:12:14.971924224Z 2026-10-20 14:12:14,971 [INFO] Giữ vị thế ETHUSDT (LONG): PnL +0.97%% (+$0.05 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:12:16.389669131Z 2026-10-20 14:12:16,389 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:12:16.390954167Z 2026-10-20 14:12:16,390 [INFO]   Agent [Mistral] OK
+2026-10-20T14:12:17.39200902Z 2026-10-20 14:12:17,391 [INFO]   Stage 5: CIO Final Verdict...
+2026-10-20T14:12:17.392443179Z 2026-10-20 14:12:17,392 [INFO] Chiếu slot AI: 12 → Groq
+2026-10-20T14:12:22.269040334Z 2026-10-20 14:12:22,268 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:12:22.270615177Z 2026-10-20 14:12:22,270 [INFO]   Agent [Mistral] OK
+2026-10-20T14:12:31.212328745Z 2026-10-20 14:12:31,211 [INFO]   🧠 [GATE] BNBUSDT: Đồng thuận LONG | Confidence 95.0% -> 95.0% (đã hiệu chỉnh lịch sử)
+2026-10-20T14:12:31.212663922Z 2026-10-20 14:12:31,212 [INFO] 📤 Đã đẩy lệnh LONG BNBUSDT vào Hàng đợi (LocalStore (0% RAM/Quota)).
+2026-10-20T14:12:31.212916077Z 2026-10-20 14:12:31,212 [INFO] Processing signal BNBUSDT for users...
+2026-10-20T14:12:31.457903908Z 2026-10-20 14:12:31,457 [INFO] Da co vi the BNBUSDT (user 1719545732) - bo qua
+2026-10-20T14:12:32.715540957Z 2026-10-20 14:12:32,713 [INFO] 📊 Phân tích HYPEUSDT [CRYPTO]...
+2026-10-20T14:12:32.838782273Z 2026-10-20 14:12:32,838 [INFO]   🧠 [HMM] Market Regime: SIDEWAYS (Confidence: 80.0%)
+2026-10-20T14:12:32.943563451Z 2026-10-20 14:12:32,943 [INFO]   🔗 [BTC CORR] HYPEUSDT: corr=0.861, BTC trend (EMA trực tiếp)=SIDEWAYS
+2026-10-20T14:12:32.943659773Z 2026-10-20 14:12:32,943 [INFO]   [Kalman] True Price: 79.2962 | Trend: BULLISH
+2026-10-20T14:12:32.943700164Z 2026-10-20 14:12:32,943 [INFO]   TF=84.2 Smart=+72.0 Combined=99.3 L:3 S:0
+2026-10-20T14:12:32.943750315Z 2026-10-20 14:12:32,943 [INFO] 🚨 Breakout override [1H] (Smart=+72.0)
+2026-10-20T14:12:32.970864599Z 2026-10-20 14:12:32,970 [INFO] ⚡ [L2 WALL PASSED] Phát hiện tường bán ($81.1800) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: 99.3) -> Cho phép vào lệnh bứt phá.
+2026-10-20T14:12:32.9709264Z 2026-10-20 14:12:32,970 [INFO] ⚡ [S/R BREAKOUT PASSED] Tiệm cận Kháng Cự ($81.1800, cách 0.05%) với xu hướng thuận dòng -> Cho phép bứt phá theo trend.
+2026-10-20T14:12:32.970960291Z 2026-10-20 14:12:32,970 [INFO]   ↔️ [SIDEWAY RANGE] HYPEUSDT: 4H/HMM đi ngang -> Kích hoạt chế độ Sideway (Size 75%).
+2026-10-20T14:12:32.971073203Z 2026-10-20 14:12:32,970 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:12:32.971165465Z 2026-10-20 14:12:32,971 [INFO]   🛡️ [ANTI-WHIPSAW M5 SCALP] SL: 0.95% (+Buffer 0.19% = 1.14%) | TP1: 1.04% | TP2: 1.90%
+2026-10-20T14:12:32.971228906Z 2026-10-20 14:12:32,971 [INFO]   🛡️ [S/R ZONE] Tối ưu SL LONG giấu ngoài Vùng Hỗ Trợ: 80.2200
+2026-10-20T14:12:32.971298657Z 2026-10-20 14:12:32,971 [INFO]   ↔️ [HMM BAYES] Thị trường SIDEWAYS -> Giảm bớt likelihood (x0.9)
+2026-10-20T14:12:32.971359089Z 2026-10-20 14:12:32,971 [INFO]   💵 [MACRO PROBABILITY MODIFIER] HYPEUSDT LONG -> Tỷ lệ Likelihood x1.15 (Gió xuôi vĩ mô (Fed Dovish 22.0% Cut, DXY/US10Y hạ) -> Củng cố xác suất thắng LONG (+15%))
+2026-10-20T14:12:32.971445811Z 2026-10-20 14:12:32,971 [INFO]   [Bayes EV] LONG HYPEUSDT: P(win)=78.3%, EV_Ratio=0.90 (Likelihood=4.41)
+2026-10-20T14:12:33.284104662Z 2026-10-20 14:12:33,283 [INFO] Chiếu slot AI: 12 → Groq
+2026-10-20T14:12:33.459906521Z 2026-10-20 14:12:33,459 [INFO] Processing signal BNBUSDT for users...
+2026-10-20T14:12:33.705742728Z 2026-10-20 14:12:33,704 [INFO] Da co vi the BNBUSDT (user 1719545732) - bo qua
+2026-10-20T14:12:40.507693184Z 2026-10-20 14:12:40,507 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:12:40.509172024Z 2026-10-20 14:12:40,508 [INFO]   Agent [Mistral] OK
+2026-10-20T14:12:40.509192284Z 2026-10-20 14:12:40,509 [INFO]   HYPEUSDT: LONG 95.0% | CVD:BULLISH | Vol:SURGE(2.9x) | Press:BUY | LLM:Mistral
+2026-10-20T14:12:41.322006615Z 2026-10-20 14:12:41,321 [INFO]   📱 Đã gửi [Breakout BREAKOUT_UP]: HYPEUSDT
+2026-10-20T14:12:41.322239739Z 2026-10-20 14:12:41,322 [INFO] 🤖 Multi-Agent Pipeline bắt đầu...
+2026-10-20T14:12:41.568154739Z 2026-10-20 14:12:41,567 [INFO]   Stage 1: 4 Domain Analysts...
+2026-10-20T14:12:41.56823793Z 2026-10-20 14:12:41,568 [INFO] Chiếu slot AI: 12 → Groq
+2026-10-20T14:12:46.066085936Z 2026-10-20 14:12:46,065 [INFO] 📊 Phân tích BNBUSDT [CRYPTO]...
+2026-10-20T14:12:46.19220724Z 2026-10-20 14:12:46,191 [INFO]   🧠 [HMM] Market Regime: SIDEWAYS (Confidence: 80.0%)
+2026-10-20T14:12:47.434517647Z 2026-10-20 14:12:47,434 [INFO]   🔗 [BTC CORR] BNBUSDT: corr=0.852, BTC trend (EMA trực tiếp)=SIDEWAYS
+2026-10-20T14:12:47.43469921Z 2026-10-20 14:12:47,434 [INFO]   [Kalman] True Price: 724.8317 | Trend: BULLISH
+2026-10-20T14:12:47.434757072Z 2026-10-20 14:12:47,434 [INFO]   TF=86.2 Smart=+33.5 Combined=85.2 L:4 S:0
+2026-10-20T14:12:47.434837353Z 2026-10-20 14:12:47,434 [INFO] 🚨 Breakout override [1H] (Smart=+33.5)
+2026-10-20T14:12:47.459785713Z 2026-10-20 14:12:47,459 [INFO] ⚡ [L2 WALL PASSED] Phát hiện tường bán ($739.0900) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: 85.2) -> Cho phép vào lệnh bứt phá.
+2026-10-20T14:12:47.459810673Z 2026-10-20 14:12:47,459 [INFO] ⚡ [S/R BREAKOUT PASSED] Tiệm cận Kháng Cự ($739.0900, cách 0.06%) với xu hướng thuận dòng -> Cho phép bứt phá theo trend.
+2026-10-20T14:12:47.459861674Z 2026-10-20 14:12:47,459 [INFO]   🟢 [MTF ALIGNMENT] BNBUSDT: Khung 4H đồng thuận LONG -> Thưởng điểm +10, kích hoạt 100% Size Vốn.
+2026-10-20T14:12:47.459952416Z --- Logging error ---
+2026-10-20T14:12:47.461863245Z Traceback (most recent call last):
+2026-10-20T14:12:47.46210644Z   File "/opt/render/project/python/Python-3.12.0/lib/python3.12/logging/__init__.py", line 1160, in emit
+2026-10-20T14:12:47.46211421Z     msg = self.format(record)
+2026-10-20T14:12:47.46211811Z           ^^^^^^^^^^^^^^^^^^^
+2026-10-20T14:12:47.46212158Z   File "/opt/render/project/python/Python-3.12.0/lib/python3.12/logging/__init__.py", line 999, in format
+2026-10-20T14:12:47.46212529Z     return fmt.format(record)
+2026-10-20T14:12:47.46212921Z            ^^^^^^^^^^^^^^^^^^
+2026-10-20T14:12:47.462133381Z   File "/opt/render/project/python/Python-3.12.0/lib/python3.12/logging/__init__.py", line 703, in format
+2026-10-20T14:12:47.462138021Z     record.message = record.getMessage()
+2026-10-20T14:12:47.462141581Z                      ^^^^^^^^^^^^^^^^^^^
+2026-10-20T14:12:47.462145181Z   File "/opt/render/project/python/Python-3.12.0/lib/python3.12/logging/__init__.py", line 392, in getMessage
+2026-10-20T14:12:47.462149141Z     msg = msg % self.args
+2026-10-20T14:12:47.462152921Z           ~~~~^~~~~~~~~~~
+2026-10-20T14:12:47.462157161Z TypeError: not all arguments converted during string formatting
+2026-10-20T14:12:47.462259633Z Call stack:
+2026-10-20T14:12:47.465882767Z   File "/opt/render/project/python/Python-3.12.0/lib/python3.12/threading.py", line 1009, in _bootstrap
+2026-10-20T14:12:47.465896007Z     self._bootstrap_inner()
+2026-10-20T14:12:47.465900707Z   File "/opt/render/project/python/Python-3.12.0/lib/python3.12/threading.py", line 1052, in _bootstrap_inner
+2026-10-20T14:12:47.465904638Z     self.run()
+2026-10-20T14:12:47.465909147Z   File "/opt/render/project/python/Python-3.12.0/lib/python3.12/threading.py", line 989, in run
+2026-10-20T14:12:47.465913508Z     self._target(*self._args, **self._kwargs)
+2026-10-20T14:12:47.465921378Z   File "/opt/render/project/src/bot_code/core_api/main.py", line 948, in sync_bingx_positions
+2026-10-20T14:12:47.465926048Z     evaluate_reversal_for_position(user, p, cur, db)
+2026-10-20T14:12:47.465929838Z   File "/opt/render/project/src/bot_code/core_api/main.py", line 481, in evaluate_reversal_for_position
+2026-10-20T14:12:47.465933408Z     analysis = engine.full_analysis(sym, db=db)
+2026-10-20T14:12:47.465937478Z   File "/opt/render/project/src/bot_code/analyzer/engine.py", line 997, in full_analysis
+2026-10-20T14:12:47.465942018Z     log.warning("⛔ [ELDER TRIPLE SCREEN] H1 DOWNTREND (Thủy triều rút) -> Chặn lệnh LONG trên M5 để tránh dính SL!", symbol)
+2026-10-20T14:12:47.465946408Z Message: '⛔ [ELDER TRIPLE SCREEN] H1 DOWNTREND (Thủy triều rút) -> Chặn lệnh LONG trên M5 để tránh dính SL!'
+2026-10-20T14:12:47.465950748Z Arguments: ('BNBUSDT',)
+2026-10-20T14:12:47.466060721Z 2026-10-20 14:12:47,465 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:12:47.466212454Z 2026-10-20 14:12:47,466 [INFO]   🛡️ [ANTI-WHIPSAW M5 SCALP] SL: 0.95% (+Buffer 0.15% = 1.10%) | TP1: 1.04% | TP2: 1.90%
+2026-10-20T14:12:48.312109289Z 2026-10-20 14:12:48,311 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:12:48.312246532Z 2026-10-20 14:12:48,312 [INFO] 🛡️ BNBUSDT: Đạt 50% chặng đường tới TP1 ($745.64). Dời SL lên 732.028954 (ngưỡng cũ: 726.47)!
+2026-10-20T14:12:48.914802771Z 2026-10-20 14:12:48,914 [INFO] 🛡️ Đặt Stop Loss OK: BNBUSDT tại 732.028954
+2026-10-20T14:12:49.146857467Z 2026-10-20 14:12:49,146 [INFO] 🎯 Đặt Take Profit 1 OK: BNBUSDT tại 745.64 (Qty: 0.008)
+2026-10-20T14:12:49.330622888Z 2026-10-20 14:12:49,330 [INFO] 🎯 Đặt Take Profit 2 OK: BNBUSDT tại 751.8 (Qty: 0.005)
+2026-10-20T14:12:49.506267093Z 2026-10-20 14:12:49,505 [ERROR] ❌ Đặt Take Profit 3 THẤT BẠI: BNBUSDT - Lỗi: The minimum size per order is 7.39 USDT.
+2026-10-20T14:12:49.79906963Z 2026-10-20 14:12:49,798 [ERROR] ❌ Đặt Take Profit 4 THẤT BẠI: BNBUSDT - Lỗi: The minimum size per order is 7.39 USDT.
+2026-10-20T14:12:49.799209332Z 2026-10-20 14:12:49,799 [INFO] Giữ vị thế BNBUSDT (LONG): PnL +5.04%% (+$0.14 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:12:50.642584957Z 2026-10-20 14:12:50,638 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:12:50.642618697Z 2026-10-20 14:12:50,639 [WARNING] ⏳ Cooldown dời SL đang kích hoạt cho BTCUSDT -> Bỏ qua lần dời SL này để tránh spam API.
+2026-10-20T14:12:50.642624137Z 2026-10-20 14:12:50,639 [INFO] Giữ vị thế BTCUSDT (LONG): PnL +7.01%% (+$0.45 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:12:50.866878604Z 2026-10-20 14:12:50,866 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:12:50.936835263Z 2026-10-20 14:12:50,936 [INFO]   Agent [Mistral] OK
+2026-10-20T14:12:51.73629167Z 2026-10-20 14:12:51,736 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:12:51.736428593Z 2026-10-20 14:12:51,736 [INFO] Giữ vị thế ETHUSDT (LONG): PnL +0.30%% (+$0.00 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:12:51.937455696Z 2026-10-20 14:12:51,937 [INFO]   Stage 2: Bull/Bear/Manager...
+2026-10-20T14:12:51.937591109Z 2026-10-20 14:12:51,937 [INFO] Chiếu slot AI: 12 → Groq
+2026-10-20T14:12:57.802853485Z 2026-10-20 14:12:57,802 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:12:57.804170021Z 2026-10-20 14:12:57,803 [INFO]   Agent [Mistral] OK
+2026-10-20T14:12:58.804792505Z 2026-10-20 14:12:58,804 [INFO]   Stage 3-4: Trader + Risk Debate...
+2026-10-20T14:12:58.804833276Z 2026-10-20 14:12:58,804 [INFO] Chiếu slot AI: 12 → Groq
+2026-10-20T14:13:04.409169776Z 2026-10-20 14:13:04,408 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:13:04.410694127Z 2026-10-20 14:13:04,410 [INFO]   Agent [Mistral] OK
+2026-10-20T14:13:05.41129877Z 2026-10-20 14:13:05,411 [INFO]   Stage 5: CIO Final Verdict...
+2026-10-20T14:13:05.411614347Z 2026-10-20 14:13:05,411 [INFO] Chiếu slot AI: 13 → Groq
+2026-10-20T14:13:10.237806074Z 2026-10-20 14:13:10,237 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:13:10.239601861Z 2026-10-20 14:13:10,239 [INFO]   Agent [Mistral] OK
+2026-10-20T14:13:16.802321272Z 2026-10-20 14:13:16,802 [INFO]   🧠 [GATE] HYPEUSDT: Đồng thuận LONG | Confidence 95.0% -> 95.0% (đã hiệu chỉnh lịch sử)
+2026-10-20T14:13:16.802463945Z 2026-10-20 14:13:16,802 [INFO] 📤 Đã đẩy lệnh LONG HYPEUSDT vào Hàng đợi (LocalStore (0% RAM/Quota)).
+2026-10-20T14:13:16.802755871Z 2026-10-20 14:13:16,802 [INFO] Processing signal HYPEUSDT for users...
+2026-10-20T14:13:17.277622124Z 2026-10-20 14:13:17,276 [WARNING] 📰 HYPEUSDT: Đang trong vùng ảnh hưởng tin 'Tin xấu thị trường (AI Scanner)' -> giảm khối lượng còn x0.5.
+2026-10-20T14:13:17.277667074Z 2026-10-20 14:13:17,277 [INFO] 💵 [FED RATE SIZING] HYPEUSDT: Điều chỉnh vốn vĩ mô x0.80 (Fed: HAWKISH | Cut Prob: 22.0%) -> Qty: 0.7680
+2026-10-20T14:13:17.523494312Z 2026-10-20 14:13:17,523 [WARNING] 🧠 [META-VETO] HYPEUSDT LONG: Meta-model: P(win)=25.7% < 35%
+2026-10-20T14:13:18.063178028Z 2026-10-20 14:13:18,062 [WARNING] ⚠️ Telegram _tg_send lỗi HTTP 400: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unsupported start tag \"\" at byte offset 89"}. Thử lại dạng plain text...
+2026-10-20T14:13:18.762768547Z 2026-10-20 14:13:18,762 [INFO] 📲 [TELEGRAM] Đã gửi fallback plain text thành công tới 1719545732
+2026-10-20T14:13:20.769539877Z 2026-10-20 14:13:20,767 [INFO] Processing signal HYPEUSDT for users...
+2026-10-20T14:13:21.280333023Z 2026-10-20 14:13:21,279 [WARNING] 📰 HYPEUSDT: Đang trong vùng ảnh hưởng tin 'Tin xấu thị trường (AI Scanner)' -> giảm khối lượng còn x0.5.
+2026-10-20T14:13:21.280398884Z 2026-10-20 14:13:21,280 [INFO] 💵 [FED RATE SIZING] HYPEUSDT: Điều chỉnh vốn vĩ mô x0.80 (Fed: HAWKISH | Cut Prob: 22.0%) -> Qty: 0.7680
+2026-10-20T14:13:21.528176872Z 2026-10-20 14:13:21,527 [WARNING] 🧠 [META-VETO] HYPEUSDT LONG: Meta-model: P(win)=25.7% < 35%
+2026-10-20T14:13:22.157590149Z 2026-10-20 14:13:22,157 [WARNING] ⚠️ Telegram _tg_send lỗi HTTP 400: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unsupported start tag \"\" at byte offset 89"}. Thử lại dạng plain text...
+2026-10-20T14:13:23.472953897Z 2026-10-20 14:13:23,472 [INFO] 📲 [TELEGRAM] Đã gửi fallback plain text thành công tới 1719545732
+2026-10-20T14:13:24.08162409Z 2026-10-20 14:13:24,081 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:24.081659671Z 2026-10-20 14:13:24,081 [WARNING] ⏳ Cooldown dời SL đang kích hoạt cho BNBUSDT -> Bỏ qua lần dời SL này để tránh spam API.
+2026-10-20T14:13:24.081811974Z 2026-10-20 14:13:24,081 [INFO] Giữ vị thế BNBUSDT (LONG): PnL +5.11%% (+$0.15 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:13:25.114299118Z 2026-10-20 14:13:25,114 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:25.114337399Z 2026-10-20 14:13:25,114 [WARNING] ⏳ Cooldown dời SL đang kích hoạt cho BTCUSDT -> Bỏ qua lần dời SL này để tránh spam API.
+2026-10-20T14:13:25.114468862Z 2026-10-20 14:13:25,114 [INFO] Giữ vị thế BTCUSDT (LONG): PnL +7.34%% (+$0.47 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:13:26.137272738Z 2026-10-20 14:13:26,136 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:26.137298088Z 2026-10-20 14:13:26,136 [INFO] Giữ vị thế ETHUSDT (LONG): PnL +0.55%% (+$0.01 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:13:28.481037607Z INFO:     10.24.174.1:0 - "GET / HTTP/1.1" 200 OK
+2026-10-20T14:13:28.486504008Z 2026-10-20 14:13:28,486 [INFO] 🏓 Self-ping OK (200)
+2026-10-20T14:13:05.41129877Z 2026-10-20 14:13:05,411 [INFO]   Stage 5: CIO Final Verdict...
+2026-10-20T14:13:05.411614347Z 2026-10-20 14:13:05,411 [INFO] Chiếu slot AI: 13 → Groq
+2026-10-20T14:13:10.237806074Z 2026-10-20 14:13:10,237 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:13:10.239601861Z 2026-10-20 14:13:10,239 [INFO]   Agent [Mistral] OK
+2026-10-20T14:13:16.802321272Z 2026-10-20 14:13:16,802 [INFO]   🧠 [GATE] HYPEUSDT: Đồng thuận LONG | Confidence 95.0% -> 95.0% (đã hiệu chỉnh lịch sử)
+2026-10-20T14:13:16.802463945Z 2026-10-20 14:13:16,802 [INFO] 📤 Đã đẩy lệnh LONG HYPEUSDT vào Hàng đợi (LocalStore (0% RAM/Quota)).
+2026-10-20T14:13:16.802755871Z 2026-10-20 14:13:16,802 [INFO] Processing signal HYPEUSDT for users...
+2026-10-20T14:13:17.277622124Z 2026-10-20 14:13:17,276 [WARNING] 📰 HYPEUSDT: Đang trong vùng ảnh hưởng tin 'Tin xấu thị trường (AI Scanner)' -> giảm khối lượng còn x0.5.
+2026-10-20T14:13:17.277667074Z 2026-10-20 14:13:17,277 [INFO] 💵 [FED RATE SIZING] HYPEUSDT: Điều chỉnh vốn vĩ mô x0.80 (Fed: HAWKISH | Cut Prob: 22.0%) -> Qty: 0.7680
+2026-10-20T14:13:17.523494312Z 2026-10-20 14:13:17,523 [WARNING] 🧠 [META-VETO] HYPEUSDT LONG: Meta-model: P(win)=25.7% < 35%
+2026-10-20T14:13:18.063178028Z 2026-10-20 14:13:18,062 [WARNING] ⚠️ Telegram _tg_send lỗi HTTP 400: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unsupported start tag \"\" at byte offset 89"}. Thử lại dạng plain text...
+2026-10-20T14:13:18.762768547Z 2026-10-20 14:13:18,762 [INFO] 📲 [TELEGRAM] Đã gửi fallback plain text thành công tới 1719545732
+2026-10-20T14:13:20.769539877Z 2026-10-20 14:13:20,767 [INFO] Processing signal HYPEUSDT for users...
+2026-10-20T14:13:21.280333023Z 2026-10-20 14:13:21,279 [WARNING] 📰 HYPEUSDT: Đang trong vùng ảnh hưởng tin 'Tin xấu thị trường (AI Scanner)' -> giảm khối lượng còn x0.5.
+2026-10-20T14:13:21.280398884Z 2026-10-20 14:13:21,280 [INFO] 💵 [FED RATE SIZING] HYPEUSDT: Điều chỉnh vốn vĩ mô x0.80 (Fed: HAWKISH | Cut Prob: 22.0%) -> Qty: 0.7680
+2026-10-20T14:13:21.528176872Z 2026-10-20 14:13:21,527 [WARNING] 🧠 [META-VETO] HYPEUSDT LONG: Meta-model: P(win)=25.7% < 35%
+2026-10-20T14:13:22.157590149Z 2026-10-20 14:13:22,157 [WARNING] ⚠️ Telegram _tg_send lỗi HTTP 400: {"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unsupported start tag \"\" at byte offset 89"}. Thử lại dạng plain text...
+2026-10-20T14:13:23.472953897Z 2026-10-20 14:13:23,472 [INFO] 📲 [TELEGRAM] Đã gửi fallback plain text thành công tới 1719545732
+2026-10-20T14:13:24.08162409Z 2026-10-20 14:13:24,081 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:24.081659671Z 2026-10-20 14:13:24,081 [WARNING] ⏳ Cooldown dời SL đang kích hoạt cho BNBUSDT -> Bỏ qua lần dời SL này để tránh spam API.
+2026-10-20T14:13:24.081811974Z 2026-10-20 14:13:24,081 [INFO] Giữ vị thế BNBUSDT (LONG): PnL +5.11%% (+$0.15 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:13:25.114299118Z 2026-10-20 14:13:25,114 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:25.114337399Z 2026-10-20 14:13:25,114 [WARNING] ⏳ Cooldown dời SL đang kích hoạt cho BTCUSDT -> Bỏ qua lần dời SL này để tránh spam API.
+2026-10-20T14:13:25.114468862Z 2026-10-20 14:13:25,114 [INFO] Giữ vị thế BTCUSDT (LONG): PnL +7.34%% (+$0.47 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:13:26.137272738Z 2026-10-20 14:13:26,136 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:26.137298088Z 2026-10-20 14:13:26,136 [INFO] Giữ vị thế ETHUSDT (LONG): PnL +0.55%% (+$0.01 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:13:28.481037607Z INFO:     10.24.174.1:0 - "GET / HTTP/1.1" 200 OK
+2026-10-20T14:13:28.486504008Z 2026-10-20 14:13:28,486 [INFO] 🏓 Self-ping OK (200)
+2026-10-20T14:13:57.973196192Z 2026-10-20 14:13:57,972 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:57.973257793Z 2026-10-20 14:13:57,973 [INFO] Giữ vị thế ETHUSDT (LONG): PnL +1.06%% (+$0.04 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:13:58.261521957Z 2026-10-20 14:13:58,260 [INFO] 📊 Phân tích BTCUSDT [CRYPTO]...
+2026-10-20T14:13:58.386281153Z 2026-10-20 14:13:58,384 [INFO]   🧠 [HMM] Market Regime: SIDEWAYS (Confidence: 80.0%)
+2026-10-20T14:13:59.678449328Z 2026-10-20 14:13:59,678 [INFO]   [Kalman] True Price: 81832.4571 | Trend: BULLISH
+2026-10-20T14:13:59.678480108Z 2026-10-20 14:13:59,678 [INFO]   TF=94.4 Smart=+88.0 Combined=100.0 L:4 S:0
+2026-10-20T14:13:59.704901918Z 2026-10-20 14:13:59,704 [INFO] 🏆 [GIANLUCA BRUNI SET UP] Phát hiện Bear Trap Sweep Phiên Á! (Asian Low: 81668.0000 | Sweep Low: 81267.8000 | Close: 83127.6000)
+2026-10-20T14:13:59.704932258Z 2026-10-20 14:13:59,704 [INFO] 🏆 [GIANLUCA BRUNI TRIGGER] Mô hình Gianluca Bruni: Quét đáy Hộp Phiên Á ($81668.0000) lấy thanh khoản rồi rút chân quay lại Hộp -> Kích hoạt LONG bắt đáy. -> KÍCH HOẠT LONG BẮT ĐÁY HỘP PHIÊN Á!
+2026-10-20T14:13:59.705181294Z 2026-10-20 14:13:59,705 [INFO] ⚡ [S/R BREAKOUT PASSED] Tiệm cận Kháng Cự ($84374.5140, cách 1.50%) với xu hướng thuận dòng -> Cho phép bứt phá theo trend.
+2026-10-20T14:13:59.705216944Z 2026-10-20 14:13:59,705 [INFO]   🟢 [MTF ALIGNMENT] BTCUSDT: Khung 4H đồng thuận LONG -> Thưởng điểm +10, kích hoạt 100% Size Vốn.
+2026-10-20T14:13:59.705383707Z 2026-10-20 14:13:59,705 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:13:59.70549049Z 2026-10-20 14:13:59,705 [INFO]   🛡️ [ANTI-WHIPSAW M5 SCALP] SL: 0.95% (+Buffer 0.15% = 1.10%) | TP1: 1.04% | TP2: 1.90%
+2026-10-20T14:13:59.706808037Z 2026-10-20 14:13:59,705 [INFO]   🛡️ [S/R ZONE] Tối ưu SL LONG giấu ngoài Vùng Hỗ Trợ: 82213.2000
+2026-10-20T14:13:59.706818767Z 2026-10-20 14:13:59,705 [INFO]   🛡️ [PYTHAGORAS EMA] Tối ưu SL LONG giấu dưới Hỗ Trợ Động EMA (147/258/369): 81528.1900
+2026-10-20T14:13:59.706822347Z 2026-10-20 14:13:59,705 [INFO]   ↔️ [HMM BAYES] Thị trường SIDEWAYS -> Giảm bớt likelihood (x0.9)
+2026-10-20T14:13:59.706827857Z 2026-10-20 14:13:59,705 [INFO]   🏆 [BRUNI PROBABILITY MODIFIER] BTCUSDT LONG -> Tỷ lệ Likelihood x1.25 (Thưởng +25% do trùng khớp bẫy thanh khoản Hộp Phiên Á)
+2026-10-20T14:13:59.706831827Z 2026-10-20 14:13:59,705 [INFO]   💵 [MACRO PROBABILITY MODIFIER] BTCUSDT LONG -> Tỷ lệ Likelihood x1.15 (Gió xuôi vĩ mô (Fed Dovish 22.0% Cut, DXY/US10Y hạ) -> Củng cố xác suất thắng LONG (+15%))
+2026-10-20T14:13:59.706835207Z 2026-10-20 14:13:59,705 [INFO]   [Bayes EV] LONG BTCUSDT: P(win)=61.2%, EV_Ratio=0.49 (Likelihood=1.93)
+2026-10-20T14:14:00.491166216Z 2026-10-20 14:14:00,490 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:14:00.492278249Z 2026-10-20 14:14:00,491 [WARNING] ⏳ Cooldown dời SL đang kích hoạt cho BTCUSDT -> Bỏ qua lần dời SL này để tránh spam API.
+2026-10-20T14:14:00.492475383Z 2026-10-20 14:14:00,492 [INFO] Giữ vị thế BTCUSDT (LONG): PnL +7.74%% (+$0.50 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:14:01.594730451Z 2026-10-20 14:14:01,594 [INFO] 📲 [TELEGRAM] Đã gửi thông báo thành công tới 1719545732: 🏆 <b>VỊ THẾ ĐÃ ĐÓNG: BNBUSDT</b>  📈 Hướng: <b>LONG</b> 💰 Khối lượng: 0
+2026-10-20T14:14:16.843381422Z INFO:     10.24.119.147:0 - "HEAD / HTTP/1.1" 200 OK
+2026-10-20T14:14:34.936615075Z 2026-10-20 14:14:34,936 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:14:34.936742998Z 2026-10-20 14:14:34,936 [INFO] Giữ vị thế ETHUSDT (LONG): PnL +1.66%% (+$0.08 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:14:35.904679274Z 2026-10-20 14:14:35,904 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:14:35.904722475Z 2026-10-20 14:14:35,904 [INFO] 🛡️ BTCUSDT: Đạt 50% chặng đường tới TP1 ($83912.28). Dời SL lên 81906.41438 (ngưỡng cũ: 80983.4)!
+2026-10-20T14:14:36.656768995Z 2026-10-20 14:14:36,656 [INFO] 🛡️ Đặt Stop Loss OK: BTCUSDT tại 81906.41438
+2026-10-20T14:14:36.903040172Z 2026-10-20 14:14:36,902 [INFO] 🎯 Đặt Take Profit 1 OK: BTCUSDT tại 83912.28 (Qty: 0.0001)
+2026-10-20T14:14:37.135309463Z 2026-10-20 14:14:37,135 [INFO] 🎯 Đặt Take Profit 2 OK: BTCUSDT tại 84605.37 (Qty: 0.0001)
+2026-10-20T14:14:37.336386167Z 2026-10-20 14:14:37,335 [INFO] 🎯 Đặt Take Profit 3 OK: BTCUSDT tại 85183.18 (Qty: 0.0001)
+2026-10-20T14:14:37.33654311Z 2026-10-20 14:14:37,336 [INFO] Giữ vị thế BTCUSDT (LONG): PnL +7.66%% (+$0.50 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:15:09.235514284Z 2026-10-20 14:15:09,234 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:15:09.235668107Z 2026-10-20 14:15:09,235 [INFO] 🛡️ ETHUSDT: Đạt 50% chặng đường tới TP1 ($2474.95). Dời SL lên 2449.748968 (ngưỡng cũ: 2407.48)!
+2026-10-20T14:15:10.133771187Z 2026-10-20 14:15:10,133 [INFO] 🛡️ Đặt Stop Loss OK: ETHUSDT tại 2449.748968
+2026-10-20T14:15:10.311497425Z 2026-10-20 14:15:10,311 [ERROR] ❌ Đặt Take Profit 1 THẤT BẠI: ETHUSDT - Lỗi: The minimum size per order is 24.7 USDT.
+2026-10-20T14:15:10.511505467Z 2026-10-20 14:15:10,511 [ERROR] ❌ Đặt Take Profit 2 THẤT BẠI: ETHUSDT - Lỗi: The minimum size per order is 24.7 USDT.
+2026-10-20T14:15:10.799285562Z 2026-10-20 14:15:10,799 [ERROR] ❌ Đặt Take Profit 3 THẤT BẠI: ETHUSDT - Lỗi: The minimum size per order is 24.69 USDT.
+2026-10-20T14:15:11.001707043Z 2026-10-20 14:15:11,001 [ERROR] ❌ Đặt Take Profit 4 THẤT BẠI: ETHUSDT - Lỗi: The minimum size per order is 24.69 USDT.
+2026-10-20T14:15:11.821529927Z 2026-10-20 14:15:11,821 [INFO] 📲 [TELEGRAM] Đã gửi thông báo thành công tới 1719545732: 🛡️ <b>TRAILING SL KÍCH HOẠT: ETHUSDT</b> Giá đã đi được 50% chặng đườn
+2026-10-20T14:15:11.822985176Z 2026-10-20 14:15:11,822 [INFO] Giữ vị thế ETHUSDT (LONG): PnL +4.50%% (+$0.22 USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.
+2026-10-20T14:15:12.598796221Z 2026-10-20 14:15:12,598 [WARNING] 📰 [NEWS RISK - LLM] Cảnh báo tin xấu (Tin xấu thị trường (AI Scanner)) -> Giảm 50% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%.
+2026-10-20T14:15:12.598896694Z 2026-10-20 14:15:12,598 [WARNING] ⏳ Cooldown dời SL đang kích hoạt cho BTCUSDT -> Bỏ qua lần dời SL này để tránh spam API.
+2026-10-20T14:15:14.063464877Z 2026-10-20 14:15:14,063 [INFO] 📲 [TELEGRAM] Đã gửi thông báo thành công tới 1719545732: ✅ <b>CHỐT LỜI ĐỘNG (SIDEWAYS >= 1.0 USD): BTCUSDT</b>  📊 Vị thế cũ: LO
+2026-10-20T14:15:19.936235917Z 2026-10-20 14:15:19,935 [INFO] Chiếu slot AI: 15 → Mistral
+2026-10-20T14:15:22.14696626Z 2026-10-20 14:15:22,146 [INFO]   Mistral [open-mistral-7b] OK
+2026-10-20T14:15:22.148084113Z 2026-10-20 14:15:22,147 [INFO]   Agent [Mistral] OK
+2026-10-20T14:15:22.148151145Z 2026-10-20 14:15:22,148 [WARNING] 📰 [NEWS RISK] PHÁT HIỆN TIN XẤU THỊ TRƯỜNG! Tự động giảm 50% vốn vào lệnh (size_mult=0.5) & bảo vệ SL an toàn sàn >=1.5%, BOT VẪN CHẠY BÌNH THƯỜNG. (LLM: NGUYHIEM)

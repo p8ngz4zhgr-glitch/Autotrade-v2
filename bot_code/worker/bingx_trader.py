@@ -479,50 +479,111 @@ class BingXExchange:
             else:
                 log.error(f"❌ Đặt Stop Loss THẤT BẠI: {symbol} - Lỗi: {res_sl.get('msg', 'Unknown')}")
                 
+        # ══════════════════════════════════════════════════════════
+        # XỬ LÝ TAKE PROFIT THÔNG MINH (ADAPTIVE NOTIONAL BATCHING)
+        # ══════════════════════════════════════════════════════════
+        # Ngưỡng giá trị lệnh tối thiểu (Min Notional Order Size) theo quy định sàn BingX
+        clean_sym = symbol.replace("-", "").upper()
+        if "ETH" in clean_sym:
+            min_notional_floor = 25.0
+        elif "BTC" in clean_sym:
+            min_notional_floor = 10.0
+        elif "BNB" in clean_sym:
+            min_notional_floor = 7.5
+        elif "SOL" in clean_sym:
+            min_notional_floor = 8.0
+        else:
+            min_notional_floor = 6.0
+
+        ref_price = cur_price if cur_price > 0 else (tp_price if tp_price > 0 else 1.0)
+        total_notional = qty * ref_price
+
+        # Điều chỉnh danh sách tp_levels dựa trên quy mô vốn thực tế để tránh bị sàn từ chối
+        adjusted_tp_levels = []
         if tp_levels and len(tp_levels) > 0:
+            valid_lvls = []
             for lvl in tp_levels:
+                lvl_p = lvl.get("price", 0)
+                lvl_pct = lvl.get("close_pct", 0)
+                if lvl_p <= 0 or lvl_pct <= 0:
+                    continue
+                if cur_price > 0:
+                    if position_side == "LONG" and lvl_p <= cur_price:
+                        continue
+                    elif position_side == "SHORT" and lvl_p >= cur_price:
+                        continue
+                valid_lvls.append(lvl)
+
+            if valid_lvls:
+                # Nếu tổng giá trị vị thế không đủ để chia làm 2 lệnh độc lập (ví dụ ETH < 50 USD):
+                # Gộp 100% Qty vào 1 mốc TP duy nhất để đảm bảo lệnh TP được khớp trọn vẹn trên sàn!
+                if total_notional < min_notional_floor * 2:
+                    target_lvl = valid_lvls[0]
+                    adjusted_tp_levels = [{
+                        "level": target_lvl.get("level", 1),
+                        "price": target_lvl.get("price"),
+                        "close_pct": 1.0
+                    }]
+                    log.info(f"ℹ️ [ADAPTIVE TP] {symbol}: Tổng vị thế (${total_notional:.1f} USDT) < 2x Min Notional (${min_notional_floor * 2:.1f}) -> Tự động gộp thành 1 lệnh TP 100% tại ${target_lvl.get('price')} để sàn chấp nhận.")
+                # Nếu tổng giá trị vị thế chỉ đủ cho 2 lệnh (ví dụ ETH 50 - 99 USD):
+                # Gộp thành 2 mốc TP lớn (50% và 50%) thay vì 4 mốc li ti
+                elif total_notional < min_notional_floor * len(valid_lvls) and len(valid_lvls) > 2:
+                    adjusted_tp_levels = [
+                        {"level": 1, "price": valid_lvls[0].get("price"), "close_pct": 0.50},
+                        {"level": 2, "price": valid_lvls[1].get("price") if len(valid_lvls) > 1 else valid_lvls[0].get("price"), "close_pct": 0.50}
+                    ]
+                    log.info(f"ℹ️ [ADAPTIVE TP] {symbol}: Tổng vị thế (${total_notional:.1f} USDT) -> Tự động tối ưu thành 2 mốc TP (50%/50%) đạt chuẩn Min Notional sàn.")
+                else:
+                    adjusted_tp_levels = valid_lvls
+
+        success_tp_count = 0
+        if adjusted_tp_levels and len(adjusted_tp_levels) > 0:
+            for lvl in adjusted_tp_levels:
                 lvl_price = lvl.get("price", 0)
                 lvl_pct = lvl.get("close_pct", 0)
-                if lvl_price > 0 and lvl_pct > 0:
-                    if cur_price > 0:
-                        if position_side == "LONG" and lvl_price <= cur_price:
-                            log.warning(f"⚠️ [TP LEVEL INVALID] LONG {symbol}: lvl_price ({lvl_price}) <= current_price ({cur_price}) -> Bỏ qua TP lvl")
-                            continue
-                        elif position_side == "SHORT" and lvl_price >= cur_price:
-                            log.warning(f"⚠️ [TP LEVEL INVALID] SHORT {symbol}: lvl_price ({lvl_price}) >= current_price ({cur_price}) -> Bỏ qua TP lvl")
-                            continue
-
-                    tp_qty = float(int((qty * lvl_pct) * 10000) / 10000)
-                    if tp_qty <= 0:
-                        continue
-                    res_tp = self._safe_order({
-                        "symbol": symbol,
-                        "side": opposite_side,
-                        "type": "TAKE_PROFIT_MARKET",
-                        "stopPrice": lvl_price,
-                        "quantity": tp_qty,
-                        "positionSide": position_side,
-                        "workingType": "CONTRACT_PRICE"
-                    })
-                    if res_tp.get("code") == 0:
-                        log.info(f"🎯 Đặt Take Profit {lvl.get('level')} OK: {symbol} tại {lvl_price} (Qty: {tp_qty})")
+                tp_qty = float(int((qty * lvl_pct) * 10000) / 10000)
+                if tp_qty <= 0:
+                    continue
+                res_tp = self._safe_order({
+                    "symbol": symbol,
+                    "side": opposite_side,
+                    "type": "TAKE_PROFIT_MARKET",
+                    "stopPrice": lvl_price,
+                    "quantity": tp_qty,
+                    "positionSide": position_side,
+                    "workingType": "CONTRACT_PRICE"
+                })
+                if res_tp.get("code") == 0:
+                    success_tp_count += 1
+                    log.info(f"🎯 Đặt Take Profit {lvl.get('level')} OK: {symbol} tại {lvl_price} (Qty: {tp_qty})")
+                else:
+                    err_msg = res_tp.get("msg", "Unknown")
+                    if "minimum size" in err_msg.lower():
+                        log.warning(f"⚠️ Đặt Take Profit {lvl.get('level')} ({symbol} Qty {tp_qty}): {err_msg} -> Sẽ fallback bảo vệ vị thế.")
                     else:
-                        log.error(f"❌ Đặt Take Profit {lvl.get('level')} THẤT BẠI: {symbol} - Lỗi: {res_tp.get('msg', 'Unknown')}")
-        elif tp_price > 0:
-            res_tp = self._safe_order({
-                "symbol": symbol,
-                "side": opposite_side,
-                "type": "TAKE_PROFIT_MARKET",
-                "stopPrice": tp_price,
-                "quantity": qty,
-                "positionSide": position_side,
-                "workingType": "CONTRACT_PRICE" 
-            })
-            # Ép bot phải in ra kết quả đặt TP
-            if res_tp.get("code") == 0:
-                log.info(f"🎯 Đặt Take Profit OK: {symbol} tại {tp_price}")
-            else:
-                log.error(f"❌ Đặt Take Profit THẤT BẠI: {symbol} - Lỗi: {res_tp.get('msg', 'Unknown')}")
+                        log.error(f"❌ Đặt Take Profit {lvl.get('level')} THẤT BẠI: {symbol} - Lỗi: {err_msg}")
+
+        # NẾU CHƯA CÓ LỆNH TP NÀO THÀNH CÔNG (hoặc không có tp_levels): Fallback đặt 1 lệnh TP toàn phần
+        if success_tp_count == 0 and (tp_price > 0 or adjusted_tp_levels):
+            fallback_tp_price = tp_price if tp_price > 0 else (adjusted_tp_levels[0].get("price") if adjusted_tp_levels else 0)
+            if fallback_tp_price > 0:
+                res_tp = self._safe_order({
+                    "symbol": symbol,
+                    "side": opposite_side,
+                    "type": "TAKE_PROFIT_MARKET",
+                    "stopPrice": fallback_tp_price,
+                    "quantity": qty,
+                    "positionSide": position_side,
+                    "workingType": "CONTRACT_PRICE" 
+                })
+                if res_tp.get("code") == 0:
+                    log.info(f"🎯 Đặt Take Profit Toàn Phần (Fallback) OK: {symbol} tại {fallback_tp_price} (Qty: {qty})")
+                else:
+                    err_msg = res_tp.get("msg", "Unknown")
+                    if "minimum size" in err_msg.lower():
+                        log.info(f"ℹ️ [DYNAMIC TP RUNNER] {symbol}: Giá trị vị thế (${total_notional:.2f} USDT) nhỏ hơn mức tối thiểu của sàn BingX ({min_notional_floor} USDT). Bot Worker sẽ tự động giám sát và chốt lời linh hoạt trực tiếp (Market Close) khi chạm target!")
+                    else:
+                        log.error(f"❌ Đặt Take Profit THẤT BẠI: {symbol} - Lỗi: {err_msg}")
 
 
     # ════════════════════════════════════════════════════════════════════

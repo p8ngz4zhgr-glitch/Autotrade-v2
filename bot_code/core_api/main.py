@@ -181,6 +181,26 @@ def _update_user_balance_and_tier(user: User, balance: float, db: Session):
     except Exception as e:
         log.warning("Update balance error: %s", e)
 
+def _sanitize_telegram_html(text: str) -> str:
+    """
+    Escape an toàn các ký tự < và > không thuộc thẻ HTML hợp lệ của Telegram
+    (ví dụ: 'P(win) < 35%', 'Conf < 70%') để tránh lỗi HTTP 400 'can't parse entities'.
+    """
+    if not text:
+        return ""
+    import re
+    tag_regex = re.compile(r'(</?(?:b|strong|i|em|u|ins|s|strike|del|span|tg-spoiler|a|code|pre|blockquote)(?:\s+[^<>]*)?>)', re.IGNORECASE)
+    parts = tag_regex.split(text)
+    sanitized = []
+    for i, p in enumerate(parts):
+        if i % 2 == 1:
+            sanitized.append(p)
+        else:
+            p = re.sub(r'&(?!(?:amp|lt|gt|quot|apos);)', '&amp;', p)
+            p = p.replace('<', '&lt;').replace('>', '&gt;')
+            sanitized.append(p)
+    return ''.join(sanitized)
+
 def _tg_send(token: str, chat_id: str, text: str):
     effective_token = (
         token
@@ -195,7 +215,8 @@ def _tg_send(token: str, chat_id: str, text: str):
         return False
     try:
         url = f"https://api.telegram.org/bot{effective_token}/sendMessage"
-        resp = _req.post(url, json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}, timeout=5)
+        safe_html = _sanitize_telegram_html(text)
+        resp = _req.post(url, json={"chat_id": str(chat_id), "text": safe_html, "parse_mode": "HTML"}, timeout=5)
         if resp.status_code != 200:
             log.warning("⚠️ Telegram _tg_send lỗi HTTP %d: %s. Thử lại dạng plain text...", resp.status_code, resp.text)
             import re
@@ -1402,13 +1423,27 @@ def _execute_for_user(user: User, signal: dict):
             meta_db.close()
 
         if not meta["allow"]:
-            log.warning("🧠 [META-VETO] %s %s: %s", sym, direction, meta["reason"])
-            _tg_send(
-                REGISTER_TOKEN, user.telegram_id,
-                f"🧠 <b>META-FILTER HUỶ LỆNH: {sym}</b>\n"
-                f"{direction} bị lọc: {meta['reason']} (dựa trên {meta['n_samples']} lệnh lịch sử)."
-            )
-            return
+            eng_conf = float(signal.get("confidence", 0))
+            bayes_p = float(signal.get("bayes_ev", {}).get("p_win", 0))
+            is_super_trend = (eng_conf >= 85.0 or bayes_p >= 65.0 or bool(signal.get("plan", {}).get("breakout_override")))
+            
+            if is_super_trend:
+                qty = float(round(qty * 0.70, 4))
+                log.info("🧠 [META-PRUDENT ENTRY] %s %s: Meta-model thận trọng (%s) nhưng Engine Siêu Mạnh (Conf %.1f%%, Bayes %.1f%%) -> Giảm 30% Vol (Qty: %.4f) vào lệnh đón trend an toàn.",
+                         sym, direction, meta["reason"], eng_conf, bayes_p, qty)
+                _tg_send(
+                    REGISTER_TOKEN, user.telegram_id,
+                    f"🧠 <b>META-FILTER CẢNH BÁO: {sym}</b>\n"
+                    f"Meta-model cảnh báo ({meta['reason']}), nhưng Engine Định Lượng Siêu Mạnh ({eng_conf:.1f}%) -> Tự động giảm 30% khối lượng để vào lệnh đón sóng an toàn!"
+                )
+            else:
+                log.warning("🧠 [META-VETO] %s %s: %s", sym, direction, meta["reason"])
+                _tg_send(
+                    REGISTER_TOKEN, user.telegram_id,
+                    f"🧠 <b>META-FILTER HUỶ LỆNH: {sym}</b>\n"
+                    f"{direction} bị lọc: {meta['reason']} (dựa trên {meta['n_samples']} lệnh lịch sử)."
+                )
+                return
 
         bx   = get_bx(user)
         side = "BUY" if direction == "LONG" else "SELL"

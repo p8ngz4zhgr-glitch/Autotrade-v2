@@ -994,10 +994,10 @@ class SignalEngine:
 
                 # Nguyên tắc vàng Elder: Tuyệt đối KHÔNG bơi ngược dòng thủy triều lớn H1
                 if final == "LONG" and elder_res.get("allowed_direction") == "SELL_ONLY":
-                    log.warning("⛔ [ELDER TRIPLE SCREEN] H1 DOWNTREND (Thủy triều rút) -> Chặn lệnh LONG trên M5 để tránh dính SL!", symbol)
+                    log.warning("⛔ [ELDER TRIPLE SCREEN] %s: H1 DOWNTREND (Thủy triều rút) -> Chặn lệnh LONG trên M5 để tránh dính SL!", symbol)
                     final = "WAIT"
                 elif final == "SHORT" and elder_res.get("allowed_direction") == "BUY_ONLY":
-                    log.warning("⛔ [ELDER TRIPLE SCREEN] H1 UPTREND (Thủy triều dâng) -> Chặn lệnh SHORT trên M5 để tránh dính SL!", symbol)
+                    log.warning("⛔ [ELDER TRIPLE SCREEN] %s: H1 UPTREND (Thủy triều dâng) -> Chặn lệnh SHORT trên M5 để tránh dính SL!", symbol)
                     final = "WAIT"
                 elif elder_res.get("m5_trigger"):
                     conf = min(99.0, conf + elder_res.get("score_boost", 15))
@@ -1023,7 +1023,7 @@ class SignalEngine:
                     m5_highs, m5_lows, m5_closes, [2.0, 1.8, 1.5, 1.2, 1.0]
                 )
                 if minervini_res.get("status") == "HIGH_VOLATILITY_CHOP" and final in ("LONG", "SHORT") and combined < 70:
-                    log.warning("⛔ [MINERVINI VCP] Thị trường đang bão hòa râu nến (Chop rác) -> Hạ về WAIT tránh quét SL!", symbol)
+                    log.warning("⛔ [MINERVINI VCP] %s: Thị trường đang bão hòa râu nến (Chop rác) -> Hạ về WAIT tránh quét SL!", symbol)
                     final = "WAIT"
 
                 # 4. Larry Williams: Scale-Out 60/40 & ATR Trailing Stop
