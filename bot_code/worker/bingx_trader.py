@@ -1003,15 +1003,28 @@ class BingXExchange:
                     except: pass
                 return {"action": "CLOSE", "type": f"CHỐT LỜI ĐỘNG (WAIT >= ${wait_dynamic_tp:.2f} USD)", "roe": roe}
         
-        # 3. DẤU HIỆU ĐẢO CHIỀU SO VỚI LỆNH -> XỬ LÝ DỜI BREAKEVEN CẢ 2 CHIỀU (LONG & SHORT)
+        # 3. DẤU HIỆU ĐẢO CHIỀU SO VỚI LỆNH -> XỬ LÝ THEO 2 CẤP ĐỘ:
+        # 1. NẾU LỆNH ĐANG LÃI TỪ 1.0 - 1.5 USD TRỞ LÊN GẶP ĐẢO CHIỀU -> CHỐT TOÀN BỘ ĐỂ KHÓA LỢI NHUẬN
+        # 2. NẾU LÃI NHỎ (< 1.0 USD) -> DỜI SL VỀ BREAKEVEN (HÒA VỐN) CẢ 2 CHIỀU ĐỂ BẢO VỆ VỐN
         elif (direction == "LONG" and new_signal == "SHORT") or \
              (direction == "SHORT" and new_signal == "LONG"):
+            if net_pnl_usd >= 1.00:
+                log.info(f"💰 [CHỐT LỜI ĐẢO CHIỀU] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} (>= 1.0 - 1.5 USD) gặp dấu hiệu đảo chiều {new_signal} -> Chốt toàn bộ để giữ trọn lợi nhuận!")
+                self.close_position(symbol, current_qty, direction)
+                self.cancel_all_orders(symbol)
+                if redis_client:
+                    try:
+                        redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                        redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
+                    except: pass
+                return {"action": "CLOSE", "type": f"CHỐT LỜI ĐẢO CHIỀU (+${net_pnl_usd:.2f} USD)", "roe": roe}
+
             be_price = self.breakeven_price(direction, entry_price)
             can_set_be = (direction == "LONG" and current_price > be_price) or \
                          (direction == "SHORT" and current_price < be_price)
 
             if can_set_be:
-                log.info(f"🛡️ [REVERSAL BREAKEVEN] {symbol} {direction}: Có dấu hiệu đảo chiều sang {new_signal}! "
+                log.info(f"🛡️ [REVERSAL BREAKEVEN] {symbol} {direction}: Có dấu hiệu đảo chiều sang {new_signal} (lãi nhỏ < 1.0 USD)! "
                          f"Tự động dời SL về HÒA VỐN (${be_price:.4f}) để bảo vệ vị thế 100% không mất tiền.")
                 self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, be_price, raw_tp_levels, current_price)
                 return {

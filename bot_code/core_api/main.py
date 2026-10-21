@@ -846,37 +846,47 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
             if action == "KEEP":
                 # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG CÓ DẤU HIỆU ĐẢO CHIỀU SO VỚI LỆNH (REVERSAL CHECK)
-                # XỬ LÝ THEO CÁCH CŨ: DỜI BREAKEVEN CẢ 2 CHIỀU (LONG & SHORT) ĐỂ BẢO VỆ VỐN TUYỆT ĐỐI
+                # 1. NẾU LỆNH ĐANG LÃI TỪ 1.0 - 1.5 USD TRỞ LÊN GẶP ĐẢO CHIỀU -> CHỐT TOÀN BỘ ĐỂ KHÓA LỢI NHUẬN
+                # 2. NẾU LÃI NHỎ (< 1.0 USD) -> DỜI SL VỀ BREAKEVEN (HÒA VỐN) CẢ 2 CHIỀU ĐỂ BẢO VỆ VỐN
                 if is_reversal:
-                    be_p = bx.breakeven_price(direction, entry)
-                    can_set_be = (direction == "LONG" and current_price > be_p) or \
-                                 (direction == "SHORT" and current_price < be_p)
-
-                    if can_set_be and not is_breakeven:
-                        action = "BREAKEVEN"
-                        action_type = "DỜI BREAKEVEN BẢO VỆ (DẤU HIỆU ĐẢO CHIỀU)"
-                        emoji = "🛡️"
-                        reason = f"Phát hiện dấu hiệu đảo chiều sang {new_direction} (Conf: {conf}%). Tự động dời SL về HÒA VỐN (${be_p:.4f}) cho vị thế {direction} để bảo toàn vốn 100%!"
-                        bx.update_sl_and_keep_remaining_tps(sym, direction, qty, be_p, tp_levels_raw, current_price)
-                        if cache:
-                            try: cache.setex(be_key, 86400, "1")
-                            except: pass
-                        _tg_send(
-                            REGISTER_TOKEN, user.telegram_id,
-                            f"🛡️ <b>DỜI BREAKEVEN CẢ 2 CHIỀU: {sym} ({direction})</b>\n\n"
-                            f"⚠️ <b>Dấu hiệu đảo chiều:</b> Phát hiện tín hiệu ngược chiều sang {new_direction} (Độ tin cậy: {conf:.1f}%)\n"
-                            f"🔒 <b>Hành động:</b> Đã tự động dời Stop Loss về <b>HÒA VỐN</b> (<code>${be_p:.4f}</code>)!\n"
-                            f"💡 <i>Vị thế được bảo vệ an toàn 100%. Nếu thị trường quay xe thật sẽ chạm Breakeven thoát hòa vốn (không lỗ). Nếu nến rút chân thì vẫn tiếp tục gồng lãi!</i>"
-                        )
-                        log.info(f"🛡️ [REVERSAL BREAKEVEN] {user.telegram_id} {sym} ({direction}): Dời SL về Breakeven ${be_p:.4f} do có dấu hiệu đảo chiều sang {new_direction} (Conf {conf}%)")
-                        action = "HOLD"
-                    elif is_reversal and conf >= 85 and pnl_pct <= -20.0:
+                    if net_pnl_usd >= 1.00:
                         action = "CLOSE_ALL"
-                        should_reverse = True
-                        action_type = "CẮT LỖ ĐẢO CHIỀU MẠNH"
-                        phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
-                        emoji = "🚨"
-                        reason = f"Phát hiện xu hướng ĐẢO CHIỀU CỰC MẠNH sang {new_direction} (Conf: {conf}%) khi PnL âm sâu ({pnl_pct:.2f}%) -> Đóng lệnh chuyển hướng."
+                        should_reverse = False  # Chốt lời bảo toàn vốn bỏ túi trước, không vội nhảy ngược chiều
+                        action_type = "CHỐT LỜI ĐẢO CHIỀU (BẢO TOÀN LỢI NHUẬN)"
+                        emoji = "💰"
+                        phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
+                        reason = f"Lệnh đang lãi ròng +${net_pnl_usd:.2f} USD (>= $1.00 - $1.50) gặp dấu hiệu đảo chiều sang {new_direction} (Conf: {conf}%) trong {phase_str} -> Chốt toàn bộ lệnh để giữ trọn lợi nhuận, không để tụt về hòa vốn!"
+
+                    else:
+                        be_p = bx.breakeven_price(direction, entry)
+                        can_set_be = (direction == "LONG" and current_price > be_p) or \
+                                     (direction == "SHORT" and current_price < be_p)
+
+                        if can_set_be and not is_breakeven:
+                            action = "BREAKEVEN"
+                            action_type = "DỜI BREAKEVEN BẢO VỆ (DẤU HIỆU ĐẢO CHIỀU)"
+                            emoji = "🛡️"
+                            reason = f"Phát hiện dấu hiệu đảo chiều sang {new_direction} (Conf: {conf}%). Tự động dời SL về HÒA VỐN (${be_p:.4f}) cho vị thế {direction} để bảo toàn vốn 100%!"
+                            bx.update_sl_and_keep_remaining_tps(sym, direction, qty, be_p, tp_levels_raw, current_price)
+                            if cache:
+                                try: cache.setex(be_key, 86400, "1")
+                                except: pass
+                            _tg_send(
+                                REGISTER_TOKEN, user.telegram_id,
+                                f"🛡️ <b>DỜI BREAKEVEN CẢ 2 CHIỀU: {sym} ({direction})</b>\n\n"
+                                f"⚠️ <b>Dấu hiệu đảo chiều:</b> Phát hiện tín hiệu ngược chiều sang {new_direction} (Độ tin cậy: {conf:.1f}%)\n"
+                                f"🔒 <b>Hành động:</b> Đã tự động dời Stop Loss về <b>HÒA VỐN</b> (<code>${be_p:.4f}</code>)!\n"
+                                f"💡 <i>Vị thế được bảo vệ an toàn 100%. Nếu thị trường quay xe thật sẽ chạm Breakeven thoát hòa vốn (không lỗ). Nếu nến rút chân thì vẫn tiếp tục gồng lãi!</i>"
+                            )
+                            log.info(f"🛡️ [REVERSAL BREAKEVEN] {user.telegram_id} {sym} ({direction}): Dời SL về Breakeven ${be_p:.4f} do có dấu hiệu đảo chiều sang {new_direction} (Conf {conf}%)")
+                            action = "HOLD"
+                        elif is_reversal and conf >= 85 and pnl_pct <= -20.0:
+                            action = "CLOSE_ALL"
+                            should_reverse = True
+                            action_type = "CẮT LỖ ĐẢO CHIỀU MẠNH"
+                            phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
+                            emoji = "🚨"
+                            reason = f"Phát hiện xu hướng ĐẢO CHIỀU CỰC MẠNH sang {new_direction} (Conf: {conf}%) khi PnL âm sâu ({pnl_pct:.2f}%) -> Đóng lệnh chuyển hướng."
 
                 # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT HOẶC MẤT ĐỘNG LƯỢNG NGẮN HẠN
                 # Giữ nguyên vị thế khi tín hiệu báo WAIT hoặc nhiễu nến nhỏ, để lệnh tự do vận động đến TP hoặc SL chuẩn
