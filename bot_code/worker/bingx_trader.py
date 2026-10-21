@@ -973,11 +973,14 @@ class BingXExchange:
                 except: pass
             return {"action": "CLOSE", "type": "CẮT LỖ BẢO VỆ TÀI KHOẢN (ROE <= -35.0%)", "roe": roe}
 
-        # 2.5. CHỐT LỜI ĐỘNG (DYNAMIC TAKE PROFIT 1.0 - 1.5 USD)
-        # Nâng cấp ngưỡng chốt lời động lên 1.0 - 1.5 USD (loại bỏ hoàn toàn mức chốt non 0.2 - 0.5 USD)
-        # Khi lãi ròng đạt ngưỡng tối đa 1.50 USD -> Khóa lợi nhuận ngay lập tức
-        if net_pnl_usd >= 1.50:
-            log.info(f"💰 [CHỐT LỜI ĐỘNG 1.5 USD] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} >= 1.50 USD (ROE: {roe:.2f}%) -> Khóa lợi nhuận an toàn!")
+        # 2.5. CHỐT LỜI ĐỘNG (DYNAMIC TAKE PROFIT THEO QUY MÔ VỊ THẾ)
+        # Ngưỡng chốt lời động co giãn theo giá trị danh nghĩa vị thế (notional_usd)
+        # Tối thiểu $2.50 USD hoặc 2.5% Notional để tài khoản lớn gồng lãi xứng đáng, không bị chốt non vài chục cent!
+        target_dynamic_tp = max(2.50, notional_usd * 0.025)
+        wait_dynamic_tp = max(1.50, notional_usd * 0.015)
+
+        if net_pnl_usd >= target_dynamic_tp:
+            log.info(f"💰 [CHỐT LỜI ĐỘNG] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} >= ${target_dynamic_tp:.2f} USD (ROE: {roe:.2f}%) -> Khóa lợi nhuận an toàn!")
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
             if redis_client:
@@ -985,13 +988,12 @@ class BingXExchange:
                     redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
                     redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
                 except: pass
-            return {"action": "CLOSE", "type": "CHỐT LỜI ĐỘNG (1.0 - 1.5 USD)", "roe": roe}
+            return {"action": "CLOSE", "type": f"CHỐT LỜI ĐỘNG (>= ${target_dynamic_tp:.2f} USD)", "roe": roe}
 
         new_signal = analysis_result.get("final", "WAIT")
         if new_signal == "WAIT":
-            # Khi AI chuyển sang WAIT, chỉ chốt lời động khi lãi ròng đạt từ 1.00 USD trở lên (không chốt 0.2 - 0.5 USD)
-            if net_pnl_usd >= 1.00:
-                log.info(f"💰 [CHỐT LỜI ĐỘNG WAIT] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} >= 1.00 USD (ROE: {roe:.2f}%) khi AI chuyển WAIT -> Chốt lời động an toàn!")
+            if net_pnl_usd >= wait_dynamic_tp:
+                log.info(f"💰 [CHỐT LỜI ĐỘNG WAIT] {symbol} {direction}: Lãi ròng +${net_pnl_usd:.2f} >= ${wait_dynamic_tp:.2f} USD (ROE: {roe:.2f}%) khi AI chuyển WAIT -> Chốt lời an toàn!")
                 self.close_position(symbol, current_qty, direction)
                 self.cancel_all_orders(symbol)
                 if redis_client:
@@ -999,20 +1001,37 @@ class BingXExchange:
                         redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
                         redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
                     except: pass
-                return {"action": "CLOSE", "type": "CHỐT LỜI ĐỘNG (WAIT >= 1.0 USD)", "roe": roe}
+                return {"action": "CLOSE", "type": f"CHỐT LỜI ĐỘNG (WAIT >= ${wait_dynamic_tp:.2f} USD)", "roe": roe}
         
-        # 3. ĐẢO CHIỀU HOÀN TOÀN
+        # 3. DẤU HIỆU ĐẢO CHIỀU SO VỚI LỆNH -> XỬ LÝ DỜI BREAKEVEN CẢ 2 CHIỀU (LONG & SHORT)
         elif (direction == "LONG" and new_signal == "SHORT") or \
              (direction == "SHORT" and new_signal == "LONG"):
-            log.warning(f"🚨 Tín hiệu đảo ngược ({direction} -> {new_signal}). Đóng lệnh {direction} cũ!")
-            self.close_position(symbol, current_qty, direction)
-            self.cancel_all_orders(symbol)
-            if redis_client:
-                try: 
-                    redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
-                    redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
-                except: pass
-            return {"action": "CLOSE", "type": "ĐẢO CHIỀU", "roe": roe}
+            be_price = self.breakeven_price(direction, entry_price)
+            can_set_be = (direction == "LONG" and current_price > be_price) or \
+                         (direction == "SHORT" and current_price < be_price)
+
+            if can_set_be:
+                log.info(f"🛡️ [REVERSAL BREAKEVEN] {symbol} {direction}: Có dấu hiệu đảo chiều sang {new_signal}! "
+                         f"Tự động dời SL về HÒA VỐN (${be_price:.4f}) để bảo vệ vị thế 100% không mất tiền.")
+                self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, be_price, raw_tp_levels, current_price)
+                return {
+                    "action": "BREAKEVEN",
+                    "level": 1,
+                    "new_sl": be_price,
+                    "msg": f"Có dấu hiệu đảo chiều ({direction} -> {new_signal}). Đã dời SL về Hòa Vốn (${be_price:.4f}) bảo vệ vốn!"
+                }
+            else:
+                # Nếu vị thế đang âm sâu vượt ngưỡng bảo vệ (ROE <= -25.0%) và đảo chiều rõ: mới đóng lệnh
+                if roe <= -25.0:
+                    log.warning(f"🚨 [REVERSAL CLOSE] {symbol} {direction}: Tín hiệu đảo chiều {new_signal} khi ROE {roe:.2f}% <= -25.0% -> Đóng lệnh thoát rủi ro.")
+                    self.close_position(symbol, current_qty, direction)
+                    self.cancel_all_orders(symbol)
+                    if redis_client:
+                        try: 
+                            redis_client.delete(f"PEAK_PRICE_{symbol}_{direction}")
+                            redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
+                        except: pass
+                    return {"action": "CLOSE", "type": "CẮT LỖ ĐẢO CHIỀU", "roe": roe}
 
         return {"action": "HOLD", "msg": "Đang duy trì lệnh."}
 

@@ -758,7 +758,17 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # Nâng ngưỡng Virtual SL tối đa lên -35.0% ROE (đủ không gian gồng nhiễu nến 2.5% - 3.5% spot ở đòn bẩy 10x-20x)
         # Loại bỏ triệt để việc cắt lỗ nhảm khi PnL vừa mới âm nhẹ -2% đến -5% ROE do râu nến nhiễu.
         DYNAMIC_SL_LIMIT = -35.0   
-        DYNAMIC_TP_LIMIT = 8.0    
+        DYNAMIC_TP_LIMIT = 20.0    
+
+        user_cap = float(getattr(user, "capital", 50.0) or 50.0)
+        user_risk_pct = float(getattr(user, "max_risk_pct", 1.5) or 1.5)
+        user_risk_usd = user_cap * (user_risk_pct / 100.0)
+        
+        # Ngưỡng chốt lời động co giãn theo số vốn và quy mô rủi ro lệnh của User:
+        # Tối thiểu $2.50 USD hoặc 1.5R (user_risk_usd * 1.5)
+        # Giúp tài khoản lớn gồng lãi đúng kỳ vọng ($5 - $30+), không bị chốt non vài chục cent!
+        target_dynamic_tp_usd = max(2.50, user_risk_usd * 1.5)
+        sideway_dynamic_tp_usd = max(1.50, user_risk_usd * 1.0)
 
         # 🚨 [TẦNG ƯU TIÊN 0]: PHẢN XẠ TỦY SỐNG (CHỐT LỜI CỨNG)
         # Luôn chạy đầu tiên: Đã chạm TP là chốt ngay, ghi đè toàn bộ tín hiệu AI/HMM!
@@ -835,14 +845,38 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     reason = f"Smart Money đảo chiều chống lại vị thế khi PnL âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ sớm."
 
             if action == "KEEP":
-                # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG ĐẢO CHIỀU MẠNH (REVERSAL CHECK KHUNG LỚN)
-                if is_reversal and conf >= 70:
-                    action = "CLOSE_ALL"
-                    should_reverse = True
-                    action_type = "CHỐT LỜI SỚM (ĐẢO CHIỀU)" if in_profit else "CẮT LỖ ĐẢO CHIỀU"
-                    phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
-                    emoji = "🚨"
-                    reason = f"Phát hiện xu hướng ĐẢO CHIỀU MẠNH sang {new_direction} (Conf: {conf}%) -> Đóng lệnh chuyển hướng."
+                # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG CÓ DẤU HIỆU ĐẢO CHIỀU SO VỚI LỆNH (REVERSAL CHECK)
+                # XỬ LÝ THEO CÁCH CŨ: DỜI BREAKEVEN CẢ 2 CHIỀU (LONG & SHORT) ĐỂ BẢO VỆ VỐN TUYỆT ĐỐI
+                if is_reversal:
+                    be_p = bx.breakeven_price(direction, entry)
+                    can_set_be = (direction == "LONG" and current_price > be_p) or \
+                                 (direction == "SHORT" and current_price < be_p)
+
+                    if can_set_be and not is_breakeven:
+                        action = "BREAKEVEN"
+                        action_type = "DỜI BREAKEVEN BẢO VỆ (DẤU HIỆU ĐẢO CHIỀU)"
+                        emoji = "🛡️"
+                        reason = f"Phát hiện dấu hiệu đảo chiều sang {new_direction} (Conf: {conf}%). Tự động dời SL về HÒA VỐN (${be_p:.4f}) cho vị thế {direction} để bảo toàn vốn 100%!"
+                        bx.update_sl_and_keep_remaining_tps(sym, direction, qty, be_p, tp_levels_raw, current_price)
+                        if cache:
+                            try: cache.setex(be_key, 86400, "1")
+                            except: pass
+                        _tg_send(
+                            REGISTER_TOKEN, user.telegram_id,
+                            f"🛡️ <b>DỜI BREAKEVEN CẢ 2 CHIỀU: {sym} ({direction})</b>\n\n"
+                            f"⚠️ <b>Dấu hiệu đảo chiều:</b> Phát hiện tín hiệu ngược chiều sang {new_direction} (Độ tin cậy: {conf:.1f}%)\n"
+                            f"🔒 <b>Hành động:</b> Đã tự động dời Stop Loss về <b>HÒA VỐN</b> (<code>${be_p:.4f}</code>)!\n"
+                            f"💡 <i>Vị thế được bảo vệ an toàn 100%. Nếu thị trường quay xe thật sẽ chạm Breakeven thoát hòa vốn (không lỗ). Nếu nến rút chân thì vẫn tiếp tục gồng lãi!</i>"
+                        )
+                        log.info(f"🛡️ [REVERSAL BREAKEVEN] {user.telegram_id} {sym} ({direction}): Dời SL về Breakeven ${be_p:.4f} do có dấu hiệu đảo chiều sang {new_direction} (Conf {conf}%)")
+                        action = "HOLD"
+                    elif is_reversal and conf >= 85 and pnl_pct <= -20.0:
+                        action = "CLOSE_ALL"
+                        should_reverse = True
+                        action_type = "CẮT LỖ ĐẢO CHIỀU MẠNH"
+                        phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
+                        emoji = "🚨"
+                        reason = f"Phát hiện xu hướng ĐẢO CHIỀU CỰC MẠNH sang {new_direction} (Conf: {conf}%) khi PnL âm sâu ({pnl_pct:.2f}%) -> Đóng lệnh chuyển hướng."
 
                 # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT HOẶC MẤT ĐỘNG LƯỢNG NGẮN HẠN
                 # Giữ nguyên vị thế khi tín hiệu báo WAIT hoặc nhiễu nến nhỏ, để lệnh tự do vận động đến TP hoặc SL chuẩn
@@ -850,19 +884,19 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     is_market_sideways = (hmm_regime == "SIDEWAYS")
                     current_tp_limit = DYNAMIC_TP_LIMIT if not is_scaled_out else (DYNAMIC_TP_LIMIT * 1.5)
                     
-                    # [CHỐT LỜI ĐỘNG]: Mục tiêu 1.0 - 1.5 USD (thay vì 0.2 - 0.5 USD cũ)
-                    if net_pnl_usd >= 1.50:
+                    # [CHỐT LỜI ĐỘNG]: Co giãn linh động theo số vốn (tối thiểu 1.5R / $2.50 USD)
+                    if net_pnl_usd >= target_dynamic_tp_usd:
                         action = "CLOSE_ALL"
-                        action_type = "CHỐT LỜI ĐỘNG (1.0 - 1.5 USD)"
+                        action_type = f"CHỐT LỜI ĐỘNG (>= ${target_dynamic_tp_usd:.2f} USD)"
                         emoji = "💰"
                         phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
-                        reason = f"Đạt mục tiêu chốt lời động tối đa (+${net_pnl_usd:.2f} >= 1.50 USD, ROE: {pnl_pct:+.2f}%) trong {phase_str} -> Khóa lợi nhuận an toàn."
-                    elif is_market_sideways and (net_pnl_usd >= 1.00 or pnl_pct >= current_tp_limit):
+                        reason = f"Đạt mục tiêu chốt lời động (+${net_pnl_usd:.2f} >= ${target_dynamic_tp_usd:.2f} USD, ROE: {pnl_pct:+.2f}%) trong {phase_str} -> Khóa lợi nhuận an toàn."
+                    elif is_market_sideways and (net_pnl_usd >= sideway_dynamic_tp_usd or pnl_pct >= current_tp_limit):
                         action = "CLOSE_ALL"
-                        action_type = "CHỐT LỜI ĐỘNG (SIDEWAYS >= 1.0 USD)"
+                        action_type = f"CHỐT LỜI ĐỘNG SIDEWAYS (>= ${sideway_dynamic_tp_usd:.2f} USD)"
                         emoji = "✅"
                         phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
-                        reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận +${net_pnl_usd:.2f} (>= 1.0 USD, ROE: {pnl_pct:.2f}%) -> Đóng lệnh an toàn."
+                        reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận +${net_pnl_usd:.2f} (>= ${sideway_dynamic_tp_usd:.2f} USD, ROE: {pnl_pct:.2f}%) -> Đóng lệnh an toàn."
                     else:
                         action = "HOLD"
                         log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}%% (+${net_pnl_usd:.2f} USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.")
