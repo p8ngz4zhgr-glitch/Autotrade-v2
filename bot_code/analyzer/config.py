@@ -36,6 +36,8 @@ class Config:
         self.DAILY_MAX_LOSS_USD       = float(os.getenv("DAILY_MAX_LOSS_USD", "15.0"))
         self.MAX_RISK_PER_TRADE_PCT   = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.0"))
         self.MAX_SAFE_LEVERAGE        = int(os.getenv("MAX_SAFE_LEVERAGE", "15"))
+        self.MIN_SAFE_LEVERAGE        = int(os.getenv("MIN_SAFE_LEVERAGE", "5"))
+        self.DYNAMIC_LEVERAGE_ENABLED = os.getenv("DYNAMIC_LEVERAGE_ENABLED", "true").lower() == "true"
         self.CONSECUTIVE_LOSS_LIMIT   = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
         self.AUTO_BREAKEVEN_ON_TP1    = os.getenv("AUTO_BREAKEVEN_ON_TP1", "true").lower() == "true"
 

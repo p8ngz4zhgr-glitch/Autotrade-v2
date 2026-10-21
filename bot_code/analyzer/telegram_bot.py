@@ -348,6 +348,7 @@ class TelegramBot:
             "📌 <b>KẾ HOẠCH LỆNH</b>",
             "  ├ Vào lệnh  : <code>$" + str(plan["entry"]) + "</code>",
             "  ├ 🛑 Cắt lỗ: <code>$" + str(plan["sl"]) + "</code> (-" + str(data.get("sl_pct","1.5")) + "%)",
+            f"  ├ ⚡ Đòn bẩy : <b>{data.get('dynamic_leverage', plan.get('recommended_leverage', 10))}x</b> ({data.get('leverage_note', 'Linh động 5x-15x')})",
         ])
         if "tp_levels" in plan:
             for lvl in plan["tp_levels"]:

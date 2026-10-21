@@ -120,13 +120,17 @@ class ScalpM5RiskManager:
         sl_price: float,
         direction: str,
         user_leverage: int = 10,
-        risk_pct_override: float = None
+        risk_pct_override: float = None,
+        market_regime: str = "NORMAL",
+        is_trend_aligned: bool = False,
+        adx_val: float = 0.0
     ) -> dict:
         """
         Tính toán quy mô lệnh Scalping M5 chuẩn mực:
         - Tính chính xác số USD chịu rủi ro (Risk USD)
         - Tính khoảng cách SL %
-        - Tính toán đòn bẩy an toàn (Safe Leverage) để khoảng cách cháy xa gấp bội khoảng cách SL
+        - Tính toán đòn bẩy linh động (Dynamic Leverage 5x - 15x: Trend nâng 10x-15x, Sideway giữ 5x)
+        - Bảo vệ chống cháy (Anti-Liquidation Shield: Liq cách SL >= 3x)
         - Tính ký quỹ (Margin USD) đảm bảo không quá 30% vốn
         - Tính các mốc TP1 (1.5R) và TP2 (2.5R)
         - Tính số lệnh thắng cần thiết để đạt $20 - $50
@@ -166,13 +170,23 @@ class ScalpM5RiskManager:
         notional_usd = risk_amount_usd / sl_pct
         contract_qty = notional_usd / entry_price
 
-        # 4. THIẾT KẾ ĐÒN BẨY VÀ BẢO VỆ CHỐNG CHÁY (Anti-Liquidation Shield)
-        # Để đảm bảo KHÔNG BAO GIỜ CHÁY:
-        # Ngưỡng thanh lý phải cách xa điểm vào lệnh gấp ít nhất 3 lần khoảng cách Stoploss
-        # Ví dụ SL = 0.5%, Liq Distance phải >= 1.5% => Leverage tối đa <= 0.9 / 0.015 = 60x.
-        # Ở đây ta khống chế trần an toàn cực đại:
-        safe_max_lev = min(self.max_leverage, user_leverage, max(2, int(0.60 / sl_pct)))
-        actual_leverage = max(2, safe_max_lev)
+        # 4. THIẾT KẾ ĐÒN BẨY LINH ĐỘNG (5x - 15x) VÀ BẢO VỆ CHỐNG CHÁY (Anti-Liquidation Shield)
+        # - Sideway / Counter-Trend: giữ đòn bẩy an toàn 5x để phòng thủ
+        # - Trend Following: nâng đòn bẩy linh động 10x - 15x
+        if market_regime in ("SIDEWAYS", "SIDEWAY_RANGE", "COUNTER_TREND"):
+            target_lev = 5
+        elif is_trend_aligned or market_regime == "TREND_FOLLOWING":
+            if adx_val >= 35.0:
+                target_lev = 15
+            elif adx_val >= 25.0:
+                target_lev = 12
+            else:
+                target_lev = 10
+        else:
+            target_lev = 5
+
+        safe_max_lev = min(self.max_leverage, target_lev, max(5, int(round(0.60 / sl_pct))))
+        actual_leverage = max(5, min(15, safe_max_lev))
 
         # Ký quỹ yêu cầu
         required_margin = notional_usd / actual_leverage

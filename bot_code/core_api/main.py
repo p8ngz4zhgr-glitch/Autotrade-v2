@@ -476,6 +476,110 @@ def _register_telegram_webhook():
         log.warning("⚠️ Error registering Telegram Webhook: %s", e)
 
 
+def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 5, sl_pct: float = 0.02) -> tuple[int, str, dict]:
+    """
+    TÍNH TOÁN ĐÒN BẨY LINH ĐỘNG (DYNAMIC LEVERAGE 5x - 15x):
+    - Khi thị trường SIDEWAYS hoặc dao động biên hẹp: giữ đòn bẩy cơ bản / thấp (5x) để phòng thủ an toàn.
+    - Khi lệnh THEO TREND (Trend Following, MTF 4H&1H đồng thuận, HMM rõ xu hướng, ADX cao):
+        + Trend khởi phát / Trend thường: 8x - 10x
+        + Trend mạnh (ADX >= 25, HMM Uptrend/Downtrend đồng thuận, Confidence >= 76%): 12x
+        + Super Trend / Breakout bứt phá (ADX >= 35, Breakout xác nhận, Bayes P_win >= 60% hoặc Conf >= 85%): 15x
+    - CHỐT CHẶN AN TOÀN CHỐNG CHÁY (Anti-Liquidation Shield):
+        + Đảm bảo khoảng cách giá thanh lý luôn xa gấp ít nhất 2.5x - 3x khoảng cách SL:
+          max_safe_by_sl = max(5, int(0.60 / sl_pct))
+        + Giới hạn cứng trong khoảng [5, 15].
+    """
+    direction = signal.get("direction") or signal.get("final") or "WAIT"
+    trade_regime = signal.get("trade_regime", "NORMAL")
+    hmm = signal.get("hmm", {})
+    hmm_regime = hmm.get("regime", "UNKNOWN") if isinstance(hmm, dict) else str(hmm)
+    
+    adx_1h = signal.get("adx_1h", {})
+    adx_4h = signal.get("adx_4h", {})
+    adx_1h_val = float(adx_1h.get("adx", 0)) if isinstance(adx_1h, dict) else 0.0
+    adx_4h_val = float(adx_4h.get("adx", 0)) if isinstance(adx_4h, dict) else 0.0
+    adx_val = max(adx_1h_val, adx_4h_val)
+
+    conf = float(signal.get("confidence", 70.0))
+    bayes_p = float(signal.get("bayes_ev", {}).get("p_win", 50.0)) if isinstance(signal.get("bayes_ev"), dict) else 50.0
+    is_breakout = bool(
+        (isinstance(signal.get("breakout"), dict) and signal.get("breakout", {}).get("type", "NONE") != "NONE") or
+        (isinstance(signal.get("plan"), dict) and signal.get("plan", {}).get("breakout_override"))
+    )
+
+    # Nhận diện trạng thái Sideway / Đi ngang
+    is_sideway = (
+        trade_regime == "SIDEWAY_RANGE" or
+        hmm_regime in ("SIDEWAYS", "NEUTRAL") or
+        (adx_val > 0 and adx_val < 20.0 and not is_breakout)
+    )
+    is_counter_trend = (trade_regime == "COUNTER_TREND")
+
+    # Nhận diện thuận xu hướng
+    is_trend_following = (
+        trade_regime == "TREND_FOLLOWING" or
+        (direction == "LONG" and hmm_regime in ("UPTREND", "BULLISH")) or
+        (direction == "SHORT" and hmm_regime in ("DOWNTREND", "BEARISH")) or
+        is_breakout
+    )
+
+    if is_sideway:
+        target_lev = 5
+        mode = "SIDEWAY"
+        reason = "Sideway/Đi ngang (Giữ đòn bẩy an toàn 5x để phòng thủ)"
+    elif is_counter_trend:
+        target_lev = 5
+        mode = "COUNTER_TREND"
+        reason = "Sóng hồi ngược trend (Giữ đòn bẩy 5x kiểm soát rủi ro)"
+    elif is_trend_following:
+        if is_breakout or adx_val >= 35.0 or (conf >= 85.0 and bayes_p >= 60.0):
+            target_lev = 15
+            mode = "SUPER_TREND"
+            reason = f"Super Trend Breakout (ADX: {adx_val:.1f}, Conf: {conf:.1f}%) -> Nâng tối đa 15x bắt trọn sóng lớn"
+        elif adx_val >= 25.0 or conf >= 76.0 or bayes_p >= 58.0:
+            target_lev = 12
+            mode = "STRONG_TREND"
+            reason = f"Xu hướng rõ nét (ADX: {adx_val:.1f}, HMM: {hmm_regime}) -> Nâng đòn bẩy lên 12x gia tăng lợi nhuận"
+        else:
+            target_lev = 10
+            mode = "TREND_FOLLOWING"
+            reason = f"Thuận xu hướng đa khung MTF -> Nâng đòn bẩy lên 10x"
+    else:
+        if conf >= 80.0 and adx_val >= 22.0:
+            target_lev = 8
+            mode = "MODERATE_TREND"
+            reason = f"Tín hiệu xác suất cao (Conf: {conf:.1f}%) -> Nâng nhẹ đòn bẩy lên 8x"
+        else:
+            target_lev = 5
+            mode = "BASE"
+            reason = "Thị trường trung tính (Giữ đòn bẩy cơ bản 5x)"
+
+    # Lớp bảo vệ chống thanh lý (Anti-Liquidation Shield)
+    shield_applied = False
+    if sl_pct and sl_pct > 0.001:
+        max_safe_by_sl = max(5, int(round(0.60 / sl_pct)))
+        if target_lev > max_safe_by_sl:
+            shield_applied = True
+            prev_lev = target_lev
+            target_lev = max_safe_by_sl
+            reason += f" [Shield: Hạ từ {prev_lev}x về {target_lev}x do SL {sl_pct*100:.1f}% để khoảng cách thanh lý xa gấp 3x SL]"
+
+    effective_leverage = max(5, min(15, target_lev))
+
+    meta = {
+        "mode": mode,
+        "target_lev": target_lev,
+        "effective_leverage": effective_leverage,
+        "is_sideway": is_sideway,
+        "is_trend_following": is_trend_following,
+        "adx": adx_val,
+        "hmm_regime": hmm_regime,
+        "shield_applied": shield_applied,
+        "reason": reason
+    }
+    return effective_leverage, reason, meta
+
+
 log = logging.getLogger("ReversalEvaluator")
 
 def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, db: Session):
@@ -868,15 +972,17 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             if new_qty > 0:
                                 new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
                                 new_rr    = analysis.get("rr_ratio", 1.5)
-                                bx.set_leverage(sym, leverage=user.leverage)
+                                rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 5, sl_pct)
+                                bx.set_leverage(sym, leverage=rev_lev)
                                 bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2, tp_levels=analysis.get("plan", {}).get("tp_levels", []),
-                                               leverage=user.leverage, p_win=new_p_win, rr_ratio=new_rr)
+                                               leverage=rev_lev, p_win=new_p_win, rr_ratio=new_rr)
                                 
                                 _tg_send(
                                     REGISTER_TOKEN, user.telegram_id,
                                     f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
                                     f"📈 {new_direction} | Conf: {conf:.1f}%\n"
-                                    f"💰 Qty: {new_qty:.4f} | Lev: {user.leverage}x\n"
+                                    f"⚡ Đòn bẩy: <b>{rev_lev}x</b> ({rev_reason})\n"
+                                    f"💰 Qty: {new_qty:.4f}\n"
                                     f"🛑 SL: <code>${new_sl:.4f}</code>\n"
                                     f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code>"
                                 )
@@ -1386,10 +1492,14 @@ def _execute_for_user(user: User, signal: dict):
                      user.telegram_id, today_pnl, target_daily)
             return
 
-        # 3. Bảo vệ chống cháy tài khoản (Anti-Liquidation Shield)
-        # Đảm bảo đòn bẩy không quá cao, ngưỡng thanh lý cách ít nhất gấp 3x so với khoảng cách Stop Loss
-        max_safe_lev = min(user.leverage or 10, max(2, int(0.60 / sl_pct)))
-        effective_leverage = max(2, max_safe_lev)
+        # 3. ĐÒN BẨY LINH ĐỘNG (DYNAMIC LEVERAGE 5x - 15x) & BẢO VỆ CHỐNG CHÁY (ANTI-LIQUIDATION SHIELD)
+        effective_leverage, lev_reason, lev_meta = calculate_dynamic_leverage(
+            signal=signal,
+            user_base_leverage=user.leverage or 5,
+            sl_pct=sl_pct
+        )
+        log.info("⚡ [DYNAMIC LEVERAGE] User %s | %s %s: Lev=%dx (%s)",
+                 user.telegram_id, direction, sym, effective_leverage, lev_reason)
 
         # Khống chế ký quỹ tối đa không vượt 30% tài khoản
         notional = entry * qty
@@ -1397,7 +1507,8 @@ def _execute_for_user(user: User, signal: dict):
         if req_margin > user.capital * 0.30:
             req_margin = user.capital * 0.30
             qty = round((req_margin * effective_leverage) / entry, 4)
-            log.info("🛡️ [ANTI-EXHAUSTION] Giảm Margin về $%.2f (30%% vốn) -> Qty mới: %.4f", req_margin, qty)
+            log.info("🛡️ [ANTI-EXHAUSTION] Giảm Margin về $%.2f (30%% vốn) -> Qty mới: %.4f (Lev: %dx)",
+                     req_margin, qty, effective_leverage)
 
         if qty <= 0:
             return
@@ -1477,15 +1588,26 @@ def _execute_for_user(user: User, signal: dict):
                 except Exception:
                     pass
 
-            log.info("OK %s: %s %s qty=%.4f lev=%dx", user.telegram_id, direction, sym, qty, user.leverage)
+            log.info("OK %s: %s %s qty=%.4f lev=%dx (%s)",
+                     user.telegram_id, direction, sym, qty, effective_leverage, lev_reason)
             news_notice = ""
             if news_risk.get("active"):
                 news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - news_risk.get('size_mult', 0.5)) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
+
+            lev_tag = f"{effective_leverage}x"
+            if effective_leverage >= 10:
+                lev_tag += f" 🚀 (Trend Boost {effective_leverage}x)"
+            elif effective_leverage > 5:
+                lev_tag += f" 📈 (Trend {effective_leverage}x)"
+            else:
+                lev_tag += " 🛡️ (Sideway/Base 5x)"
+
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
                 f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
                 f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
-                f"💰 Qty: {qty:.4f} | Lev: {user.leverage}x{news_notice}\n"
+                f"⚡ Đòn bẩy: <b>{lev_tag}</b>\n"
+                f"💰 Qty: {qty:.4f} | Margin: ~${req_margin:.2f}{news_notice}\n"
                 f"🛑 SL: <code>${sl:.4f}</code> | Risk: ${risk_amt:.2f}\n"
                 f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
                 f"🏆 TP2: <code>${tp2:.4f}</code> → đích 50% còn lại")
@@ -1599,10 +1721,39 @@ async def tg_webhook_bot2(request: Request):
                     f"💰 Vốn: <b>${u.capital:.2f}</b>\n"
                     f"🏷 Tier: <b>{cfg['label']}</b>\n"
                     f"🎯 Min Confidence: <b>{u.min_confidence}%</b>\n"
-                    f"⚡ Leverage: <b>{u.leverage}x</b>\n"
+                    f"⚡ Leverage: <b>{u.leverage}x</b> <i>(Linh động 5x-15x theo Trend/Sideway)</i>\n"
                     f"📈 Risk/Lệnh: <b>{u.max_risk_pct}%</b>\n"
                     f"🔄 Auto-trade: <b>{'BẬT' if u.auto_trade else 'TẮT'}</b>\n"
                     f"📊 Total PnL: <b>${u.total_pnl:+.2f}</b>")
+
+        elif text.startswith("/donbay") or text.startswith("/leverage"):
+            parts = text.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                val = int(parts[1])
+                if 5 <= val <= 15:
+                    db = SessionLocal()
+                    u = db.query(User).filter(User.telegram_id == chat_id).first()
+                    if u:
+                        u.leverage = val
+                        db.commit()
+                        _tg_send(REGISTER_TOKEN, chat_id,
+                                 f"✅ Đã cập nhật đòn bẩy cơ bản của bạn lên <b>{val}x</b>!\n\n"
+                                 f"🤖 <b>Cơ chế đòn bẩy linh động (Dynamic Leverage):</b>\n"
+                                 f"• <b>Sideway / Ranging / Counter-Trend</b>: Giữ đòn bẩy phòng thủ <b>5x</b>.\n"
+                                 f"• <b>Thuận Trend (4H/1H đồng thuận)</b>: Tự động nâng lên <b>10x - 12x</b>.\n"
+                                 f"• <b>Super Trend (Breakout + ADX > 35)</b>: Đẩy tối đa <b>15x</b> để ăn trọn sóng.\n"
+                                 f"• <b>Anti-Liquidation Shield</b>: Khoảng cách thanh lý luôn cách điểm vào gấp ít nhất 3x khoảng cách SL.")
+                    db.close()
+                else:
+                    _tg_send(REGISTER_TOKEN, chat_id, "⚠️ Đòn bẩy hợp lệ từ <b>5x</b> đến <b>15x</b>. Ví dụ: <code>/donbay 10</code>")
+            else:
+                _tg_send(REGISTER_TOKEN, chat_id,
+                         "⚡ <b>HỆ THỐNG ĐÒN BẨY LINH ĐỘNG (5x - 15x)</b>\n\n"
+                         "• <b>Sideway / Đi ngang</b>: Tự động dùng đòn bẩy <b>5x</b> để phòng thủ, tránh bị cắn SL.\n"
+                         "• <b>Theo Trend (4H đồng thuận)</b>: Nâng đòn bẩy lên <b>10x - 12x</b>.\n"
+                         "• <b>Super Trend Breakout</b>: Nâng tối đa <b>15x</b> bắt sóng lớn.\n"
+                         "• <b>Anti-Liquidation Shield</b>: Luôn bảo vệ an toàn tuyệt đối, thanh lý cách xa gấp 3x khoảng cách SL.\n\n"
+                         "👉 Cú pháp chỉnh đòn bẩy cơ bản: <code>/donbay 10</code> hoặc <code>/donbay 15</code>")
 
         elif text == "/dashboard":
             dash_url = (RENDER_URL or "") + f"/my-dashboard?uid={chat_id}"

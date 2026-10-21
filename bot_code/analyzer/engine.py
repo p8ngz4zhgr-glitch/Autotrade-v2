@@ -1663,13 +1663,49 @@ class SignalEngine:
             {"level": 4, "price": tp4, "close_pct": tp_close_pcts[3]},
         ]
 
+        # ══════════════════════════════════════════════════════════
+        # [DYNAMIC LEVERAGE 5x - 15x] TÍNH ĐÒN BẨY LINH ĐỘNG THEO TREND & SIDEWAY
+        # ══════════════════════════════════════════════════════════
+        adx_1h_val = float(adx_1h.get("adx", 0)) if isinstance(adx_1h, dict) else 0.0
+        adx_4h_val = float(adx_4h.get("adx", 0)) if isinstance(adx_4h, dict) else 0.0
+        max_adx = max(adx_1h_val, adx_4h_val)
+        is_bo = bool((isinstance(bo_1h, dict) and bo_1h.get("type", "NONE") != "NONE") or
+                     (isinstance(bo_4h, dict) and bo_4h.get("type", "NONE") != "NONE"))
+
+        if trade_regime == "SIDEWAY_RANGE" or hmm_regime in ("SIDEWAYS", "NEUTRAL") or (max_adx > 0 and max_adx < 20 and not is_bo):
+            rec_leverage = 5
+            lev_note = "Sideway Range (5x)"
+        elif trade_regime == "COUNTER_TREND":
+            rec_leverage = 5
+            lev_note = "Sóng hồi ngược trend (5x)"
+        elif trade_regime == "TREND_FOLLOWING" or is_trend_aligned:
+            bayes_p = float(ev_data.get("p_win", 50)) if isinstance(ev_data, dict) else 50.0
+            if is_bo or max_adx >= 35 or (conf >= 85 and bayes_p >= 60):
+                rec_leverage = 15
+                lev_note = "Super Trend Breakout (15x)"
+            elif max_adx >= 25 or conf >= 76:
+                rec_leverage = 12
+                lev_note = "Strong Trend (12x)"
+            else:
+                rec_leverage = 10
+                lev_note = "Trend Following (10x)"
+        else:
+            rec_leverage = 5
+            lev_note = "Thị trường trung tính (5x)"
+
+        # Anti-Liquidation Shield: Khoảng cách thanh lý xa ít nhất gấp 3x khoảng cách SL
+        if sl_atr_pct > 0.001:
+            max_safe_by_sl = max(5, int(60.0 / sl_atr_pct))
+            rec_leverage = min(rec_leverage, max_safe_by_sl)
+        rec_leverage = max(5, min(15, rec_leverage))
+
         return {
             "symbol": symbol, "asset_type": atype,
             "price": price, "final": final, "confidence": conf,
             "longs": longs, "shorts": shorts, "timeframes": results,
             # tp2 giữ nguyên nghĩa CŨ (mốc thứ 2) để không phá vỡ chỗ nào còn đọc
             # trực tiếp plan["tp2"] — muốn dùng đủ 4 mốc thì đọc plan["tp_levels"].
-            "plan": {"entry": price, "sl": sl, "tp1": tp1, "tp2": tp2, "tp_levels": tp_levels},
+            "plan": {"entry": price, "sl": sl, "tp1": tp1, "tp2": tp2, "tp_levels": tp_levels, "recommended_leverage": rec_leverage},
             "wyckoff": wy_4h, "fibo": fi_1h, "cvd": cvd_1h,
             "breakout": bo_1h, "whale": wh_1h,
             "volume_1h": vol_1h, "volume_4h": vol_4h,
@@ -1694,6 +1730,8 @@ class SignalEngine:
             "news_risk": news_risk,
             "trade_regime": trade_regime,
             "position_size_mult": round(mtf_size_mult * news_risk.get("size_mult", 1.0), 2),
+            "dynamic_leverage": rec_leverage,
+            "leverage_note": lev_note,
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),
             "bayes_ev": ev_data,
             "legendary_traders": {
