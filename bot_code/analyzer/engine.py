@@ -477,6 +477,17 @@ class SignalEngine:
         mkt_open, mkt_note = True, ""
         if atype == "STOCK":
             mkt_open, mkt_note = self.stock.market_open()
+        elif atype == "CRYPTO":
+            utcnow = datetime.utcnow()
+            hour_utc = utcnow.hour + utcnow.minute / 60.0
+            if 0.0 <= hour_utc < 8.0:
+                mkt_note = "Phiên Á (00-08h UTC) — Biên tích lũy, ưu tiên đánh Range / Sweep"
+            elif 8.0 <= hour_utc < 13.0:
+                mkt_note = "Phiên London (08-13h UTC) — Mở rộng biến động, đón Trend bứt phá"
+            elif 13.0 <= hour_utc < 21.0:
+                mkt_note = "Phiên New York (13-21h UTC) — Dòng tiền Mỹ cực mạnh, Trend rõ nét"
+            else:
+                mkt_note = "Vùng chuyển giao (21-24h UTC) — Thanh khoản mỏng, giãn Spread"
 
         longs     = sum(1 for r in results.values() if r["direction"] == "LONG")
         shorts    = sum(1 for r in results.values() if r["direction"] == "SHORT")
@@ -1018,31 +1029,7 @@ class SignalEngine:
 
         if m5_data and h1_data:
             try:
-                # 1. Alexander Elder Triple Screen (H1 -> M15 -> M5)
-                h1_closes = h1_data.get("closes", []) or h1_data.get("close", [])
-                m15_closes = m15_data.get("closes", []) or m15_data.get("close", [])
-                m5_closes = m5_data.get("closes", []) or m5_data.get("close", [])
-
-                h1_ema50 = h1_data.get("ema50", price)
-                h1_ema200 = h1_data.get("ema200", price)
-                m15_rsi = m15_data.get("rsi", 50.0)
-                m5_rsi = m5_data.get("rsi", 50.0)
-
-                elder_res = LegendaryTradersFramework.elder_triple_screen(
-                    h1_closes, m15_closes, m5_closes, h1_ema50, h1_ema200, m15_rsi, m5_rsi
-                )
-
-                # Nguyên tắc vàng Elder: Tuyệt đối KHÔNG bơi ngược dòng thủy triều lớn H1
-                if final == "LONG" and elder_res.get("allowed_direction") == "SELL_ONLY":
-                    log.warning("⛔ [ELDER TRIPLE SCREEN] %s: H1 DOWNTREND (Thủy triều rút) -> Chặn lệnh LONG trên M5 để tránh dính SL!", symbol)
-                    final = "WAIT"
-                elif final == "SHORT" and elder_res.get("allowed_direction") == "BUY_ONLY":
-                    log.warning("⛔ [ELDER TRIPLE SCREEN] %s: H1 UPTREND (Thủy triều dâng) -> Chặn lệnh SHORT trên M5 để tránh dính SL!", symbol)
-                    final = "WAIT"
-                elif elder_res.get("m5_trigger"):
-                    conf = min(99.0, conf + elder_res.get("score_boost", 15))
-
-                # 2. ICT / Smart Money Concepts: Liquidity Sweep & Stop Run
+                # 1. ICT / Smart Money Concepts: Liquidity Sweep & Stop Run (Ưu tiên nhận diện bẫy giá)
                 m5_highs = m5_data.get("highs", []) or m5_data.get("high", [])
                 m5_lows = m5_data.get("lows", []) or m5_data.get("low", [])
                 m5_opens = m5_data.get("opens", []) or m5_closes
@@ -1057,6 +1044,37 @@ class SignalEngine:
                             conf = min(99.0, conf + 15)
                         elif final == "SHORT" and ict_res.get("type") == "BEARISH_SWEEP":
                             conf = min(99.0, conf + 15)
+
+                # 2. Alexander Elder Triple Screen (H1 -> M15 -> M5)
+                h1_closes = h1_data.get("closes", []) or h1_data.get("close", [])
+                m15_closes = m15_data.get("closes", []) or m15_data.get("close", [])
+                m5_closes = m5_data.get("closes", []) or m5_data.get("close", [])
+
+                h1_ema50 = h1_data.get("ema50", price)
+                h1_ema200 = h1_data.get("ema200", price)
+                m15_rsi = m15_data.get("rsi", 50.0)
+                m5_rsi = m5_data.get("rsi", 50.0)
+
+                elder_res = LegendaryTradersFramework.elder_triple_screen(
+                    h1_closes, m15_closes, m5_closes, h1_ema50, h1_ema200, m15_rsi, m5_rsi
+                )
+
+                # PHÂN TÁCH BỐI CẢNH (REGIME DECOUPLING):
+                # Elder chỉ chặn lệnh khi thị trường CÓ TREND RÕ RỆT (ADX >= 25 hoặc TREND_FOLLOWING)
+                # và KHÔNG CÓ BẪY QUÉT THANH KHOẢN (ICT/Bruni Sweep).
+                # Tránh xung đột: Không để sóng lớn H1 chặn các lệnh săn râu nến M5 của ICT/SMC!
+                is_sweep_active = bool(ict_res.get("sweep_detected") or sweep_data.get("detected"))
+                is_pure_trend = (trade_regime == "TREND_FOLLOWING" and hmm_regime in ("BULL_TREND", "BEAR_TREND"))
+
+                if is_pure_trend and not is_sweep_active:
+                    if final == "LONG" and elder_res.get("allowed_direction") == "SELL_ONLY":
+                        log.warning("⛔ [ELDER TRIPLE SCREEN] %s: H1 DOWNTREND thuần -> Chặn lệnh LONG đuổi sóng để tránh dính SL!", symbol)
+                        final = "WAIT"
+                    elif final == "SHORT" and elder_res.get("allowed_direction") == "BUY_ONLY":
+                        log.warning("⛔ [ELDER TRIPLE SCREEN] %s: H1 UPTREND thuần -> Chặn lệnh SHORT đuổi sóng để tránh dính SL!", symbol)
+                        final = "WAIT"
+                elif elder_res.get("m5_trigger"):
+                    conf = min(99.0, conf + elder_res.get("score_boost", 15))
 
                 # 3. Mark Minervini: Volatility Contraction Pattern (VCP)
                 minervini_res = LegendaryTradersFramework.minervini_vcp_filter(
@@ -1784,7 +1802,7 @@ class SignalEngine:
             "btc_correlation": btc_corr, "btc_hmm_regime": btc_hmm_regime, "btc_trend_now": btc_trend_now,
             "news_risk": news_risk,
             "trade_regime": trade_regime,
-            "position_size_mult": round(mtf_size_mult * news_risk.get("size_mult", 1.0), 2),
+            "position_size_mult": round(max(0.75, min(1.0, mtf_size_mult * news_risk.get("size_mult", 1.0))), 2),
             "dynamic_leverage": rec_leverage,
             "leverage_note": lev_note,
             "timestamp": datetime.now().strftime("%d/%m %H:%M"),

@@ -1490,9 +1490,10 @@ def _execute_for_user(user: User, signal: dict):
         # giảm KHỐI LƯỢNG theo đúng yêu cầu "giảm khối lượng gd xuống, SL chặt").
         news_risk = signal.get("news_risk", {}) or {}
         if news_risk.get("active"):
-            qty = round(qty * news_risk.get("size_mult", 1.0), 4)
-            log.warning("📰 %s: Đang trong vùng ảnh hưởng tin '%s' -> giảm khối lượng còn x%.1f.",
-                        sym, news_risk.get("event"), news_risk.get("size_mult", 1.0))
+            size_m = max(0.75, news_risk.get("size_mult", 1.0))
+            qty = round(qty * size_m, 4)
+            log.warning("📰 %s: Đang trong vùng ảnh hưởng tin '%s' -> điều chỉnh khối lượng x%.2f (giữ tối thiểu 75%% size).",
+                        sym, news_risk.get("event"), size_m)
             if qty <= 0:
                 return
 

@@ -589,7 +589,7 @@ class BingXExchange:
     # ════════════════════════════════════════════════════════════════════
     # [FIX v6.2] Breakeven có đệm phí — tránh "hoà vốn" thành lỗ nhẹ sau phí/trượt giá
     # ════════════════════════════════════════════════════════════════════
-    BREAKEVEN_BUFFER_PCT = 0.0006  # ~0.06%, đủ che phí taker 2 chiều + trượt giá nhỏ
+    BREAKEVEN_BUFFER_PCT = 0.0012  # ~0.12%, đủ che hoàn toàn phí taker 2 chiều (0.05% x 2) + trượt giá nhỏ
 
     def breakeven_price(self, direction: str, entry_price: float) -> float:
         if entry_price <= 0:
