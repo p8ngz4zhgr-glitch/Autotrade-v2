@@ -851,7 +851,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 if is_reversal:
                     if net_pnl_usd >= 1.00:
                         action = "CLOSE_ALL"
-                        should_reverse = False  # Chốt lời bảo toàn vốn bỏ túi trước, không vội nhảy ngược chiều
+                        # Đảo chiều linh động: Chốt lời vị thế cũ xong, nếu tín hiệu đảo chiều rõ nét (Conf >= 75%),
+                        # tự động mở vị thế mới theo hướng mới (Flip Long <-> Short)
+                        should_reverse = bool(conf >= 75.0)
                         action_type = "CHỐT LỜI ĐẢO CHIỀU (BẢO TOÀN LỢI NHUẬN)"
                         emoji = "💰"
                         phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"

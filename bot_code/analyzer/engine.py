@@ -593,14 +593,21 @@ class SignalEngine:
 
         final, conf = None, 50.0
         for tf_n, bo in [("1H", bo_1h), ("4H", bo_4h)]:
-            if bo.get("type") in ("BREAKOUT_UP","BREAKOUT_DOWN") and bo.get("strength",0) >= 70:
-                is_up = (bo["type"] == "BREAKOUT_UP")
+            b_type = bo.get("type", "NONE")
+            if b_type in ("BREAKOUT_UP", "BREAKOUT_DOWN") and bo.get("strength", 0) >= 70:
+                is_up = (b_type == "BREAKOUT_UP")
                 # TỐI ƯU WIN RATE: Yêu cầu Smart Score đồng thuận để tránh bẫy Fakeout
                 if (is_up and smart >= -5) or (not is_up and smart <= 5):
                     final = "LONG" if is_up else "SHORT"
                     conf  = min(95, 70 + bo["strength"] * 0.25)
                     log.info("🚨 Breakout override [%s] (Smart=%+.1f)", tf_n, smart)
                     break
+            elif b_type == "FAKEOUT_UP":
+                log.warning("⚠️ [FAKEOUT DETECTED] %s: Phát hiện Bẫy Bull Trap (Rút râu xả ngược tại cản) -> Giảm Combined Long và phòng ngừa Fakeout!", tf_n)
+                combined = max(10.0, combined - 15.0)
+            elif b_type == "FAKEOUT_DOWN":
+                log.warning("⚠️ [FAKEOUT DETECTED] %s: Phát hiện Bẫy Bear Trap (Rút chân gom hàng tại hỗ trợ) -> Tăng Combined Long và phòng ngừa Fakeout!", tf_n)
+                combined = min(90.0, combined + 15.0)
 
         if final is None:
             # Nếu có sóng chủ 4H+1H bảo kê, hạ ngưỡng combined xuống 58% để bắt nhịp pullback đẹp
@@ -613,6 +620,14 @@ class SignalEngine:
             elif short_ok or combined <= 34: final = "SHORT"; conf = round(min(95, 100-combined), 1)
             else:                             final = "WAIT";  conf = round(min(95, max(30, combined)), 1)
             
+            # Anti-Fakeout Shield: Chặn tuyệt đối nếu có bẫy phá vỡ giả (Bull/Bear Trap)
+            if final == "LONG" and (bo_1h.get("type") == "FAKEOUT_UP" or bo_4h.get("type") == "FAKEOUT_UP"):
+                log.warning("⛔ [ANTI-FAKEOUT] Khung 1H/4H xác nhận Bull Trap (Fake Breakout cản) -> HỦY LỆNH LONG (Tránh đu đỉnh)!")
+                final = "WAIT"
+            elif final == "SHORT" and (bo_1h.get("type") == "FAKEOUT_DOWN" or bo_4h.get("type") == "FAKEOUT_DOWN"):
+                log.warning("⛔ [ANTI-FAKEOUT] Khung 1H/4H xác nhận Bear Trap (Fake Breakout đáy) -> HỦY LỆNH SHORT (Tránh bán tháo)!")
+                final = "WAIT"
+
             if cvd_tr in ("BEARISH_DIV","BULLISH_DIV") and abs(smart) < 20:
                 conf = round(conf * 0.85, 1)
                 if conf < 55:
@@ -883,10 +898,20 @@ class SignalEngine:
                         log.warning(f"⛔ FILTER (L2 IMBALANCE): Chặn lệnh SHORT do Sổ lệnh lệch mua cực mạnh (Imbalance: {imbalance:.2f}, Ratio: {ratio:.2f}).")
                         final = "WAIT"
             else:
-                if resist_wall > 0 and final == "LONG" and (price < resist_wall <= price * 1.012):
-                    log.info(f"⚡ [L2 WALL PASSED] Phát hiện tường bán (${resist_wall:.4f}) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: {combined:.1f}) -> Cho phép vào lệnh bứt phá.")
-                elif support_wall > 0 and final == "SHORT" and (price * 0.988 <= support_wall < price):
-                    log.info(f"⚡ [L2 WALL PASSED] Phát hiện tường mua (${support_wall:.4f}) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: {combined:.1f}) -> Cho phép vào lệnh bứt phá.")
+                t4h_peek = results.get("4h", {}).get("direction", "WAIT")
+                is_side_market = (hmm_regime in ("SIDEWAYS", "NEUTRAL") or t4h_peek == "WAIT")
+                if is_side_market:
+                    if resist_wall > 0 and final == "LONG" and (price < resist_wall <= price * 1.012):
+                        log.warning(f"⛔ FILTER (L2 WALL IN SIDEWAYS): Thị trường Sideway/Đi ngang - CHẶN lệnh LONG vì có Tường Bán (${resist_wall:.4f}) ngay phía trên.")
+                        final = "WAIT"
+                    elif support_wall > 0 and final == "SHORT" and (price * 0.988 <= support_wall < price):
+                        log.warning(f"⛔ FILTER (L2 WALL IN SIDEWAYS): Thị trường Sideway/Đi ngang - CHẶN lệnh SHORT vì có Tường Mua (${support_wall:.4f}) ngay phía dưới.")
+                        final = "WAIT"
+                else:
+                    if resist_wall > 0 and final == "LONG" and (price < resist_wall <= price * 1.012):
+                        log.info(f"⚡ [L2 WALL PASSED] Phát hiện tường bán (${resist_wall:.4f}) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: {combined:.1f}) -> Cho phép vào lệnh bứt phá.")
+                    elif support_wall > 0 and final == "SHORT" and (price * 0.988 <= support_wall < price):
+                        log.info(f"⚡ [L2 WALL PASSED] Phát hiện tường mua (${support_wall:.4f}) nhưng Tín hiệu xu hướng RẤT MẠNH (Combined: {combined:.1f}) -> Cho phép vào lệnh bứt phá.")
 
         # ══════════════════════════════════════════════════════════
         # S/R ZONES & VOLUME CONFIRMATION FILTERS
@@ -911,27 +936,40 @@ class SignalEngine:
 
         # 3. Kiểm tra dư địa Risk-to-Reward (R:R) so với mốc Kháng cự / Hỗ trợ gần nhất
         # Với các lệnh có xu hướng mạnh (Combined >= 68) hoặc có Volume bứt phá (vol_bo_up/vol_bo_down),
-        # giá đang ở điểm nén Breakout -> cho phép vọt qua cản thay vì hủy lệnh.
+        # giá đang ở điểm nén Breakout -> cho phép vọt qua cản thay vì hủy lệnh TRỪ KHI đang ở thị trường Sideway!
         atr_pct_1h_est = results.get("1h", {}).get("atr_pct", 1.0)
+        t4h_peek = results.get("4h", {}).get("direction", "WAIT")
+        is_side_market = (hmm_regime in ("SIDEWAYS", "NEUTRAL") or t4h_peek == "WAIT")
+
         if final == "LONG" and nearest_res > price:
             dist_res_pct = (nearest_res - price) / price * 100
-            if combined >= 62 or vol_bo_up or macro_trend_long:
+            if is_side_market and dist_res_pct < 0.60:
+                log.warning(
+                    f"⛔ FILTER (S/R IN SIDEWAYS): Thị trường Sideway/Không rõ xu hướng - Kháng Cự (${nearest_res:.4f}) quá gần ({dist_res_pct:.2f}% < 0.60%) -> HỦY LỆNH LONG (Tránh mua ngay đỉnh cản)."
+                )
+                final = "WAIT"
+            elif (combined >= 68 or vol_bo_up or macro_trend_long) and not is_side_market:
                 log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Kháng Cự (${nearest_res:.4f}, cách {dist_res_pct:.2f}%) với xu hướng thuận dòng -> Cho phép bứt phá theo trend.")
-            elif dist_res_pct < 0.30:
+            elif dist_res_pct < 0.35:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Kháng Cự gần nhất (${nearest_res:.4f}) chỉ có {dist_res_pct:.2f}% "
-                    f"quá sát nút (<0.3%) và không có lực đẩy -> HỦY LỆNH LONG."
+                    f"quá sát nút (<0.35%) và không có lực đẩy -> HỦY LỆNH LONG."
                 )
                 final = "WAIT"
 
         elif final == "SHORT" and nearest_supp > 0 and nearest_supp < price:
             dist_supp_pct = (price - nearest_supp) / price * 100
-            if combined >= 62 or vol_bo_down or macro_trend_short:
+            if is_side_market and dist_supp_pct < 0.60:
+                log.warning(
+                    f"⛔ FILTER (S/R IN SIDEWAYS): Thị trường Sideway/Không rõ xu hướng - Hỗ Trợ (${nearest_supp:.4f}) quá gần ({dist_supp_pct:.2f}% < 0.60%) -> HỦY LỆNH SHORT (Tránh bán ngay đáy hỗ trợ)."
+                )
+                final = "WAIT"
+            elif (combined >= 68 or vol_bo_down or macro_trend_short) and not is_side_market:
                 log.info(f"⚡ [S/R BREAKOUT PASSED] Tiệm cận Hỗ Trợ (${nearest_supp:.4f}, cách {dist_supp_pct:.2f}%) với xu hướng thuận dòng -> Cho phép bứt phá theo trend.")
-            elif dist_supp_pct < 0.30:
+            elif dist_supp_pct < 0.35:
                 log.warning(
                     f"⛔ FILTER (S/R R:R RATIO): Khoảng cách tới Hỗ Trợ gần nhất (${nearest_supp:.4f}) chỉ có {dist_supp_pct:.2f}% "
-                    f"quá sát nút (<0.3%) và không có lực đẩy -> HỦY LỆNH SHORT."
+                    f"quá sát nút (<0.35%) và không có lực đẩy -> HỦY LỆNH SHORT."
                 )
                 final = "WAIT"
 
@@ -943,6 +981,7 @@ class SignalEngine:
 
         trade_regime = "NORMAL"
         mtf_size_mult = 1.0
+        is_trend_aligned = False
 
         if final in ("LONG", "SHORT"):
             if trend_4h == final:
@@ -950,6 +989,7 @@ class SignalEngine:
                 conf = min(98.0, conf + 10.0)
                 trade_regime = "TREND_FOLLOWING"
                 mtf_size_mult = 1.0
+                is_trend_aligned = True
             elif trend_4h in ("LONG", "SHORT") and trend_4h != final:
                 if combined >= 65:
                     log.info("  ⚡ [COUNTER-TREND SCALP] %s: 4H=%s ngược với %s nhưng Score=%.1f >= 65 "
@@ -1081,15 +1121,25 @@ class SignalEngine:
 
         if getattr(cfg, "M5_SCALP_MODE", True) and m5_res:
             # ── CHẾ ĐỘ SCALPING M5 CHỐNG QUÉT RÂU (ANTI-WHIPSAW SHIELD) ──
-            # Nới rộng SL tối thiểu từ 0.35% lên 0.95% - 1.8% để tránh bị râu nến M5 quét dính SL oan uổng
+            # Nới rộng SL tối thiểu từ 0.95% lên 1.75% - 2.80% (Sideway: 2.20% - 3.50%)
+            # để loại bỏ hoàn toàn các cú quét râu (noise whipsaws) 5m/15m thường gặp ở Crypto
             atr_pct_m5 = m5_res.get("atr_pct", 0.4)
             atr_pct_15m = results.get("15m", {}).get("atr_pct", atr_pct_m5 * 1.5)
             # Lấy mốc biến động kết hợp giữa M5 và M15 để giấu SL ngoài tầm với của bẫy Market Maker
             base_atr = max(atr_pct_m5, atr_pct_15m * 0.85)
-            sl_atr_pct = max(0.95, min(1.85, base_atr * 1.6))
-            mm_noise_buffer_pct = max(0.15, min(0.35, base_atr * 0.35))
-            tp1_pct = max(0.90, sl_atr_pct * 1.1)   # TP1 (1.1R): Khớp nhanh để dời SL về Breakeven (0 đồng rủi ro)
-            tp2_pct = sl_atr_pct * 2.0              # TP2 (2.0R): Khóa lợi nhuận mục tiêu
+
+            is_sideway_market = (trade_regime == "SIDEWAY_RANGE" or hmm_regime in ("SIDEWAYS", "NEUTRAL"))
+            if is_sideway_market:
+                min_sl_floor = 2.20
+                sl_atr_pct = max(min_sl_floor, min(3.50, base_atr * 2.2))
+                mm_noise_buffer_pct = max(0.35, min(0.65, base_atr * 0.45))
+            else:
+                min_sl_floor = 1.75
+                sl_atr_pct = max(min_sl_floor, min(3.00, base_atr * 1.9))
+                mm_noise_buffer_pct = max(0.25, min(0.50, base_atr * 0.35))
+
+            tp1_pct = max(1.10, sl_atr_pct * 1.0)   # TP1 (1.0R): Đạt mốc để dời SL về Breakeven (0 đồng rủi ro)
+            tp2_pct = sl_atr_pct * 1.8              # TP2 (1.8R): Khóa lợi nhuận mục tiêu
             log.info("  🛡️ [ANTI-WHIPSAW M5 SCALP] SL: %.2f%% (+Buffer %.2f%% = %.2f%%) | TP1: %.2f%% | TP2: %.2f%%",
                      sl_atr_pct, mm_noise_buffer_pct, (sl_atr_pct + mm_noise_buffer_pct), tp1_pct, tp2_pct)
         else:
@@ -1585,7 +1635,12 @@ class SignalEngine:
             # - Với lệnh thuận sóng chủ (4H/1H đồng thuận hoặc Elder Triple Screen): sàn 48% (với R:R 1:2.0 là cực kỳ có lời)
             # - Với lệnh thị trường trung lập: sàn 52%
             is_trend_aligned = (trade_regime == "TREND_FOLLOWING") or (trend_4h == final and final != "WAIT")
-            MIN_P_WIN = 0.48 if is_trend_aligned else 0.52
+            if is_trend_aligned:
+                MIN_P_WIN = 0.48
+            elif hmm_regime in ("SIDEWAYS", "NEUTRAL") or trade_regime == "SIDEWAY_RANGE":
+                MIN_P_WIN = 0.55  # Trong sideway yêu cầu xác suất thắng cao hơn (>=55%) mới vào lệnh
+            else:
+                MIN_P_WIN = 0.52
 
             if p_win < MIN_P_WIN:
                 log.warning("  ⚠️ P(win)=%.1f%% < %.0f%% (Trend Aligned: %s) -> hạ về WAIT",

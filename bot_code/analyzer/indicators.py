@@ -579,23 +579,47 @@ class Indicators:
         rng     = highs[-1] - lows[-1]
         body    = abs(closes[-1] - closes[-2]) / rng * 100 if rng > 0 else 0
 
-        if price > resist and vr >= 1.8 and body >= 55:
+        # 1. BỨT PHÁ XÁC NHẬN THỰC SỰ (TRUE BREAKOUT)
+        # Yêu cầu giá đóng cửa NẰM HOÀN TOÀN ngoài cản, thân nến lớn >= 50% và Volume bùng nổ >= 1.8x
+        if price > resist and vr >= 1.8 and body >= 50:
             return {"type": "BREAKOUT_UP",   "strength": min(100, int(vr*30 + body*0.4)),
                     "score_adj": +25,
-                    "desc": f"Phá kháng cự ${round(resist,2)} | Vol {round(vr,1)}x"}
-        if price < supprt and vr >= 1.8 and body >= 55:
+                    "desc": f"Bứt phá kháng cự ${round(resist,2)} | Vol {round(vr,1)}x (Xác nhận)"}
+        if price < supprt and vr >= 1.8 and body >= 50:
             return {"type": "BREAKOUT_DOWN", "strength": min(100, int(vr*30 + body*0.4)),
                     "score_adj": -25,
-                    "desc": f"Phá hỗ trợ ${round(supprt,2)} | Vol {round(vr,1)}x"}
+                    "desc": f"Thủng hỗ trợ ${round(supprt,2)} | Vol {round(vr,1)}x (Xác nhận)"}
 
+        # 2. PHÁT HIỆN BẪY GIÁ / PHÁ VỠ GIẢ (FAKEOUT - BULL/BEAR TRAP)
+        # Nến có râu chọc qua cản nhưng giá đóng cửa sập ngược lại bên trong hộp giá
+        if highs[-1] > resist and price <= resist:
+            upper_wick = highs[-1] - max(closes[-1], closes[-2])
+            wick_ratio = upper_wick / rng if rng > 0 else 0.5
+            if wick_ratio >= 0.40 or vr >= 1.2:
+                return {
+                    "type": "FAKEOUT_UP", "strength": 80, "score_adj": -20,
+                    "desc": f"⚠️ Bẫy Bull Trap: Rút râu xả ngược tại cản ${round(resist,2)}"
+                }
+
+        if lows[-1] < supprt and price >= supprt:
+            lower_wick = min(closes[-1], closes[-2]) - lows[-1]
+            wick_ratio = lower_wick / rng if rng > 0 else 0.5
+            if wick_ratio >= 0.40 or vr >= 1.2:
+                return {
+                    "type": "FAKEOUT_DOWN", "strength": 80, "score_adj": +20,
+                    "desc": f"⚠️ Bẫy Bear Trap: Rút chân gom hàng tại hỗ trợ ${round(supprt,2)}"
+                }
+
+        # 3. CHỈ XÁC NHẬN PRE-BREAKOUT KHI CÓ VOLUME BÙNG NỔ THỰC SỰ (>= 2.0x)
+        # Tránh việc mua/bán sớm đâm đầu vào tường cản khi volume yếu
         dr = (resist - price) / price * 100
         ds = (price - supprt) / price * 100
-        if dr < 0.5 and vr >= 1.3:
-            return {"type": "PRE_BREAKOUT_UP",   "strength": 50, "score_adj": +12,
-                    "desc": f"Sắp phá kháng cự ${round(resist,2)}"}
-        if ds < 0.5 and vr >= 1.3:
-            return {"type": "PRE_BREAKOUT_DOWN", "strength": 50, "score_adj": -12,
-                    "desc": f"Sắp phá hỗ trợ ${round(supprt,2)}"}
+        if dr < 0.35 and vr >= 2.0 and body >= 60:
+            return {"type": "PRE_BREAKOUT_UP",   "strength": 50, "score_adj": +10,
+                    "desc": f"Nén sát kháng cự ${round(resist,2)} với Volume cực mạnh"}
+        if ds < 0.35 and vr >= 2.0 and body >= 60:
+            return {"type": "PRE_BREAKOUT_DOWN", "strength": 50, "score_adj": -10,
+                    "desc": f"Nén sát hỗ trợ ${round(supprt,2)} với Volume cực mạnh"}
         return NONE
 
     @staticmethod
