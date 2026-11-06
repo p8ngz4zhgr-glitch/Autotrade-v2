@@ -15,12 +15,12 @@ log = logging.getLogger("analyzer.engine")
 
 
 class SignalEngine:
-    # Hỗ trợ Scalping M5 kết hợp xu hướng đa khung 15m, 1h, 4h
-    TIMEFRAMES = ["5m", "15m", "1h", "4h"]
+    # Hỗ trợ Scalping M5 kết hợp xu hướng đa khung 15m, 1h, 4h và Khung D1 cho Traderssz Range & Opens
+    TIMEFRAMES = ["5m", "15m", "1h", "4h", "1d"]
 
     # [FIX] Dùng chung 1 ThreadPoolExecutor thay vì tạo mới mỗi lần full_analysis
-    # max_workers=4 khớp với số TF để tất cả chạy song song
-    _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tf-worker")
+    # max_workers=5 khớp với số TF để tất cả chạy song song
+    _executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="tf-worker")
 
     def __init__(self):
         self.crypto = CryptoFetcher()
@@ -644,32 +644,53 @@ class SignalEngine:
                 if conf < 55:
                     final = "WAIT"
 
-        # [HỖ TRỢ VÀO LỆNH THEO DẢI EMA PITAGO 147 - 258 - 369]
-        pytha_1h = results.get("1h", {}).get("pythagoras", {})
-        pytha_15m = results.get("15m", {}).get("pythagoras", {})
-        pytha_bull = pytha_1h.get("bull_band") or pytha_15m.get("bull_band")
-        pytha_bear = pytha_1h.get("bear_band") or pytha_15m.get("bear_band")
-        pull_long = pytha_1h.get("pullback_long") or pytha_15m.get("pullback_long")
-        pull_short = pytha_1h.get("pullback_short") or pytha_15m.get("pullback_short")
+        # ══════════════════════════════════════════════════════════
+        # [TRADERSSZ NAKED CHART & RANGE DEVIATION/SFP SUPREME ENGINE]
+        # ══════════════════════════════════════════════════════════
+        # Bản chất: Bỏ qua mọi indicator trễ! 
+        # Quy tắc: Xác định Range HTF (PDH/PDL/PWH/PWL) -> Chờ Deviation/SFP phá vỡ giả
+        #          -> Chờ nến chui ngược vào Range -> Đánh về bờ bên kia (TP1: EQ 50%, TP2: Biên đối diện)
+        #          -> Giá lơ lửng quanh 50% EQ là NO-TRADE ZONE (Vùng cấm vào lệnh).
+        traderssz_analysis = {"signal": "WAIT", "confidence": 50.0}
+        try:
+            from analyzer.traderssz_framework import TradersszFramework
+            m5_d = results.get("5m", {})
+            m15_d = results.get("15m", {})
+            h1_d = results.get("1h", {})
+            m5_op = m5_d.get("opens", []) or m5_d.get("open", [])
+            m5_hi = m5_d.get("highs", []) or m5_d.get("high", [])
+            m5_lo = m5_d.get("lows", []) or m5_d.get("low", [])
+            m5_cl = m5_d.get("closes", []) or m5_d.get("close", [])
+            m5_vo = m5_d.get("vols", []) or m5_d.get("vol", [])
+            m15_cl = m15_d.get("closes", []) or m15_d.get("close", [])
+            h1_cl = h1_d.get("closes", []) or h1_d.get("close", [])
 
-        if pytha_bull:
-            if final == "LONG":
-                conf = min(98.0, conf + (10.0 if pull_long else 6.0))
-                log.info("  🚀 [PYTHAGORAS EMA 147-258-369] Dải EMA Pitago đồng thuận TĂNG %s -> Củng cố vào lệnh LONG (+Conf: %.1f%%)",
-                         "(Pullback Entry)" if pull_long else "", conf)
-            elif final == "WAIT" and combined >= 48:
-                final = "LONG"
-                conf = round(max(70.0, min(95.0, combined + 15.0)), 1)
-                log.info("  ⚡ [PYTHAGORAS TRIGGER] Kích hoạt vào lệnh LONG theo Dải EMA Pitago (147-258-369 đồng thuận tăng, Conf=%.1f%%)!", conf)
-        elif pytha_bear:
-            if final == "SHORT":
-                conf = min(98.0, conf + (10.0 if pull_short else 6.0))
-                log.info("  🚀 [PYTHAGORAS EMA 147-258-369] Dải EMA Pitago đồng thuận GIẢM %s -> Củng cố vào lệnh SHORT (+Conf: %.1f%%)",
-                         "(Pullback Entry)" if pull_short else "", conf)
-            elif final == "WAIT" and combined <= 52:
-                final = "SHORT"
-                conf = round(max(70.0, min(95.0, (100 - combined) + 15.0)), 1)
-                log.info("  ⚡ [PYTHAGORAS TRIGGER] Kích hoạt vào lệnh SHORT theo Dải EMA Pitago (147-258-369 đồng thuận giảm, Conf=%.1f%%)!", conf)
+            d1_data = results.get("1d", {})
+            if m5_cl and len(m5_cl) >= 15:
+                traderssz_analysis = TradersszFramework.evaluate_traderssz_complete(
+                    m5_op, m5_hi, m5_lo, m5_cl, m5_vo, d1_data, price
+                )
+                tsz_sig = traderssz_analysis.get("signal")
+                tsz_conf = traderssz_analysis.get("confidence", 50.0)
+                htf_info = traderssz_analysis.get("htf_opens_and_ranges", {})
+                market_zone = htf_info.get("market_zone", "EQUILIBRIUM")
+                dist_eq = abs(htf_info.get("dist_to_eq_pct", 0.0))
+
+                # 1. NGUYÊN TẮC BẤT DI BẤT DỊCH: NO-TRADE ZONE TẠI 50% EQUILIBRIUM
+                # Nếu giá đang lơ lửng ở giữa Range (cách EQ < 0.25%) và chưa có Deviation rõ ràng: ĐỨNG NGOÀI!
+                if tsz_sig == "WAIT" and dist_eq < 0.25:
+                    log.info("  ⏸️ [TRADERSSZ NO-TRADE ZONE] Giá đang ở chính giữa Range (EQ 50%%: $%.2f, dist: %.2f%%) -> ĐỨNG NGOÀI quan sát!",
+                             htf_info.get("eq_50", price), dist_eq)
+                    final = "WAIT"
+
+                # 2. SUPREME OVERRIDE: KHI CÓ SFP / DEVIATION VÀ RETURN TO RANGE
+                elif tsz_sig in ("LONG", "SHORT"):
+                    final = tsz_sig
+                    conf = tsz_conf
+                    log.info("  🏆 [TRADERSSZ SUPREME TRIGGER] Kích hoạt lệnh %s chuẩn mô hình Deviation/SFP & Return to Range (Conf: %.1f%%) | %s",
+                             tsz_sig, conf, traderssz_analysis.get("reason"))
+        except Exception as e_tsz:
+            log.debug("Lỗi tính toán Traderssz Framework: %s", e_tsz)
 
         # Áp dụng TF penalty vào confidence
         if tf_penalty > 0:
@@ -1232,16 +1253,21 @@ class SignalEngine:
                     sl = min(sl, sr_sl) if sl > 0 else sr_sl
                     log.info("  🛡️ [S/R ZONE] Tối ưu SL LONG giấu ngoài Vùng Hỗ Trợ: %.4f", sl)
 
-            # Tối ưu SL giấu dưới Hỗ Trợ Động Pythagoras EMA (147, 258, 369)
-            pytha_supp = results.get("1h", {}).get("pythagoras", {}).get("nearest_support", 0.0) or \
-                         results.get("15m", {}).get("pythagoras", {}).get("nearest_support", 0.0)
-            if pytha_supp > 0 and pytha_supp < price:
-                p_sl = round(pytha_supp * 0.9965, 2)
-                if p_sl < price and ((price - p_sl) / price * 100) <= sl_atr_pct * 2.2:
-                    sl = min(sl, p_sl) if sl > 0 else p_sl
-                    log.info("  🛡️ [PYTHAGORAS EMA] Tối ưu SL LONG giấu dưới Hỗ Trợ Động EMA (147/258/369): %.4f", sl)
+            # Tối ưu SL chuẩn phương pháp Traderssz: Giấu dưới đáy râu nến quét thanh khoản (SSL Sweep)
+            tsz_sl = traderssz_analysis.get("safe_sl", 0.0)
+            if tsz_sl > 0 and tsz_sl < price:
+                sl = tsz_sl
+                log.info("  ⭐ [TRADERSSZ SL] Đặt SL LONG chính xác ngoài râu quét thanh khoản: %.4f", sl)
 
-            if fibo4h_trend == "UPTREND":
+            # Tối ưu hóa Take Profit theo mô hình Range-to-Range Traderssz:
+            # TP1: Vùng 50% Equilibrium (EQ) | TP2: Range High / Đỉnh đối diện
+            tsz_tp1 = traderssz_analysis.get("tp1_target", 0.0)
+            tsz_tp2 = traderssz_analysis.get("tp2_target", 0.0)
+            if tsz_tp1 > price and tsz_tp2 > tsz_tp1:
+                tp1 = round(tsz_tp1, 2)
+                tp2 = round(tsz_tp2, 2)
+                log.info("  🎯 [TRADERSSZ TP LONG] TP1 (50%% EQ): %.2f | TP2 (Range High): %.2f", tp1, tp2)
+            elif fibo4h_trend == "UPTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
                 if (f272 and f618 and f272 > price * 1.005 and f618 > price * 1.005 and f618 > f272):
@@ -1294,16 +1320,21 @@ class SignalEngine:
                     sl = max(sl, sr_sl) if sl > 0 else sr_sl
                     log.info("  🛡️ [S/R ZONE] Tối ưu SL SHORT giấu ngoài Vùng Kháng Cự: %.4f", sl)
 
-            # Tối ưu SL giấu trên Kháng Cự Động Pythagoras EMA (147, 258, 369)
-            pytha_res = results.get("1h", {}).get("pythagoras", {}).get("nearest_resistance", 0.0) or \
-                        results.get("15m", {}).get("pythagoras", {}).get("nearest_resistance", 0.0)
-            if pytha_res > price:
-                p_sl = round(pytha_res * 1.0035, 2)
-                if p_sl > price and ((p_sl - price) / price * 100) <= sl_atr_pct * 2.2:
-                    sl = max(sl, p_sl) if sl > 0 else p_sl
-                    log.info("  🛡️ [PYTHAGORAS EMA] Tối ưu SL SHORT giấu trên Kháng Cự Động EMA (147/258/369): %.4f", sl)
+            # Tối ưu SL chuẩn phương pháp Traderssz: Giấu trên đỉnh râu nến quét thanh khoản (BSL Sweep)
+            tsz_sl = traderssz_analysis.get("safe_sl", 0.0)
+            if tsz_sl > price:
+                sl = tsz_sl
+                log.info("  ⭐ [TRADERSSZ SL] Đặt SL SHORT chính xác ngoài râu quét thanh khoản: %.4f", sl)
 
-            if fibo4h_trend == "DOWNTREND":
+            # Tối ưu hóa Take Profit theo mô hình Range-to-Range Traderssz:
+            # TP1: Vùng 50% Equilibrium (EQ) | TP2: Range Low / Đáy đối diện
+            tsz_tp1 = traderssz_analysis.get("tp1_target", 0.0)
+            tsz_tp2 = traderssz_analysis.get("tp2_target", 0.0)
+            if 0 < tsz_tp1 < price and 0 < tsz_tp2 < tsz_tp1:
+                tp1 = round(tsz_tp1, 2)
+                tp2 = round(tsz_tp2, 2)
+                log.info("  🎯 [TRADERSSZ TP SHORT] TP1 (50%% EQ): %.2f | TP2 (Range Low): %.2f", tp1, tp2)
+            elif fibo4h_trend == "DOWNTREND":
                 f272 = fibo4l.get("1.272")
                 f618 = fibo4l.get("1.618")
                 if (f272 and f618 and f272 < price * 0.995 and f618 < price * 0.995 and f618 < f272):
@@ -1812,7 +1843,9 @@ class SignalEngine:
                 "ict": ict_res,
                 "minervini": minervini_res,
                 "williams": williams_res,
+                "traderssz": traderssz_analysis,
             },
+            "traderssz": traderssz_analysis,
         }
 
 

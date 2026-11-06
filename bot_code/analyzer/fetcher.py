@@ -41,8 +41,8 @@ class CryptoFetcher:
     BBT = "https://api.bybit.com"
     HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-    BGX_IV = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
-    BBT_IV = {"5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+    BGX_IV = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d", "1w": "1w"}
+    BBT_IV = {"5m": "5", "15m": "15", "1h": "60", "4h": "240", "1d": "D", "1w": "W"}
 
     def __init__(self):
         self._session = _make_session(retries=2, backoff=0.3)
