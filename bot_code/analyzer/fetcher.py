@@ -146,11 +146,12 @@ class CryptoFetcher:
                 d = r.json()
                 if d.get("retCode") == 0:
                     raw = list(reversed(d["result"]["list"]))
-                    if len(raw) >= 20:
+                    if len(raw) >= 10:
                         closes = [float(c[4]) for c in raw]
                         vols   = [max(float(c[5]), 0.001) for c in raw]
                         tbv_ratio = self._tbvol_ratio(closes)
                         return {
+                            "timestamp":     [int(c[0]) for c in raw],
                             "open":          [float(c[1]) for c in raw],
                             "high":          [float(c[2]) for c in raw],
                             "low":           [float(c[3]) for c in raw],
@@ -171,7 +172,9 @@ class CryptoFetcher:
                 d = r.json()
                 if d.get("code") == 0:
                     data = d.get("data", [])
-                    if len(data) >= 20:
+                    if len(data) >= 10:
+                        # BingX có thể trả theo thứ tự mới->cũ hoặc cũ->mới, chuẩn hóa tăng dần theo time
+                        data = sorted(data, key=lambda c: int(c.get("time") or c.get("timestamp") or 0))
                         closes = [float(c.get("close", 0)) for c in data]
                         vols   = [max(float(c.get("volume", 0)), 0.001) for c in data]
                         tbv_ratio = self._tbvol_ratio(closes)
@@ -183,6 +186,7 @@ class CryptoFetcher:
                             else:
                                 tbvols.append(vols[i] * tbv_ratio)
                         return {
+                            "timestamp":     [int(c.get("time") or c.get("timestamp") or 0) for c in data],
                             "open":          [float(c.get("open", closes[i])) for i, c in enumerate(data)],
                             "high":          [float(c.get("high", closes[i])) for i, c in enumerate(data)],
                             "low":           [float(c.get("low",  closes[i])) for i, c in enumerate(data)],
@@ -413,8 +417,8 @@ class StockFetcher:
     CGK    = "https://api.coingecko.com/api/v3"
     # Sửa GC%3DF thành GC=F để API requests không bị lỗi encode
     YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC=F"}
-    YH_IV  = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d"}
-    YH_RNG = {"5m": "1d", "15m": "5d", "1h": "30d", "4h": "30d", "1d": "6mo"}
+    YH_IV  = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d", "1w": "1wk"}
+    YH_RNG = {"5m": "2d", "15m": "5d", "1h": "30d", "4h": "30d", "1d": "1y", "1w": "2y"}
     PLIM   = {"TSLA": (10, 5000), "NVDA": (10, 5000),
                "SPY": (100, 1500), "QQQ": (100, 1500), "NCCOGOLD2USD-USDT": (1500, 6000)}
 
@@ -514,28 +518,39 @@ class StockFetcher:
                 if not j.get("chart", {}).get("result"):
                     continue
                     
-                q = j["chart"]["result"][0]["indicators"]["quote"][0]
+                res0 = j["chart"]["result"][0]
+                raw_ts = res0.get("timestamp", []) or []
+                q = res0["indicators"]["quote"][0]
+                raw_c = q.get("close", []) or []
+                raw_h = q.get("high", []) or []
+                raw_l = q.get("low", []) or []
+                raw_o = q.get("open", []) or []
+                raw_v = q.get("volume", []) or []
 
-                def clean(lst):
-                    return [float(x) for x in lst if x is not None and lo < float(x) < hi]
+                aligned = []
+                for idx in range(min(len(raw_c), len(raw_h), len(raw_l), len(raw_o))):
+                    cv, hv, lv, ov = raw_c[idx], raw_h[idx], raw_l[idx], raw_o[idx]
+                    if cv is None or hv is None or lv is None or ov is None:
+                        continue
+                    cf, hf, lf, of = float(cv), float(hv), float(lv), float(ov)
+                    if not (lo < cf < hi and lo < hf < hi and lo < lf < hi and lo < of < hi):
+                        continue
+                    ts_ms = int(raw_ts[idx]) * 1000 if idx < len(raw_ts) and raw_ts[idx] is not None else 0
+                    vv = float(raw_v[idx]) if idx < len(raw_v) and raw_v[idx] else 1.0
+                    aligned.append((ts_ms, of, hf, lf, cf, vv))
 
-                closes  = clean(q.get("close",  []))
-                highs   = clean(q.get("high",   []))
-                lows    = clean(q.get("low",    []))
-                opens   = clean(q.get("open",   []))
-                volumes = [float(x) if x else 1.0 for x in q.get("volume", [])]
-
-                if len(closes) < 20:
+                if len(aligned) < 10:
                     continue
 
-                n = min(len(closes), len(highs), len(lows), len(opens), len(volumes), limit)
-                c = closes[-n:]
-                h = highs[-n:]   if len(highs)   >= n else c
-                l = lows[-n:]
-                o = opens[-n:]   if len(opens)   >= n else c
-                v = volumes[-n:] if len(volumes) >= n else [1.0] * n
+                aligned = aligned[-limit:]
+                ts_list = [x[0] for x in aligned]
+                o = [x[1] for x in aligned]
+                h = [x[2] for x in aligned]
+                l = [x[3] for x in aligned]
+                c = [x[4] for x in aligned]
+                v = [x[5] for x in aligned]
 
-                return {"open": o, "high": h, "low": l, "close": c,
+                return {"timestamp": ts_list, "open": o, "high": h, "low": l, "close": c,
                         "volume": v, "taker_buy_vol": [x * 0.52 for x in v]}
             except Exception as e:
                 log.warning("Yahoo klines %s %s %s: %s", symbol, interval, base, e)
@@ -553,7 +568,10 @@ class StockFetcher:
         c = [p * (1 + random.uniform(-0.003, 0.003)) for _ in range(limit)]
         c[-1] = p
         v = [random.uniform(1000, 5000) for _ in range(limit)]
-        return {"open": c[:], "high": [x * 1.005 for x in c],
+        now_ms = int(time.time() * 1000)
+        step_ms = {"5m": 300000, "15m": 900000, "1h": 3600000, "4h": 14400000, "1d": 86400000, "1w": 604800000}.get(interval, 3600000)
+        ts_list = [now_ms - (limit - 1 - i) * step_ms for i in range(limit)]
+        return {"timestamp": ts_list, "open": c[:], "high": [x * 1.005 for x in c],
                 "low": [x * 0.995 for x in c], "close": c,
                 "volume": v, "taker_buy_vol": [x * 0.52 for x in v]}
 

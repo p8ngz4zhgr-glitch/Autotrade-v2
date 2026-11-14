@@ -23,7 +23,7 @@ from sqlalchemy import func
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from core_api.models import SessionLocal, User, TradeJournal
+from core_api.models import SessionLocal, User, TradeJournal, SignalStats, AppConfig
 from core_api.security import encrypt_api_secret, decrypt_api_secret
 from analyzer.main_scanner import SignalBot
 from worker.bingx_trader import BingXExchange
@@ -233,26 +233,6 @@ def _tg_send(token: str, chat_id: str, text: str):
     except Exception as e:
         log.warning("_tg_send exception: %s", e)
         return False
-
-def _save_journal(uid: str, sym: str, direction: str, pnl_pct: float, qty: float):
-    try:
-        db = SessionLocal()
-        user = db.query(User).filter(User.telegram_id == uid).first()
-        j = TradeJournal(
-            symbol=sym,
-            user_id=uid,
-            tier=user.tier if user else "TIER1",
-            direction=direction,
-            outcome="WIN" if pnl_pct > 0 else "LOSS",
-            pnl_pct=pnl_pct,
-            pnl_usd=0.0,
-            lesson="Early Exit"
-        )
-        db.add(j)
-        db.commit()
-        db.close()
-    except Exception as e:
-        pass
 
 def run_signal_bot():
     try:
@@ -478,81 +458,45 @@ def _register_telegram_webhook():
 
 def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 5, sl_pct: float = 0.02) -> tuple[int, str, dict]:
     """
-    TÍNH TOÁN ĐÒN BẨY LINH ĐỘNG (DYNAMIC LEVERAGE 5x - 15x):
-    - Khi thị trường SIDEWAYS hoặc dao động biên hẹp: giữ đòn bẩy cơ bản / thấp (5x) để phòng thủ an toàn.
-    - Khi lệnh THEO TREND (Trend Following, MTF 4H&1H đồng thuận, HMM rõ xu hướng, ADX cao):
-        + Trend khởi phát / Trend thường: 8x - 10x
-        + Trend mạnh (ADX >= 25, HMM Uptrend/Downtrend đồng thuận, Confidence >= 76%): 12x
-        + Super Trend / Breakout bứt phá (ADX >= 35, Breakout xác nhận, Bayes P_win >= 60% hoặc Conf >= 85%): 15x
+    TÍNH TOÁN ĐÒN BẨY LINH ĐỘNG (DYNAMIC LEVERAGE 5x - 15x) THEO PHƯƠNG PHÁP TRADERSZ:
+    - Khi ở vùng giữa Range / No-Trade Zone hoặc Deviation ngược HTF Bias: giữ đòn bẩy 5x phòng thủ.
+    - Khi có Deviation / SFP chuẩn trên 1H/4H/1D: 6x - 10x.
+    - Khi A+ Setup (SFP khung 1H/4H/1D + Đồng thuận Macro Opens YO/MO/WO + R:R >= 2.5 + Conf >= 84%): 12x - 15x.
     - CHỐT CHẶN AN TOÀN CHỐNG CHÁY (Anti-Liquidation Shield):
-        + Đảm bảo khoảng cách giá thanh lý luôn xa gấp ít nhất 2.5x - 3x khoảng cách SL:
-          max_safe_by_sl = max(5, int(0.60 / sl_pct))
+        + Đảm bảo khoảng cách thanh lý luôn xa gấp >= 3x khoảng cách SL:
+          max_safe_by_sl = max(5, int(round(0.60 / sl_pct)))
         + Giới hạn cứng trong khoảng [5, 15].
     """
     direction = signal.get("direction") or signal.get("final") or "WAIT"
-    trade_regime = signal.get("trade_regime", "NORMAL")
-    hmm = signal.get("hmm", {})
-    hmm_regime = hmm.get("regime", "UNKNOWN") if isinstance(hmm, dict) else str(hmm)
-    
-    adx_1h = signal.get("adx_1h", {})
-    adx_4h = signal.get("adx_4h", {})
-    adx_1h_val = float(adx_1h.get("adx", 0)) if isinstance(adx_1h, dict) else 0.0
-    adx_4h_val = float(adx_4h.get("adx", 0)) if isinstance(adx_4h, dict) else 0.0
-    adx_val = max(adx_1h_val, adx_4h_val)
-
+    trade_regime = signal.get("trade_regime", "RANGE_DEVIATION")
+    tsz = signal.get("traderssz", {})
+    setup = tsz.get("setup", {}) if isinstance(tsz, dict) else {}
+    is_htf_aligned = bool(tsz.get("is_htf_aligned", False)) if isinstance(tsz, dict) else False
+    rr_ratio = float(signal.get("rr_ratio", 2.0))
     conf = float(signal.get("confidence", 70.0))
-    bayes_p = float(signal.get("bayes_ev", {}).get("p_win", 50.0)) if isinstance(signal.get("bayes_ev"), dict) else 50.0
-    is_breakout = bool(
-        (isinstance(signal.get("breakout"), dict) and signal.get("breakout", {}).get("type", "NONE") != "NONE") or
-        (isinstance(signal.get("plan"), dict) and signal.get("plan", {}).get("breakout_override"))
-    )
+    setup_tf = str(setup.get("tf", ""))
 
-    # Nhận diện trạng thái Sideway / Đi ngang
-    is_sideway = (
-        trade_regime == "SIDEWAY_RANGE" or
-        hmm_regime in ("SIDEWAYS", "NEUTRAL") or
-        (adx_val > 0 and adx_val < 20.0 and not is_breakout)
-    )
-    is_counter_trend = (trade_regime == "COUNTER_TREND")
-
-    # Nhận diện thuận xu hướng
-    is_trend_following = (
-        trade_regime == "TREND_FOLLOWING" or
-        (direction == "LONG" and hmm_regime in ("UPTREND", "BULLISH")) or
-        (direction == "SHORT" and hmm_regime in ("DOWNTREND", "BEARISH")) or
-        is_breakout
-    )
-
-    if is_sideway:
+    if trade_regime == "NO_TRADE_RANGE" or direction == "WAIT":
         target_lev = 5
-        mode = "SIDEWAY"
-        reason = "Sideway/Đi ngang (Giữ đòn bẩy an toàn 5x để phòng thủ)"
-    elif is_counter_trend:
-        target_lev = 5
-        mode = "COUNTER_TREND"
-        reason = "Sóng hồi ngược trend (Giữ đòn bẩy 5x kiểm soát rủi ro)"
-    elif is_trend_following:
-        if is_breakout or adx_val >= 35.0 or (conf >= 85.0 and bayes_p >= 60.0):
+        mode = "NO_TRADE_RANGE"
+        reason = "Vùng giữa Range / Chưa có SFP (Giữ đòn bẩy an toàn 5x)"
+    elif trade_regime == "TREND_FOLLOWING" or (is_htf_aligned and setup_tf in ("1d", "4h", "1h") and rr_ratio >= 2.5):
+        if conf >= 88.0 and rr_ratio >= 3.0:
             target_lev = 15
-            mode = "SUPER_TREND"
-            reason = f"Super Trend Breakout (ADX: {adx_val:.1f}, Conf: {conf:.1f}%) -> Nâng tối đa 15x bắt trọn sóng lớn"
-        elif adx_val >= 25.0 or conf >= 76.0 or bayes_p >= 58.0:
+            mode = "TRADERSZ_A_PLUS"
+            reason = f"TraderSZ A+ HTF Deviation + Opens Confluence (Conf: {conf:.1f}%, R:R 1:{rr_ratio:.1f}) -> 15x"
+        else:
             target_lev = 12
-            mode = "STRONG_TREND"
-            reason = f"Xu hướng rõ nét (ADX: {adx_val:.1f}, HMM: {hmm_regime}) -> Nâng đòn bẩy lên 12x gia tăng lợi nhuận"
-        else:
-            target_lev = 10
-            mode = "TREND_FOLLOWING"
-            reason = f"Thuận xu hướng đa khung MTF -> Nâng đòn bẩy lên 10x"
+            mode = "TRADERSZ_HTF_ALIGNED"
+            reason = f"TraderSZ SFP đồng thuận HTF & Opens (Conf: {conf:.1f}%, R:R 1:{rr_ratio:.1f}) -> 12x"
+    elif setup_tf in ("4h", "1h") and conf >= 78.0:
+        target_lev = 8 if is_htf_aligned else 6
+        mode = "RANGE_DEVIATION"
+        reason = f"TraderSZ {setup_tf.upper()} Range Deviation/SFP -> {target_lev}x"
     else:
-        if conf >= 80.0 and adx_val >= 22.0:
-            target_lev = 8
-            mode = "MODERATE_TREND"
-            reason = f"Tín hiệu xác suất cao (Conf: {conf:.1f}%) -> Nâng nhẹ đòn bẩy lên 8x"
-        else:
-            target_lev = 5
-            mode = "BASE"
-            reason = "Thị trường trung tính (Giữ đòn bẩy cơ bản 5x)"
+        target_lev = 5
+        mode = "RANGE_BASE"
+        reason = "Range Sweep phòng thủ (5x)"
 
     # Lớp bảo vệ chống thanh lý (Anti-Liquidation Shield)
     shield_applied = False
@@ -562,7 +506,7 @@ def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 5, sl_pct
             shield_applied = True
             prev_lev = target_lev
             target_lev = max_safe_by_sl
-            reason += f" [Shield: Hạ từ {prev_lev}x về {target_lev}x do SL {sl_pct*100:.1f}% để khoảng cách thanh lý xa gấp 3x SL]"
+            reason += f" [Shield: Hạ từ {prev_lev}x về {target_lev}x do SL {sl_pct*100:.1f}% để thanh lý xa gấp 3x SL]"
 
     effective_leverage = max(5, min(15, target_lev))
 
@@ -570,10 +514,8 @@ def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 5, sl_pct
         "mode": mode,
         "target_lev": target_lev,
         "effective_leverage": effective_leverage,
-        "is_sideway": is_sideway,
-        "is_trend_following": is_trend_following,
-        "adx": adx_val,
-        "hmm_regime": hmm_regime,
+        "is_htf_aligned": is_htf_aligned,
+        "setup_tf": setup_tf,
         "shield_applied": shield_applied,
         "reason": reason
     }
@@ -698,17 +640,16 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
         
         # ══════════════════════════════════════════════════════════
-        # BẢN VÁ: BẢO VỆ XU HƯỚNG LÕI - CHỐNG CHỐT LỜI NON
+        # BẢO VỆ CẤU TRÚC RANGE TRADERSZ - CHỐNG CHỐT LỜI NON
         # ══════════════════════════════════════════════════════════
-        kalman_trend = analysis.get("kalman", {}).get("trend", "NEUTRAL")
-        hmm_regime = analysis.get("hmm", {}).get("regime", "UNKNOWN")
-        
+        tsz_bias = analysis.get("traderssz", {}).get("htf_bias", {}).get("bias", "RANGE_NEUTRAL")
+        hmm_regime = analysis.get("hmm", {}).get("regime", tsz_bias)
+
         ai_same_dir = (new_direction == direction)
-        kalman_same_dir = (direction == "LONG" and kalman_trend == "BULLISH") or (direction == "SHORT" and kalman_trend == "BEARISH")
-        hmm_same_dir = (direction == "LONG" and hmm_regime == "UPTREND") or (direction == "SHORT" and hmm_regime == "DOWNTREND")
-        
-        # Xu thế ĐƯỢC COI LÀ CÒN ACTIVE nếu: AI đồng thuận, HOẶC (AI báo WAIT do EV thấp NHƯNG Kalman/HMM vẫn đang giữ form tăng/giảm)
-        is_trend_active = ai_same_dir or (new_direction == "WAIT" and (kalman_same_dir or hmm_same_dir))
+        htf_same_dir = (direction == "LONG" and tsz_bias == "BULLISH") or (direction == "SHORT" and tsz_bias == "BEARISH")
+
+        # Vị thế còn hiệu lực nếu: TraderSZ đồng thuận, HOẶC đang giữ hướng trong Range chờ chạy tới EQ/Opposite Edge
+        is_trend_active = ai_same_dir or (new_direction == "WAIT" and htf_same_dir)
         
         # Bóc tách 4 mốc TP (thay cho tp1/tp2 cũ) 
         plan = analysis.get("plan", {})
@@ -820,17 +761,14 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 emoji = "🚨"
                 reason = f"Trạng thái âm {pnl_pct:.2f}% vượt quá ngưỡng lỗ tối đa cho phép ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Cắt lỗ bảo toàn tài sản."
 
-            # [TẦNG ƯU TIÊN 1.5]: CẢNH BÁO TIN XẤU VÀ DÒNG TIỀN (CHỈ CẮT KHI ÂM TRÊN -25% ROE)
+            # [TẦNG ƯU TIÊN 1.5]: CẢNH BÁO TIN XẤU & ĐỐI NGHỊCH HTF BIAS (CHỈ CẮT KHI ÂM TRÊN -25% ROE)
             else:
                 news_risk_data = analysis.get("news_risk", {})
                 has_news_risk = news_risk_data.get("active", False) or (news_risk_data.get("sl_tighten_mult", 1.0) < 1.0)
-                
-                smart_score = analysis.get("smart_score", 0)
-                press_val = analysis.get("pressure", "NEUTRAL")
-                cvd_val = analysis.get("cvd_trend", "NEUTRAL")
 
-                is_pressure_against = (direction == "LONG" and (press_val == "BEARISH" or cvd_val in ("BEARISH", "BEARISH_DIV") or smart_score <= -25)) or \
-                                      (direction == "SHORT" and (press_val == "BULLISH" or cvd_val in ("BULLISH", "BULLISH_DIV") or smart_score >= 25))
+                htf_bias_val = analysis.get("traderssz", {}).get("htf_bias", {}).get("bias", "RANGE_NEUTRAL")
+                is_bias_against = (direction == "LONG" and htf_bias_val == "BEARISH" and is_reversal) or \
+                                  (direction == "SHORT" and htf_bias_val == "BULLISH" and is_reversal)
 
                 if has_news_risk and pnl_pct <= -25.0:
                     action = "CLOSE_ALL"
@@ -838,11 +776,11 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     emoji = "📰"
                     reason = f"Cảnh báo tin xấu từ AI Scanner khi lệnh âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ khẩn cấp."
 
-                elif is_pressure_against and pnl_pct <= -25.0:
+                elif is_bias_against and pnl_pct <= -25.0:
                     action = "CLOSE_ALL"
-                    action_type = "CẮT LỖ SỚM (DÒNG TIỀN ĐẢO CHIỀU MẠNH)"
+                    action_type = "CẮT LỖ SỚM (DEVIATION NGƯỢC CHIỀU HTF)"
                     emoji = "📉"
-                    reason = f"Smart Money đảo chiều chống lại vị thế khi PnL âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ sớm."
+                    reason = f"Cấu trúc TraderSZ HTF đảo chiều chống lại vị thế khi PnL âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ sớm."
 
             if action == "KEEP":
                 # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG CÓ DẤU HIỆU ĐẢO CHIỀU SO VỚI LỆNH (REVERSAL CHECK)
@@ -1278,8 +1216,8 @@ def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty
 
             result = "WIN" if pnl_pct > 0 else "LOSS"
             lesson = (f"Lệnh {direction} {result} {round(abs(pnl_pct),2)}%. "
-                      + ("Xu hướng & timing tốt." if result == "WIN"
-                         else "Kiểm tra CVD, volume, Wyckoff trước khi vào tiếp."))
+                      + ("Tuân thủ tốt cấu trúc Range & Deviation TraderSZ." if result == "WIN"
+                         else "Kiểm tra lại Dealing Range (PDH/PDL/Monday), vùng 50% EQ và nến xác nhận SFP/Return-to-Range trước khi vào tiếp."))
             outcome = "TP" if pnl_pct > 0 else "SL"
 
             # [NEW v6.5] Đính kèm feature snapshot lúc vào lệnh (nếu còn trong Redis)
@@ -1691,8 +1629,149 @@ def _register_telegram_webhook():
             log.warning("⚠️ Error registering Telegram Webhook: %s", e)
 
 
+TRADERSZ_CLEAN_SLATE_TAG = "TRADERSZ_CLEAN_SLATE_V1"
+
+
+def _clear_history_cache_keys(user_id: Optional[str] = None) -> int:
+    """Xoá các khoá cooldown, feature snapshot, scale-out và tín hiệu cũ trong Redis/LocalStore."""
+    cleared = 0
+    uid = str(user_id).strip() if user_id else None
+    if uid:
+        prefixes = (
+            f"PENDING:{uid}:",
+            f"REVERSAL_CLOSED:{uid}:",
+            f"ENTRY_FEATURES_{uid}_",
+            f"SCALE_OUT_{uid}_",
+            f"ORIGINAL_QTY_{uid}_",
+            f"TP1_DONE:{uid}:",
+            f"TRAILING_SL_{uid}_",
+            f"BREAKEVEN_{uid}_",
+            "SL_COOLDOWN_",
+            "PEAK_PRICE_",
+        )
+        exact_keys: tuple[str, ...] = ()
+    else:
+        prefixes = (
+            "PENDING:",
+            "REVERSAL_CLOSED:",
+            "SL_COOLDOWN_",
+            "ENTRY_FEATURES_",
+            "SCALE_OUT_",
+            "PEAK_PRICE_",
+            "ORIGINAL_QTY_",
+            "TP1_DONE:",
+            "TRAILING_SL_",
+            "BREAKEVEN_",
+        )
+        exact_keys = ("TRADE_SIGNALS", "WEB_SIGNALS", "WEB_SIGNALS_RECORD")
+
+    try:
+        cleared += local_store.delete_by_prefix(prefixes)
+        if exact_keys:
+            cleared += local_store.delete(*exact_keys)
+    except Exception as e:
+        log.warning("Lỗi dọn LocalStore khi reset lịch sử: %s", e)
+
+    if redis_client:
+        try:
+            for pfx in prefixes:
+                matched = redis_client.keys(f"{pfx}*")
+                if matched:
+                    cleared += int(redis_client.delete(*matched) or 0)
+            if exact_keys:
+                cleared += int(redis_client.delete(*exact_keys) or 0)
+        except Exception as e:
+            log.warning("Lỗi dọn Redis khi reset lịch sử: %s", e)
+
+    try:
+        if uid:
+            stale_notif_keys = [k for k in list(_SENT_NOTIFICATIONS.keys()) if f"_{uid}_" in k]
+            for k in stale_notif_keys:
+                _SENT_NOTIFICATIONS.pop(k, None)
+        else:
+            _SENT_NOTIFICATIONS.clear()
+            _LAST_REVERSAL_EVAL.clear()
+    except Exception:
+        pass
+
+    return cleared
+
+
+def reset_trade_history(user_id: Optional[str] = None, mark_tag: Optional[str] = None) -> dict:
+    """
+    Xoá lịch sử giao dịch cũ (TradeJournal, SignalStats, User.total_pnl, cache cooldown/features)
+    và reset MetaLabelFilter để bot dễ vào lệnh sạch theo phương pháp TraderSZ.
+    """
+    db = SessionLocal()
+    deleted_trades = 0
+    deleted_stats = 0
+    uid = str(user_id).strip() if user_id else None
+    try:
+        if uid:
+            deleted_trades = (
+                db.query(TradeJournal)
+                .filter(TradeJournal.user_id == uid)
+                .delete(synchronize_session=False)
+            )
+            db.query(User).filter(User.telegram_id == uid).update(
+                {"total_pnl": 0.0}, synchronize_session=False
+            )
+        else:
+            deleted_trades = db.query(TradeJournal).delete(synchronize_session=False)
+            deleted_stats = db.query(SignalStats).delete(synchronize_session=False)
+            db.query(User).update({"total_pnl": 0.0}, synchronize_session=False)
+
+        if mark_tag is not None:
+            cfg_row = db.query(AppConfig).first()
+            if not cfg_row:
+                cfg_row = AppConfig(bot_active=True, kill_switch=False, strategy_reset_tag=mark_tag)
+                db.add(cfg_row)
+            else:
+                cfg_row.strategy_reset_tag = mark_tag
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.error("reset_trade_history DB error: %s", e)
+        return {"ok": False, "msg": f"Lỗi xoá lịch sử DB: {e}"}
+    finally:
+        db.close()
+
+    cleared_cache_keys = _clear_history_cache_keys(user_id=uid)
+    MetaLabelFilter.reset_cache()
+
+    return {
+        "ok": True,
+        "scope": uid or "ALL",
+        "deleted_trades": int(deleted_trades or 0),
+        "deleted_stats": int(deleted_stats or 0),
+        "cleared_cache_keys": int(cleared_cache_keys or 0),
+    }
+
+
+def _run_one_time_traderssz_reset():
+    db = SessionLocal()
+    try:
+        cfg_row = db.query(AppConfig).first()
+        if cfg_row and cfg_row.strategy_reset_tag == TRADERSZ_CLEAN_SLATE_TAG:
+            return
+    except Exception as e:
+        log.warning("Kiểm tra strategy_reset_tag lỗi: %s", e)
+        return
+    finally:
+        db.close()
+
+    res = reset_trade_history(user_id=None, mark_tag=TRADERSZ_CLEAN_SLATE_TAG)
+    if res.get("ok"):
+        log.info(
+            "🧹 [TRADERSZ CLEAN SLATE] Đã tự động xoá lịch sử giao dịch cũ (%d lệnh, %d stats, %d cache keys) để bắt đầu lưu lịch sử TraderSZ mới.",
+            res.get("deleted_trades", 0), res.get("deleted_stats", 0), res.get("cleared_cache_keys", 0),
+        )
+
+
 @app.on_event("startup")
 async def startup_event():
+    _run_one_time_traderssz_reset()
     threading.Thread(target=run_signal_bot,         daemon=True, name="signal-bot").start()
     threading.Thread(target=run_trade_worker,       daemon=True, name="trade-worker").start()
     threading.Thread(target=sync_bingx_positions,   daemon=True, name="pos-sync").start()
@@ -1816,6 +1895,25 @@ async def tg_webhook_bot2(request: Request):
         elif text.startswith("/close "):
             symbol = text.split(" ", 1)[1].strip().upper()
             _handle_user_close(chat_id, symbol)
+
+        elif text.lower().startswith(("/xoalichsu", "/resethistory", "/clearhistory")):
+            parts = text.strip().split()
+            want_all = len(parts) >= 2 and parts[1].lower() == "all"
+            is_admin = (not ADMIN_CHAT_ID) or (str(chat_id) == str(ADMIN_CHAT_ID))
+            target_uid = None if (want_all and is_admin) else chat_id
+            res = reset_trade_history(user_id=target_uid)
+            if res.get("ok"):
+                scope_label = "TOÀN HỆ THỐNG" if target_uid is None else "tài khoản của bạn"
+                _tg_send(
+                    REGISTER_TOKEN, chat_id,
+                    f"🧹 <b>ĐÃ XOÁ LỊCH SỬ GIAO DỊCH CŨ ({scope_label})!</b>\n\n"
+                    f"• Đã xoá: <b>{res.get('deleted_trades', 0)}</b> lệnh cũ trong TradeJournal\n"
+                    f"• Đã dọn: <b>{res.get('cleared_cache_keys', 0)}</b> khoá cooldown / cache cũ\n"
+                    f"• Đã gỡ bỏ: Daily Loss Circuit Breaker, điểm phạt Winrate cũ (-22%/-32%) & Meta-Labeling cũ.\n\n"
+                    f"✅ Hệ thống đã sẵn sàng ghi nhận lịch sử giao dịch mới theo chuẩn <b>TraderSZ</b> và vào lệnh thông thoáng!"
+                )
+            else:
+                _tg_send(REGISTER_TOKEN, chat_id, f"❌ Lỗi xoá lịch sử: {res.get('msg', 'Unknown')}")
 
     except Exception as e:
         log.error("tg_webhook_bot2: %s", e)
@@ -2198,6 +2296,17 @@ async def handle_cmd(request: Request, token: str = Query(default="")):
             threading.Thread(target=_cleanup_inactive_users, daemon=True).start()
             return {"ok": True, "msg": "Dang don DB..."}
 
+        if action == "reset_history":
+            tid = cmd.get("telegram_id") or None
+            res = reset_trade_history(user_id=tid)
+            if res.get("ok"):
+                return {
+                    "ok": True,
+                    "msg": f"🧹 Đã xoá {res.get('deleted_trades', 0)} lệnh lịch sử cũ & {res.get('cleared_cache_keys', 0)} khoá cooldown/cache. Sẵn sàng giao dịch TraderSZ mới!",
+                    **res,
+                }
+            return res
+
         if action == "trigger_signal":
             signal_data = cmd.get("signal", {})
             if not signal_data or not signal_data.get("symbol"):
@@ -2217,6 +2326,17 @@ async def handle_cmd(request: Request, token: str = Query(default="")):
 
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+
+
+@app.post("/api/history/reset")
+def api_reset_history(token: str = Query(default=""), uid: str = Query(default="")):
+    if token != ADMIN_SECRET:
+        raise HTTPException(401, "Unauthorized")
+    target_uid = uid.strip() if uid and uid.strip() else None
+    res = reset_trade_history(user_id=target_uid)
+    if res.get("ok"):
+        res["msg"] = f"🧹 Đã xoá {res.get('deleted_trades', 0)} lệnh cũ & dọn {res.get('cleared_cache_keys', 0)} cache cooldown."
+    return res
 
 
 @app.post("/api/user/close")
@@ -2479,7 +2599,7 @@ ADMIN_DASHBOARD_HTML = """
 
                     <div class="border-t border-[#1b263e]/40 my-1"></div>
 
-                    <div class="grid grid-cols-3 gap-2">
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
                         <button onclick="triggerAction('send_report', {type: 'daily'})" class="py-2 px-1 text-center bg-[#070b16] hover:bg-[#141d2e] rounded border border-[#1b263e] text-[10px] font-black text-[#e2e8f0] transition-all">
                             📊 BÁO CÁO NGÀY
                         </button>
@@ -2488,6 +2608,9 @@ ADMIN_DASHBOARD_HTML = """
                         </button>
                         <button onclick="triggerAction('cleanup')" class="py-2 px-1 text-center bg-[#070b16] hover:bg-[#141d2e] rounded border border-[#1b263e] text-[10px] font-black text-[#e2e8f0] transition-all">
                             🧹 DỌN DẸP DB
+                        </button>
+                        <button onclick="if(confirm('Xoá toàn bộ lịch sử giao dịch cũ, reset Circuit Breaker & điểm phạt Winrate để bắt đầu giao dịch TraderSZ mới?')) triggerAction('reset_history')" class="py-2 px-1 text-center bg-amber-950/30 hover:bg-amber-900/40 rounded border border-amber-500/30 text-[10px] font-black text-amber-300 transition-all">
+                            🗑️ XOÁ LỊCH SỬ GD
                         </button>
                     </div>
                 </div>

@@ -79,21 +79,19 @@ class SignalBot:
         self.log.info("🧹 RAM đã dọn dẹp")
 
     def should_send(self, symbol, new):
-        sweep = new.get("liquidity_sweep", {})
-        if sweep.get("detected"):
-            return True, f"🔥 LIQUIDITY SWEEP ({sweep.get('type')})"
+        tsz = new.get("traderssz", {})
+        setup = tsz.get("setup", {})
+        if setup.get("detected") and new.get("final") in ("LONG", "SHORT"):
+            return True, f"🔥 TRADERSZ {setup.get('tf','').upper()} {setup.get('setup_type','SFP')} ({new['final']})"
         prev = self.last_signals.get(symbol)
         if not prev or not prev.get("final"):
             return True, "lần đầu"
         if prev["final"] != new["final"]:
             return True, "signal đổi " + prev["final"] + "→" + new["final"]
-        if prev.get("wyckoff", {}).get("phase") != new.get("wyckoff", {}).get("phase"):
-            return True, "Wyckoff đổi pha"
-        bo = new.get("breakout", {})
-        if bo.get("type", "NONE") != "NONE" and bo.get("strength", 0) >= 60:
-            return True, "Breakout " + bo["type"]
-        if new.get("whale", {}).get("detected"):
-            return True, "Whale detected"
+        prev_zone = prev.get("traderssz", {}).get("htf_opens_and_ranges", {}).get("market_zone")
+        new_zone  = tsz.get("htf_opens_and_ranges", {}).get("market_zone")
+        if prev_zone and new_zone and prev_zone != new_zone:
+            return True, f"TraderSZ đổi vùng {prev_zone}→{new_zone}"
         if new["confidence"] >= 80 and new["final"] != "WAIT":
             return True, "confidence cao"
         return False, "không đổi"
@@ -292,13 +290,13 @@ class SignalBot:
                     continue
 
                 llm_text, llm = self.llm.analyze(data)
-                v1h = data.get("volume_1h", {})
+                htf = data.get("traderssz", {}).get("htf_opens_and_ranges", {})
 
-                self.log.info("  %s: %s %.1f%% | CVD:%s | Vol:%s(%.1fx) | Press:%s | LLM:%s",
+                self.log.info("  %s: %s %.1f%% | Zone:%s (%.1f%%) | Range:%s [$%.2f-$%.2f EQ:$%.2f] | LLM:%s",
                               sym, data["final"], data["confidence"],
-                              data.get("cvd", {}).get("trend", "?"),
-                              v1h.get("vol_trend", "?"), v1h.get("vol_ratio", 1),
-                              v1h.get("pressure", "?"), llm)
+                              htf.get("market_zone", "?"), htf.get("range_pos_pct", 50.0),
+                              htf.get("range_name", "?"), htf.get("range_low", 0), htf.get("range_high", 0), htf.get("eq_50", 0),
+                              llm)
 
                 should, reason = self.should_send(sym, data)
                 if should:
@@ -350,26 +348,29 @@ class SignalBot:
                 return
             now = self.dt.now().strftime("%d/%m/%Y %H:%M")
             SIG = {"LONG": "🚀", "SHORT": "📉", "WAIT": "⏳"}
-            WY  = {"ACCUMULATION": "🔵", "MARKUP": "🟢", "RE-ACCUMULATION": "🟩",
-                   "DISTRIBUTION": "🔴", "MARKDOWN": "⛔", "TRANSITION": "⚪"}
-            rows = ["📋 <b>BÁO CÁO ĐỊNH KỲ</b>", "🕐 " + now, "━━━━━━━━━━━━━━━━━━━━━━━━━", "🪙 <b>CRYPTO</b>"]
+            ZONE_IC = {"PREMIUM": "🔴", "DISCOUNT": "🟢", "NO_TRADE_EQ_ZONE": "⚪"}
+            rows = ["📋 <b>BÁO CÁO ĐỊNH KỲ TRADERSZ</b>", "🕐 " + now, "━━━━━━━━━━━━━━━━━━━━━━━━━", "🪙 <b>CRYPTO</b>"]
             for sym in self.CRYPTO_SYMBOLS:
                 d = self.last_signals.get(sym)
                 if not d or not d.get("final"): continue
-                wy  = d.get("wyckoff", {}).get("phase", "?")
+                htf = d.get("traderssz", {}).get("htf_opens_and_ranges", {})
+                zn = htf.get("market_zone", "?")
+                eq = htf.get("eq_50", 0)
                 bar = "█" * int(d["confidence"] / 10) + "░" * (10 - int(d["confidence"] / 10))
-                rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym[:3] + "</b> <code>$" +
+                rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym[:4] + "</b> <code>$" +
                              str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
-                             str(d["confidence"]) + "% [" + bar + "] " + WY.get(wy, "⚪") + wy)
-            rows.append("\n📈 <b>CỔ PHIẾU MỸ</b>")
+                             str(d["confidence"]) + "% [" + bar + "] " + ZONE_IC.get(zn, "⚪") + f"{zn} (EQ:${eq})")
+            rows.append("\n📈 <b>CỔ PHIẾU & VÀNG</b>")
             for sym in ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]:
                 d = self.last_signals.get(sym)
                 if not d or not d.get("final"): continue
-                wy = d.get("wyckoff", {}).get("phase", "?")
+                htf = d.get("traderssz", {}).get("htf_opens_and_ranges", {})
+                zn = htf.get("market_zone", "?")
+                eq = htf.get("eq_50", 0)
                 rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym + "</b> <code>$" +
                              str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
-                             str(d["confidence"]) + "% " + WY.get(wy, "⚪") + wy)
-            rows += ["\n━━━━━━━━━━━━━━━━━━━━━━━━━", "✅ SignalBot v6.1 Core đang chạy bình thường"]
+                             str(d["confidence"]) + "% " + ZONE_IC.get(zn, "⚪") + f"{zn} (EQ:${eq})")
+            rows += ["\n━━━━━━━━━━━━━━━━━━━━━━━━━", "✅ SignalBot Pure TraderSZ đang chạy bình thường"]
             self.tg.send("\n".join(rows))
             self.log.info("📋 Báo cáo định kỳ đã gửi")
         except Exception as e:

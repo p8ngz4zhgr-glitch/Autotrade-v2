@@ -41,11 +41,11 @@ class Config:
         self.CONSECUTIVE_LOSS_LIMIT   = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
         self.AUTO_BREAKEVEN_ON_TP1    = os.getenv("AUTO_BREAKEVEN_ON_TP1", "true").lower() == "true"
 
-        # ── Tích hợp Chiến lược Các Huyền Thoại (Famous Traders Framework) ──
-        self.ENABLE_ELDER_TRIPLE_SCREEN = os.getenv("ENABLE_ELDER_TRIPLE_SCREEN", "true").lower() == "true"
-        self.ENABLE_ICT_SWEEP_FILTER    = os.getenv("ENABLE_ICT_SWEEP_FILTER", "true").lower() == "true"
-        self.ENABLE_MINERVINI_VCP       = os.getenv("ENABLE_MINERVINI_VCP", "true").lower() == "true"
-        self.ENABLE_WILLIAMS_SCALING    = os.getenv("ENABLE_WILLIAMS_SCALING", "true").lower() == "true"
+        # ── Cấu hình Hệ thống Giao dịch Thuần Price Action TraderSZ ──
+        self.TRADERSSZ_MODE               = os.getenv("TRADERSSZ_MODE", "true").lower() == "true"
+        self.TRADERSSZ_SL_BUFFER_PCT      = float(os.getenv("TRADERSSZ_SL_BUFFER_PCT", "0.0020"))
+        self.TRADERSSZ_EQ_NO_TRADE_BAND   = float(os.getenv("TRADERSSZ_EQ_NO_TRADE_BAND", "0.18"))
+        self.TRADERSSZ_MIN_RR             = float(os.getenv("TRADERSSZ_MIN_RR", "1.5"))
 
         self._validate()
 

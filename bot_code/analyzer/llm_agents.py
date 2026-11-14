@@ -200,25 +200,29 @@ class LLMChain:
         ))
 
     def _prompt(self, data):
-        fibo  = data.get("fibo", {})
-        wy    = data.get("wyckoff", {})
-        cvd   = data.get("cvd", {})
-        vol   = data.get("volume_1h", {})
-        ell   = data.get("elliott_4h", {})
+        tsz   = data.get("traderssz", {})
+        htf   = tsz.get("htf_opens_and_ranges", {})
+        setup = tsz.get("setup", {})
+        bias  = tsz.get("htf_bias", {})
         atype = data.get("asset_type", "CRYPTO")
-        ctx   = {"CRYPTO": "crypto futures", "STOCK": "cổ phiếu Mỹ",
-                 "GOLD":   "vàng NCCOGOLD2USD-USDT"}.get(atype, "")
+        ctx   = {"CRYPTO": "crypto futures", "STOCK": "co phieu My",
+                 "GOLD":   "vang XAU"}.get(atype, "")
         tfs   = " | ".join(tf + ":" + r["direction"][0] + "(" + str(r["score"]) + ")"
-                           for tf, r in data["timeframes"].items())
-        return ("Chuyên gia " + ctx + ". Phân tích ngắn (150 từ):\n"
+                           for tf, r in data.get("timeframes", {}).items())
+        return ("Chuyen gia Price Action " + ctx + " (phuong phap TraderSZ - Naked Chart). Phan tich ngan (150 tu):\n"
                 + data["symbol"] + " $" + str(data["price"]) + " | "
                 + data["final"] + " " + str(data["confidence"]) + "%\n"
                 "TF: " + tfs + "\n"
-                "Elliott:" + str(ell.get("wave_pattern","?")) + " (" + str(ell.get("current_wave","?")) + ")\n"
-                "CVD:" + str(cvd.get("trend","?")) + " Vol:" + str(vol.get("vol_trend","?")) + "\n"
-                "Fibo:" + str(fibo.get("trend","?")) + " Zone:" + str(fibo.get("zone","?")) + "\n"
-                "Wyckoff:" + str(wy.get("phase","?")) + " " + str(wy.get("bias","?")) + "\n"
-                "SL:$" + str(data["plan"]["sl"]) + " TP1:$" + str(data["plan"]["tp1"]) + "\n\n"
+                "Range: " + str(htf.get("range_name","?")) + " [RL=$" + str(htf.get("range_low",0))
+                + " | EQ50%=$" + str(htf.get("eq_50",0)) + " | RH=$" + str(htf.get("range_high",0))
+                + "] Zone=" + str(htf.get("market_zone","?")) + "\n"
+                "Opens: YO=$" + str(htf.get("year_open",0)) + " MO=$" + str(htf.get("monthly_open",0))
+                + " WO=$" + str(htf.get("weekly_open",0)) + " DO=$" + str(htf.get("daily_open",0)) + "\n"
+                "PDH/PDL=$" + str(htf.get("pdh",0)) + "/$" + str(htf.get("pdl",0))
+                + " | Monday=$" + str(htf.get("monday_low",0)) + "-$" + str(htf.get("monday_high",0)) + "\n"
+                "Deviation/SFP: " + str(setup.get("setup_type","NONE")) + " (HTF Bias=" + str(bias.get("bias","?")) + ")\n"
+                "SL=$" + str(data["plan"]["sl"]) + " TP1(EQ)=$" + str(data["plan"]["tp1"])
+                + " TP2(Edge)=$" + str(data["plan"]["tp2"]) + " RR=1:" + str(data.get("rr_ratio",2.0)) + "\n\n"
                 "Format:\nKY_THUAT: ...\nHANH_DONG: [MUA/BAN/CHO]\nRUI_RO: ...")
 
     def _groq(self, prompt):
@@ -343,145 +347,44 @@ class LLMChain:
         conf  = data["confidence"]
         price = data["price"]
         plan  = data["plan"]
-        fibo  = data.get("fibo", {})
-        wy    = data.get("wyckoff", {})
-        cvd   = data.get("cvd", {})
-        vol   = data.get("volume_1h", {})
-        bo    = data.get("breakout", {})
-        wh    = data.get("whale", {})
-        tfs   = data.get("timeframes", {})
-        lvls  = fibo.get("levels", {})
+        tsz   = data.get("traderssz", {})
+        htf   = tsz.get("htf_opens_and_ranges", {})
+        setup = tsz.get("setup", {})
+        bias  = tsz.get("htf_bias", {})
+        sess  = tsz.get("session", {})
         atype = data.get("asset_type", "CRYPTO")
-        fund     = data.get("funding", 0)
-        oi_sig   = data.get("oi_signal", "N/A")
-        oi_desc  = data.get("oi_desc", "")
+        fund  = data.get("funding", 0)
+        oi_sig = data.get("oi_signal", "N/A")
 
-        tf1h   = tfs.get("1h", {})
-        tf4h   = tfs.get("4h", {})
-        tf15m  = tfs.get("15m", {})
-        rsi_1h = tf1h.get("rsi", 50)
-        rsi_4h = tf4h.get("rsi", 50)
-        macd_1h = tf1h.get("macd", {}).get("cross", "NEUTRAL")
-        ema_1h  = tf1h.get("ema", {})
-        bb_1h   = tf1h.get("bb", {})
-        stoch_1h = tf1h.get("stoch", {})
-
-        tech_points = []
-        if atype == "CRYPTO" and oi_sig not in ("N/A", "NEUTRAL"):
-            tech_points.append("OI: " + oi_sig + " (" + oi_desc + "), funding=" + str(fund) + "%/8h")
-        elif atype == "CRYPTO" and abs(fund) >= 0.05:
-            tech_points.append("Funding=" + str(fund) + "%/8h — " +
-                                ("phe Long đang trả phí cao, hơi đông" if fund > 0 else "phe Short đang trả phí cao, hơi đông"))
-
-        if rsi_1h < 30:
-            tech_points.append("RSI 1H=" + str(rsi_1h) + " — vùng oversold mạnh, áp lực mua tăng")
-        elif rsi_1h < 45:
-            tech_points.append("RSI 1H=" + str(rsi_1h) + " — momentum yếu, chưa xác nhận đảo chiều")
-        elif rsi_1h > 70:
-            tech_points.append("RSI 1H=" + str(rsi_1h) + " — vùng overbought, cẩn thận pullback")
-        elif rsi_1h > 55:
-            tech_points.append("RSI 1H=" + str(rsi_1h) + " — momentum bullish đang hình thành")
+        pa_points = [
+            f"Dealing Range ({htf.get('range_label','?')}): RL=${htf.get('range_low',0)} | 50% EQ=${htf.get('eq_50',0)} | RH=${htf.get('range_high',0)}",
+            f"Vị trí giá: {htf.get('range_pos_pct',50)}% Range ({htf.get('market_zone','?')}) | Phiên {sess.get('session','?')}",
+            f"HTF Opens: YO=${htf.get('year_open',0)} · MO=${htf.get('monthly_open',0)} · WO=${htf.get('weekly_open',0)} · DO=${htf.get('daily_open',0)} ({bias.get('bias','?')})",
+        ]
+        if setup.get("detected"):
+            sfp_points = [
+                f"Xác nhận {setup.get('tf','').upper()} {setup.get('setup_type','SFP')} quét mốc ${setup.get('swept_level',0)} (râu ${setup.get('sweep_extreme',0)})",
+                f"Return to Range: Mục tiêu TP1 = 50% EQ (${plan['tp1']}) -> TP2 = Biên đối diện (${plan['tp2']}), R:R 1:{data.get('rr_ratio',2.0)}",
+            ]
         else:
-            tech_points.append("RSI 1H=" + str(rsi_1h) + " — trung tính, chờ xác nhận hướng")
-
-        if abs(rsi_1h - rsi_4h) < 10:
-            tech_points.append("RSI 4H=" + str(rsi_4h) + " — đồng thuận với 1H, tín hiệu đáng tin")
-        elif rsi_1h < 50 and rsi_4h > 55:
-            tech_points.append("RSI divergence: 1H bearish nhưng 4H vẫn bullish — cẩn thận")
-
-        if macd_1h == "BULL_CROSS":
-            hist = tf1h.get("macd", {}).get("hist", 0)
-            tech_points.append("MACD 1H bullish cross" +
-                                (" + histogram dương — đà tăng" if hist > 0 else " — chờ histogram xác nhận"))
-        elif macd_1h == "BEAR_CROSS":
-            tech_points.append("MACD 1H bearish cross — áp lực bán đang tăng")
-
-        if ema_1h.get("bull"):
-            tech_points.append("EMA 20>50>200: stack bullish hoàn chỉnh — uptrend trung hạn xác nhận")
-        elif ema_1h.get("bear"):
-            tech_points.append("EMA 20<50<200: stack bearish hoàn chỉnh — downtrend trung hạn xác nhận")
-
-        bb_pct = bb_1h.get("pct", 50)
-        if bb_1h.get("squeeze"):
-            tech_points.append("BB Squeeze — tích lũy, sắp có breakout mạnh")
-        elif bb_pct < 15:
-            tech_points.append("Giá gần BB Lower (" + str(bb_pct) + "%) — oversold ngắn hạn")
-        elif bb_pct > 85:
-            tech_points.append("Giá gần BB Upper (" + str(bb_pct) + "%) — overbought ngắn hạn")
-
-        fibo_wyc_points = []
-        fibo_trend = fibo.get("trend", "?")
-        fibo_zone  = fibo.get("zone", "BETWEEN")
-        in_golden  = fibo.get("in_golden", False)
-
-        if in_golden:
-            fibo_wyc_points.append(
-                "Giá trong Golden Zone 0.382-0.618 — " +
-                ("vùng mua lý tưởng trong uptrend" if fibo_trend == "UPTREND"
-                 else "vùng bán lý tưởng trong downtrend"))
-        elif "NEAR_0.618" in fibo_zone:
-            fibo_wyc_points.append(
-                "Giá test 0.618 ($" + str(lvls.get("0.618","?")) + ") — " +
-                ("support quan trọng" if fibo_trend == "UPTREND" else "resistance mạnh"))
-
-        wy_phase = wy.get("phase", "TRANSITION")
-        wy_bias  = wy.get("bias", "NEUTRAL")
-        wy_pos   = wy.get("pos_range", 50)
-        wy_desc  = {
-            "ACCUMULATION":    "Smart money đang gom hàng (Pos=" + str(wy_pos) + "%) — chuẩn bị tăng",
-            "MARKUP":          "Markup phase — uptrend xác nhận",
-            "RE-ACCUMULATION": "Tích lũy lại trước sóng kế tiếp",
-            "DISTRIBUTION":    "⚠️ Smart money phân phối (Pos=" + str(wy_pos) + "%) — rủi ro đảo chiều",
-            "MARKDOWN":        "Markdown phase — downtrend xác nhận",
-        }.get(wy_phase, "Phase đang chuyển đổi")
-        fibo_wyc_points.append("Wyckoff " + wy_phase + ": " + wy_desc)
-
-        ell = data.get("elliott_4h", {})
-        if ell.get("wave_pattern"):
-            fibo_wyc_points.append(f"Elliott Wave: {ell.get('wave_pattern')} ({ell.get('current_wave')}) — {ell.get('description')}")
-
-        smart_points = []
-        cvd_trend = cvd.get("trend", "NEUTRAL")
-        cvd_div   = cvd.get("divergence", False)
-        cvd_msgs  = {"BULLISH": "CVD BULLISH — áp lực mua thực sự đang tăng mạnh",
-                     "BEARISH": "CVD BEARISH — áp lực bán chiếm ưu thế",
-                     "BULLISH_DIV": "CVD Bullish Divergence — giá giảm nhưng lực mua tích lũy",
-                     "BEARISH_DIV": "⚠️ CVD Bearish Divergence — giá tăng nhưng lực mua yếu dần"}
-        if cvd_trend in cvd_msgs:
-            smart_points.append(cvd_msgs[cvd_trend])
-
-        obv_trend  = vol.get("obv_trend", "NEUTRAL")
-        vol_trend  = vol.get("vol_trend", "NORMAL")
-        vol_ratio  = vol.get("vol_ratio", 1.0)
-        pressure   = vol.get("pressure", "NEUTRAL")
-        buy_pct    = vol.get("buy_pct", 50)
-        poc_price  = vol.get("poc", price)
-
-        if vol_trend == "SURGE":
-            smart_points.append("Volume SURGE " + str(vol_ratio) + "x — xác nhận breakout")
-        elif vol_trend == "DRY":
-            smart_points.append("Volume cạn kiệt — thiếu conviction, tránh vào lệnh lớn")
-
-        if pressure == "STRONG_BUY":
-            smart_points.append("Buy Pressure " + str(buy_pct) + "% — người mua chiếm ưu thế")
-        elif pressure == "STRONG_SELL":
-            smart_points.append("Sell Pressure " + str(100-buy_pct) + "% — người bán chiếm ưu thế")
-
-        smart_points.append("POC $" + str(poc_price) + " — giá đang " + ("trên" if price > poc_price else "dưới") + " POC")
-
-        if bo.get("type","NONE") != "NONE":
-            smart_points.append(f"🚨 BREAKOUT: {bo.get('desc','')}")
+            sfp_points = [
+                tsz.get("reason", "Chưa có nến xác nhận quét biên RH/RL & Return to Range"),
+                "Tuân thủ No-Trade Zone quanh 50% EQ, kiên nhẫn đứng ngoài chờ bẫy thanh khoản.",
+            ]
+        extra_points = [f"4H Structure: {bias.get('h4_structure','?')}"]
+        if atype == "CRYPTO" and abs(fund) >= 0.03:
+            extra_points.append(f"Funding={fund:+.4f}%/8h ({oi_sig})")
 
         lines = [
-            "[RULE_BASE_ENGINE]",
-            "KY_THUAT:",
-            "  - " + "\n  - ".join(tech_points[:3]),
-            "FIBONACCI_WYCKOFF:",
-            "  - " + "\n  - ".join(fibo_wyc_points[:2]),
-            "ON_CHAIN_DERIVATIVES:",
-            "  - " + "\n  - ".join(smart_points[:3]),
-            "VERDICT: " + sig + " | Conf: " + str(conf) + "%",
-            "PLAN: Entry=" + str(price) + " SL=" + str(plan["sl"]) + " TP=" + str(plan["tp1"])
+            "[RULE_BASE_TRADERSZ]",
+            "DEALING_RANGE_OPENS:",
+            "  - " + "\n  - ".join(pa_points),
+            "DEVIATION_SFP_RETURN_TO_RANGE:",
+            "  - " + "\n  - ".join(sfp_points),
+            "HTF_LIQUIDITY_CONTEXT:",
+            "  - " + "\n  - ".join(extra_points),
+            f"VERDICT: {sig} | Conf: {conf}%",
+            f"PLAN: Entry={price} SL={plan['sl']} TP1(EQ)={plan['tp1']} TP2={plan['tp2']}",
         ]
         return "\n".join(lines)
 
@@ -680,54 +583,48 @@ class LLMChain:
         return self._call(full_prompt, fast=fast, min_len=1)
 
     def _summary(self, data):
-        fibo = data.get("fibo", {})
-        wy   = data.get("wyckoff", {})
-        cvd  = data.get("cvd", {})
-        vol  = data.get("volume_1h", {})
-        bo   = data.get("breakout", {})
-        lvls = fibo.get("levels", {})
-        
-        tfs  = "\n".join(
-            "  " + tf + ": " + r["direction"] +
-            " score=" + str(r["score"]) +
-            " rsi="   + str(r["rsi"]) +
-            " macd="  + r["macd"]["cross"]
-            for tf, r in data["timeframes"].items())
+        tsz   = data.get("traderssz", {})
+        htf   = tsz.get("htf_opens_and_ranges", {})
+        setup = tsz.get("setup", {})
+        bias  = tsz.get("htf_bias", {})
+        sess  = tsz.get("session", {})
+        tfs = "\n".join(
+            f"  {tf}: {r.get('direction','WAIT')} score={r.get('score',50)} ({r.get('note','')})"
+            for tf, r in data.get("timeframes", {}).items()
+        )
         return (
-            "Asset  : " + data["symbol"] + " (" + data.get("asset_type","") + ")\n"
-            "Gia    : $" + str(round(data["price"], 2)) + "\n"
-            "Signal : " + data["final"] + " " + str(data["confidence"]) + "%\n"
-            "TF:\n" + tfs + "\n"
-            "CVD=" + str(cvd.get("trend","?")) +
-            " OBV=" + str(vol.get("obv_trend","?")) +
-            " Vol=" + str(vol.get("vol_trend","?")) + "x" + str(vol.get("vol_ratio",1)) + "\n"
-            "Pressure=" + str(vol.get("pressure","?")) + "(" + str(vol.get("buy_pct",50)) + "%buy)"
-            " VWAP=$" + str(vol.get("vwap",0)) + "\n"
-            "Fibo=" + str(fibo.get("trend","?")) +
-            " Zone=" + str(fibo.get("zone","?")) + "\n"
-            "Wyckoff=" + str(wy.get("phase","?")) + " " + str(wy.get("bias","?")) + "\n"
-            "Breakout=" + str(bo.get("type","NONE"))
+            f"Asset   : {data['symbol']} ({data.get('asset_type','')})\n"
+            f"Gia     : ${round(data['price'], 4)}\n"
+            f"Signal  : {data['final']} {data['confidence']}%\n"
+            f"Session : {sess.get('session','?')} (Killzone={sess.get('is_killzone',False)})\n"
+            f"Range   : {htf.get('range_label','?')} [RL=${htf.get('range_low',0)} | 50% EQ=${htf.get('eq_50',0)} | RH=${htf.get('range_high',0)}]\n"
+            f"Zone    : {htf.get('market_zone','?')} (Pos={htf.get('range_pos_pct',50)}%)\n"
+            f"PDH/PDL : ${htf.get('pdh',0)} / ${htf.get('pdl',0)} | Monday=${htf.get('monday_low',0)}-${htf.get('monday_high',0)}\n"
+            f"Opens   : YO=${htf.get('year_open',0)} MO=${htf.get('monthly_open',0)} WO=${htf.get('weekly_open',0)} DO=${htf.get('daily_open',0)}\n"
+            f"HTFBias : {bias.get('bias','?')} (4H={bias.get('h4_structure','?')})\n"
+            f"SFP     : {setup.get('setup_type','NONE')} TF={setup.get('tf','?')} Swept=${setup.get('swept_level',0)} Extreme=${setup.get('sweep_extreme',0)}\n"
+            f"TF:\n{tfs}"
         )
 
     def _p_stage1(self, data):
         atype = data.get("asset_type","CRYPTO")
-        ctx = {"CRYPTO": "crypto. Xem on-chain, whale, derivatives",
-               "STOCK":  "co phieu My. Xem earnings, Fed, sector",
-               "GOLD":   "vang NCCOGOLD2USD-USDT. Xem DXY, lai suat Fed, CPI",
+        ctx = {"CRYPTO": "crypto futures",
+               "STOCK":  "co phieu My",
+               "GOLD":   "vang XAU",
                }.get(atype, "tai san tai chinh")
         return (
-            "Ban la 4 chuyen gia phan tich " + ctx + ".\n"
-            "QUY TAC: Moi agent bat dau bang [TAG] trong ngoac vuong.\n"
-            "Viet bang tieng Viet, ngan gon (toi da 80 tu/agent), dua vao so lieu cu the.\n\n"
+            "Ban la 4 chuyen gia Price Action theo phuong phap TraderSZ (Naked Chart) cho " + ctx + ".\n"
+            "QUY TAC: Moi agent bat dau bang [TAG] trong ngoac vuong. KHONG dung chi bao tre (RSI/MACD/EMA/BB).\n"
+            "Viet bang tieng Viet, ngan gon (toi da 80 tu/agent), dua vao Range, 50% EQ, Opens va Deviation/SFP.\n\n"
             "DU LIEU:\n" + self._summary(data) + "\n\n"
-            "[TECHNICAL_ANALYST]\nPhan tich RSI/MACD/EMA/BB/Fibonacci/Wyckoff.\n"
-            "Neu 2 tin hieu manh nhat. Bias: BULLISH/BEARISH/NEUTRAL\n\n"
-            "[ONCHAIN_ANALYST]\nPhan tich CVD/OBV/Buy Pressure/OI/Funding/Whale.\n"
-            "Nhu cau mua/ban thuc su? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
-            "[MACRO_ANALYST]\nPhan tich yeu to vi mo anh huong den " + data["symbol"] + ".\n"
-            "1-2 catalyst hoac rui ro macro. Bias: BULLISH/BEARISH/NEUTRAL\n\n"
-            "[MOMENTUM_ANALYST]\nPhan tich VWAP, POC, breakout level.\n"
-            "Momentum dang tang hay giam? Bias: BULLISH/BEARISH/NEUTRAL"
+            "[TECHNICAL_ANALYST]\nPhan tich Dealing Range (PDH/PDL, Monday Range, PWH/PWL), Premium vs Discount & 50% EQ.\n"
+            "Gia dang o bien hay No-Trade Zone? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
+            "[ONCHAIN_ANALYST]\nPhan tich thanh khoan bi quet (Liquidity Sweep / SFP) & Order Book / Funding.\n"
+            "Bay thanh khoan da sap chua? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
+            "[MACRO_ANALYST]\nPhan tich vi the gia so voi Year/Month/Week/Day Open & Phien Killzone (Asia/London/NY).\n"
+            "HTF Bias co ung ho? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
+            "[MOMENTUM_ANALYST]\nPhan tich nen xac nhan Return to Range, SL sau rau Deviation & Target EQ -> Bien doi dien.\n"
+            "R:R co dat chuan TraderSZ? Bias: BULLISH/BEARISH/NEUTRAL"
         )
 
     def _p_stage2(self, data, s1):
@@ -1002,53 +899,48 @@ class MultiAgentPipeline:
                 "stat_direction":   signal_direction}
 
     def _summary(self, data):
-        fibo = data.get("fibo", {})
-        wy   = data.get("wyckoff", {})
-        cvd  = data.get("cvd", {})
-        vol  = data.get("volume_1h", {})
-        bo   = data.get("breakout", {})
-        lvls = fibo.get("levels", {})
-        tfs  = "\n".join(
-            "  " + tf + ": " + r["direction"] +
-            " score=" + str(r["score"]) +
-            " rsi="   + str(r["rsi"]) +
-            " macd="  + r["macd"]["cross"]
-            for tf, r in data["timeframes"].items())
+        tsz   = data.get("traderssz", {})
+        htf   = tsz.get("htf_opens_and_ranges", {})
+        setup = tsz.get("setup", {})
+        bias  = tsz.get("htf_bias", {})
+        sess  = tsz.get("session", {})
+        tfs = "\n".join(
+            f"  {tf}: {r.get('direction','WAIT')} score={r.get('score',50)} ({r.get('note','')})"
+            for tf, r in data.get("timeframes", {}).items()
+        )
         return (
-            "Asset  : " + data["symbol"] + " (" + data.get("asset_type","") + ")\n"
-            "Gia    : $" + str(round(data["price"], 2)) + "\n"
-            "Signal : " + data["final"] + " " + str(data["confidence"]) + "%\n"
-            "TF:\n" + tfs + "\n"
-            "CVD=" + str(cvd.get("trend","?")) +
-            " OBV=" + str(vol.get("obv_trend","?")) +
-            " Vol=" + str(vol.get("vol_trend","?")) + "x" + str(vol.get("vol_ratio",1)) + "\n"
-            "Pressure=" + str(vol.get("pressure","?")) + "(" + str(vol.get("buy_pct",50)) + "%buy)"
-            " VWAP=$" + str(vol.get("vwap",0)) + "(" + str(vol.get("vwap_signal","?")) + ")\n"
-            "Fibo=" + str(fibo.get("trend","?")) +
-            " Zone=" + str(fibo.get("zone","?")) + "\n"
-            "Wyckoff=" + str(wy.get("phase","?")) + " " + str(wy.get("bias","?")) + "\n"
-            "Breakout=" + str(bo.get("type","NONE"))
+            f"Asset   : {data['symbol']} ({data.get('asset_type','')})\n"
+            f"Gia     : ${round(data['price'], 4)}\n"
+            f"Signal  : {data['final']} {data['confidence']}%\n"
+            f"Session : {sess.get('session','?')} (Killzone={sess.get('is_killzone',False)})\n"
+            f"Range   : {htf.get('range_label','?')} [RL=${htf.get('range_low',0)} | 50% EQ=${htf.get('eq_50',0)} | RH=${htf.get('range_high',0)}]\n"
+            f"Zone    : {htf.get('market_zone','?')} (Pos={htf.get('range_pos_pct',50)}%)\n"
+            f"PDH/PDL : ${htf.get('pdh',0)} / ${htf.get('pdl',0)} | Monday=${htf.get('monday_low',0)}-${htf.get('monday_high',0)}\n"
+            f"Opens   : YO=${htf.get('year_open',0)} MO=${htf.get('monthly_open',0)} WO=${htf.get('weekly_open',0)} DO=${htf.get('daily_open',0)}\n"
+            f"HTFBias : {bias.get('bias','?')} (4H={bias.get('h4_structure','?')})\n"
+            f"SFP     : {setup.get('setup_type','NONE')} TF={setup.get('tf','?')} Swept=${setup.get('swept_level',0)} Extreme=${setup.get('sweep_extreme',0)}\n"
+            f"TF:\n{tfs}"
         )
 
     def _p_stage1(self, data):
         atype = data.get("asset_type","CRYPTO")
-        ctx = {"CRYPTO": "crypto. Xem on-chain, whale, derivatives",
-               "STOCK":  "co phieu My. Xem earnings, Fed, sector",
-               "GOLD":   "vang NCCOGOLD2USD-USDT. Xem DXY, lai suat Fed, CPI",
+        ctx = {"CRYPTO": "crypto futures",
+               "STOCK":  "co phieu My",
+               "GOLD":   "vang XAU",
                }.get(atype, "tai san tai chinh")
         return (
-            "Ban la 4 chuyen gia phan tich " + ctx + ".\n"
-            "QUY TAC: Moi agent bat dau bang [TAG] trong ngoac vuong.\n"
-            "Viet bang tieng Viet, ngan gon (toi da 80 tu/agent), dua vao so lieu cu the.\n\n"
+            "Ban la 4 chuyen gia Price Action theo phuong phap TraderSZ (Naked Chart) cho " + ctx + ".\n"
+            "QUY TAC: Moi agent bat dau bang [TAG] trong ngoac vuong. KHONG dung chi bao tre (RSI/MACD/EMA/BB).\n"
+            "Viet bang tieng Viet, ngan gon (toi da 80 tu/agent), dua vao Range, 50% EQ, Opens va Deviation/SFP.\n\n"
             "DU LIEU:\n" + self._summary(data) + "\n\n"
-            "[TECHNICAL_ANALYST]\nPhan tich RSI/MACD/EMA/BB/Fibonacci/Wyckoff.\n"
-            "Neu 2 tin hieu manh nhat. Bias: BULLISH/BEARISH/NEUTRAL\n\n"
-            "[ONCHAIN_ANALYST]\nPhan tich CVD/OBV/Buy Pressure/OI/Funding/Whale.\n"
-            "Nhu cau mua/ban thuc su? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
-            "[MACRO_ANALYST]\nPhan tich yeu to vi mo anh huong den " + data["symbol"] + ".\n"
-            "1-2 catalyst hoac rui ro macro. Bias: BULLISH/BEARISH/NEUTRAL\n\n"
-            "[MOMENTUM_ANALYST]\nPhan tich da tang/giam, VWAP, POC, breakout level.\n"
-            "Momentum dang tang hay giam? Bias: BULLISH/BEARISH/NEUTRAL"
+            "[TECHNICAL_ANALYST]\nPhan tich Dealing Range (PDH/PDL, Monday Range, PWH/PWL), Premium vs Discount & 50% EQ.\n"
+            "Gia dang o bien hay No-Trade Zone? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
+            "[ONCHAIN_ANALYST]\nPhan tich thanh khoan bi quet (Liquidity Sweep / SFP) & Order Book / Funding.\n"
+            "Bay thanh khoản đã sập chưa? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
+            "[MACRO_ANALYST]\nPhan tich vi the gia so voi Year/Month/Week/Day Open & Phien Killzone (Asia/London/NY).\n"
+            "HTF Bias co ung ho? Bias: BULLISH/BEARISH/NEUTRAL\n\n"
+            "[MOMENTUM_ANALYST]\nPhan tich nen xac nhan Return to Range, SL sau rau Deviation & Target EQ -> Bien doi dien.\n"
+            "R:R co dat chuan TraderSZ? Bias: BULLISH/BEARISH/NEUTRAL"
         )
 
     def _p_stage2(self, data, s1):

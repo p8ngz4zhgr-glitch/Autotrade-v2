@@ -102,6 +102,7 @@ class AppConfig(Base):
     id                 = Column(Integer,  primary_key=True, index=True)
     bot_active         = Column(Boolean,  default=True)
     kill_switch        = Column(Boolean,  default=False)
+    strategy_reset_tag = Column(String,   default="")
     updated_at         = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 # Tạo bảng
@@ -111,10 +112,7 @@ Base.metadata.create_all(bind=engine)
 def _ensure_schema_migrations():
     """
     [FIX v6.5] create_all() CHỈ tạo bảng còn thiếu, KHÔNG thêm cột còn thiếu
-    vào bảng đã tồn tại. Hệ thống đã chạy live nên bảng trade_journal đã có
-    sẵn trên DB thật -> cột entry_features mới thêm ở trên sẽ không tự xuất
-    hiện, mọi INSERT sau này sẽ lỗi "column does not exist" nếu không chạy
-    ALTER TABLE. Hàm này kiểm tra rồi tự vá, an toàn để gọi lại nhiều lần.
+    vào bảng đã tồn tại. Hàm này kiểm tra rồi tự vá, an toàn để gọi lại nhiều lần.
     """
     try:
         from sqlalchemy import inspect, text
@@ -127,6 +125,12 @@ def _ensure_schema_migrations():
                 with engine.begin() as conn:
                     conn.execute(text("ALTER TABLE trade_journal ADD COLUMN entry_features TEXT"))
                 log.info("✅ [Migration] Đã thêm cột trade_journal.entry_features")
+        if "app_config" in tables:
+            cfg_cols = {c["name"] for c in inspector.get_columns("app_config")}
+            if "strategy_reset_tag" not in cfg_cols:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE app_config ADD COLUMN strategy_reset_tag VARCHAR DEFAULT ''"))
+                log.info("✅ [Migration] Đã thêm cột app_config.strategy_reset_tag")
     except Exception as e:
         log.warning("⚠️ [Migration] Schema migration lỗi (bỏ qua, không chặn khởi động): %s", e)
 

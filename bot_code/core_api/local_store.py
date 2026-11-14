@@ -60,6 +60,26 @@ class LocalRedisShim:
                     count += 1
         return count
 
+    def keys(self, pattern: str = "*") -> list[str]:
+        import fnmatch
+        with self._lock:
+            self._clean_expired()
+            all_k = list(self._store.keys()) + list(self._lists.keys())
+            if pattern == "*":
+                return all_k
+            return [k for k in all_k if fnmatch.fnmatch(k, pattern)]
+
+    def delete_by_prefix(self, prefixes: tuple[str, ...]) -> int:
+        count = 0
+        with self._lock:
+            for k in [k for k in list(self._store.keys()) if k.startswith(prefixes)]:
+                del self._store[k]
+                count += 1
+            for k in [k for k in list(self._lists.keys()) if k.startswith(prefixes)]:
+                del self._lists[k]
+                count += 1
+        return count
+
     def exists(self, key: str) -> bool:
         return self.get(key) is not None
 

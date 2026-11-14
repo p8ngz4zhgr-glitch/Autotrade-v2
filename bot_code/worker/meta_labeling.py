@@ -68,6 +68,11 @@ class MetaLabelFilter:
     _CACHE_TTL = timedelta(hours=1)
 
     @classmethod
+    def reset_cache(cls):
+        cls._cache = {"model": None, "trained_at": None, "n_samples": 0}
+        log.info("🧹 [META] Đã xoá cache mô hình Meta-Labeling để học lại từ lịch sử TraderSZ mới.")
+
+    @classmethod
     def _get_model(cls, db):
         now = datetime.utcnow()
         if cls._cache["trained_at"] and (now - cls._cache["trained_at"]) < cls._CACHE_TTL:

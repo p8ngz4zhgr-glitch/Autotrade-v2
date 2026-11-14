@@ -166,21 +166,15 @@ class TelegramBot:
     def format_signal(self, data: dict, llm_text: str, llm_name: str) -> str:
         sig   = data["final"]
         plan  = data["plan"]
-        fibo  = data.get("fibo", {})
-        wy    = data.get("wyckoff", {})
-        cvd   = data.get("cvd", {})
-        bo    = data.get("breakout", {})
-        wh    = data.get("whale", {})
-        vol   = data.get("volume_1h", {})
-        sml_1h = data.get("sm_liq_1h", {})
-        sml_4h = data.get("sm_liq_4h", {})
-        adx_1h = data.get("adx_1h", {})
-        lvls  = fibo.get("levels", {})
         conf  = data["confidence"]
         atype = data.get("asset_type", "CRYPTO")
-        
-        sweep = data.get("liquidity_sweep", {})
-        ob    = data.get("orderbook", {})
+
+        tsz      = data.get("traderssz", {})
+        htf      = tsz.get("htf_opens_and_ranges", {})
+        htf_bias = tsz.get("htf_bias", {})
+        session  = tsz.get("session", {})
+        setup    = tsz.get("setup", {})
+        ob       = data.get("orderbook", {})
 
         stat_conf = data.get("stat_confidence")
         stat_note = ""
@@ -191,182 +185,104 @@ class TelegramBot:
             stat_note = (f"\n  └ {icon} AI Stat: <b>{stat_conf:.1f}%</b> "
                          f"({sign}{delta}% vs raw)")
 
-        candle     = data.get("candle", {})
-        ms_4h      = data.get("market_structure_4h", {})
-        bull_pats  = candle.get("bull_patterns", [])
-        bear_pats  = candle.get("bear_patterns", [])
-        candle_bias = candle.get("bias", "NEUTRAL")
-        ms_struct   = ms_4h.get("structure", "SIDEWAYS")
-
-        CANDLE_IC = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "⚪"}
-        MS_IC     = {"UPTREND": "🔼", "DOWNTREND": "🔽",
-                     "SIDEWAYS": "↔️", "EXPANDING": "↕️", "CONTRACTING": "⏸"}
-
-        candle_line = ""
-        if bull_pats or bear_pats:
-            pat_text = ", ".join((bull_pats + bear_pats)[:4])
-            candle_line = (f"\n  ├ Nến 1H+4H : {CANDLE_IC.get(candle_bias,'⚪')} {candle_bias}"
-                           f" | {pat_text}")
-
-        HEADER = {"LONG": "🟢 🚀 <b>TÍN HIỆU MUA</b>",
-                  "SHORT": "🔴 📉 <b>TÍN HIỆU BÁN</b>",
-                  "WAIT": "🟡 ⏳ <b>ĐANG CHỜ ĐỢI</b>"}
+        HEADER = {"LONG": "🟢 🚀 <b>TRADERSZ LONG (QUÉT ĐÁY RANGE)</b>",
+                  "SHORT": "🔴 📉 <b>TRADERSZ SHORT (QUÉT ĐỈNH RANGE)</b>",
+                  "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ QUÉT BIÊN RANGE</b>"}
         AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇"}
         ANAME  = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "BNBUSDT": "BNB Chain",
                   "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla", "NVDA": "NVIDIA",
-                  "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "NCCOGOLD2USD-USDT": "Vàng NCCOGOLD2USD-USDT"}
-        WY_IC  = {"ACCUMULATION": "🔵", "MARKUP": "🟢", "RE-ACCUMULATION": "🟩",
-                  "DISTRIBUTION": "🔴", "MARKDOWN": "⛔", "TRANSITION": "⚪"}
-        BI_IC  = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}
+                  "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "NCCOGOLD2USD-USDT": "Vàng (XAU)"}
         TF_IC  = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "⚪"}
-        CVD_IC = {"BULLISH": "🟢", "BEARISH": "🔴",
-                  "BULLISH_DIV": "💚", "BEARISH_DIV": "❤️", "NEUTRAL": "⚪"}
-        PRESS_IC = {"STRONG_BUY": "🟢🟢", "BUY": "🟢",
-                    "STRONG_SELL": "🔴🔴", "SELL": "🔴", "NEUTRAL": "⚪"}
+        ZONE_IC = {"PREMIUM": "🔴 PREMIUM (Canh SHORT)", "DISCOUNT": "🟢 DISCOUNT (Canh LONG)", "NO_TRADE_EQ_ZONE": "⛔ NO-TRADE ZONE (Giữa 50% EQ)"}
 
         conf_bar  = "█" * int(conf / 10) + "░" * (10 - int(conf / 10))
         tf_line   = "  ".join(
-            TF_IC.get(r.get("direction","WAIT"),"⚪") + tf.upper()
+            TF_IC.get(r.get("direction", "WAIT"), "⚪") + tf.upper()
             for tf, r in data.get("timeframes", {}).items())
-        wy_ph     = wy.get("phase", "?")
-        wy_bi     = wy.get("bias", "?")
-        cvd_tr    = cvd.get("trend", "?")
-        cvd_div   = " ⚠️ DIV!" if cvd.get("divergence") else ""
-        golden    = "✅ Golden Zone 0.382-0.618" if fibo.get("in_golden") else "⬜ Ngoài Golden Zone"
-        fa        = "⬆️" if fibo.get("trend") == "UPTREND" else "⬇️"
 
-        ev_lines  = ("\n" + "\n".join("   ⚡ " + e for e in wy.get("events", []))
-                     if wy.get("events") else "")
-        bo_line   = ("\n🚨 <b>BREAKOUT</b>: " + str(bo.get("desc",""))
-                     if bo.get("type","NONE") != "NONE" else "")
-        wh_line   = ("\n" + str(wh.get("desc","")) if wh.get("detected") else "")
-        sml_line  = ("\n🐋 <b>DÒNG TIỀN (1H)</b>: " + str(sml_1h.get("desc", "")) if sml_1h.get("signal", "NONE") != "NONE" else "")
-        if sml_4h.get("signal", "NONE") != "NONE":
-            sml_line += ("\n🐋 <b>DÒNG TIỀN (4H)</b>: " + str(sml_4h.get("desc", "")))
-        mkt_line  = ("\n🏛️ " + str(data.get("mkt_note","")) if data.get("mkt_note") else "")
-        
-        trap_info = data.get("trap_analysis", {})
-        trap_line = ""
-        if trap_info.get("detected"):
-            t_type = "BẪY TĂNG GIÁ (BULL TRAP)" if trap_info.get("type") == "BULL_TRAP" else "BẪY GIẢM GIÁ (BEAR TRAP)"
-            t_sev = trap_info.get("severity", "MEDIUM")
-            t_price = trap_info.get("trap_price", 0.0)
-            reasons = "; ".join(trap_info.get("reasons", [])[:2])
-            trap_line = (f"\n⚠️ <b>{t_type} [{t_sev}]</b>: Mức giá <code>${t_price:.4f}</code>\n"
-                         f"   └ <i>{reasons}</i>")
-
-        sweep_line = ("\n🔥 <b>BẪY THANH KHOẢN (" + str(sweep.get("type", "")) + ")</b>: Quét râu tại <code>$" + 
-                      str(round(sweep.get("price", 0), 2)) + "</code>" if sweep.get("detected") else "")
-
-        if atype == "CRYPTO":
-            oi_sec = (f"  ├ OI Delta : {data.get('oi_delta',0)}% → {data.get('oi_signal','?')}\n"
-                      f"  ├ OI Desc  : {data.get('oi_desc','?')}\n"
-                      f"  └ Funding  : <code>{data.get('funding',0)}%</code>")
-        elif atype == "GOLD":
-            oi_sec = "  └ Xem DXY + lãi suất Fed khi giao dịch vàng"
-        else:
-            oi_sec = "  └ Xem earnings + macro Mỹ khi giao dịch cổ phiếu"
-
-        sym_display = AICON.get(atype,"📊") + " " + ANAME.get(data["symbol"], data["symbol"])
+        sym_display = AICON.get(atype, "📊") + " " + ANAME.get(data["symbol"], data["symbol"])
         llm_clean   = self._to_safe_html(llm_text or "")
-        
+
+        price = float(data.get("price", 0))
+        zone_str = ZONE_IC.get(htf.get("market_zone", ""), htf.get("market_zone", "?"))
+
+        setup_block = []
+        if setup.get("detected"):
+            setup_block = [
+                "",
+                "🔥 <b>XÁC NHẬN DEVIATION / SFP (RETURN TO RANGE)</b>",
+                f"  ├ Khung & Range : <b>{str(setup.get('tf','?')).upper()}</b> · {setup.get('range_label','')}",
+                f"  ├ Mô hình       : <b>{setup.get('setup_type','SFP')}</b>" + (" (Retest biên ✅)" if setup.get("is_retest") else ""),
+                f"  ├ Mốc đã quét   : <code>${setup.get('swept_level', 0)}</code> (Đỉnh/Đáy râu: <code>${setup.get('sweep_extreme', 0)}</code>)",
+            ]
+        else:
+            setup_block = [
+                "",
+                f"⏳ <b>TRẠNG THÁI:</b> {tsz.get('reason', 'Chờ giá quét biên RH/RL')}",
+            ]
+
         ob_section = []
         if ob.get("detected"):
             obi = ob.get("imbalance", 0)
             obi_icon = "🟢" if obi > 0 else ("🔴" if obi < 0 else "⚪")
             ob_section = [
                 "",
-                "🧱 <b>SỔ LỆNH L2 (ORDER BOOK)</b>",
-                f"  ├ Tường Bán (Cản) : <code>${ob.get('resist_wall')}</code>",
-                f"  ├ Tường Mua (Đỡ)  : <code>${ob.get('support_wall')}</code>",
-                f"  └ Mất cân bằng    : {obi_icon} <b>{obi}</b>"
+                "🧱 <b>THANH KHOẢN ORDER BOOK</b>",
+                f"  ├ Tường Bán : <code>${ob.get('resist_wall')}</code> | Tường Mua: <code>${ob.get('support_wall')}</code>",
+                f"  └ Imbalance : {obi_icon} <b>{obi}</b>",
             ]
+
+        asia_line = (
+            f"  ├ Asia (00-08h): <code>${htf.get('asia_low',0)}</code> – <code>${htf.get('asia_high',0)}</code>"
+            if htf.get("asia_ready") else "  ├ Asia (00-08h): Đang hình thành"
+        )
 
         lines = [
             HEADER.get(sig, sig) + " — " + sym_display,
             "━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"💰 Giá       : <code>${round(data['price'],2)}</code>",
+            f"💰 Giá       : <code>${round(price, 4)}</code>",
             f"🎯 Độ tin cậy: <b>{conf}%</b> <code>[{conf_bar}]</code>" + stat_note,
-            "📊 Khung giờ : " + tf_line,
-            bo_line + wh_line + mkt_line + trap_line + sweep_line + sml_line,
+            f"📊 Đa khung  : {tf_line}",
+            f"🕐 Phiên     : {session.get('session','?')} ({'Killzone 🔥' if session.get('is_killzone') else 'Normal'})",
+            *setup_block,
             "",
-            "⚡ <b>SMART SIGNALS</b>",
-            "  ├ ADX (1H) : " + str(adx_1h.get("adx", 0)) + " (" + str(adx_1h.get("trend", "WEAK")) + ")",
-            "  ├ CVD      : " + CVD_IC.get(cvd_tr,"⚪") + " " + cvd_tr + cvd_div,
-            "  ├ Vol      : " + str(vol.get("vol_trend","?")) + " x" + str(vol.get("vol_ratio",1)),
-            "  ├ OBV      : " + str(vol.get("obv_trend","?")),
-            "  ├ Pressure : " + PRESS_IC.get(vol.get("pressure","NEUTRAL"),"⚪") + " " +
-                               str(vol.get("pressure","?")) + " (" + str(vol.get("buy_pct",50)) + "% buy)",
-            "  ├ VWAP     : <code>$" + str(vol.get("vwap",0)) + "</code> (" + str(vol.get("vwap_signal","?")) + ")",
-            "  ├ POC      : <code>$" + str(vol.get("poc",0)) + "</code>",
-            candle_line,
-            "  ├ MS 4H    : " + MS_IC.get(ms_struct,"↔️") + " " + ms_struct +
-                               (" ⚡BOS" if ms_4h.get("bos") else ""),
-            oi_sec,
+            "📐 <b>TRADERSZ DEALING RANGE & 50% EQ</b>",
+            f"  ├ Range chính : <b>{htf.get('range_label', htf.get('range_name','?'))}</b>",
+            f"  ├ Range High  : <code>${htf.get('range_high',0)}</code>",
+            f"  ├ 50% EQ      : <code>${htf.get('eq_50',0)}</code> (Vị trí: {htf.get('range_pos_pct',50)}%)",
+            f"  ├ Range Low   : <code>${htf.get('range_low',0)}</code>",
+            f"  ├ Phân vùng   : <b>{zone_str}</b>",
+            f"  ├ PDH / PDL   : <code>${htf.get('pdh',0)}</code> / <code>${htf.get('pdl',0)}</code>",
+            f"  ├ Monday Range: <code>${htf.get('monday_low',0)}</code> – <code>${htf.get('monday_high',0)}</code>",
+            f"  ├ Weekly Range: <code>${htf.get('pwl',0)}</code> – <code>${htf.get('pwh',0)}</code>",
+            asia_line,
             "",
-            "📐 <b>FIBONACCI (1H)</b>",
-            "  ├ Xu hướng : " + fa + " " + str(fibo.get("trend","?")),
-            "  ├ Vùng giá : <code>" + str(fibo.get("zone","?")) + "</code>",
-            "  ├ " + golden,
-            "  ├ 0.382 ▶ <code>$" + str(lvls.get("0.382","?")) + "</code>",
-            "  ├ 0.618 ▶ <code>$" + str(lvls.get("0.618","?")) + "</code>",
-            "  └ Ext 1.618: <code>$" + str(lvls.get("1.618","?")) + "</code>",
-            "",
-            "📊 <b>WYCKOFF (4H)</b>",
-            "  ├ Pha    : " + WY_IC.get(wy_ph,"⚪") + " <b>" + wy_ph + "</b>",
-            "  ├ Hướng  : " + BI_IC.get(wy_bi,"➡️") + " " + wy_bi,
-            "  ├ Volume : " + str(wy.get("vol_trend","?")) + " | Pos: " + str(wy.get("pos_range","?")) + "%",
-            "  └ " + str(wy.get("action","?")),
-            ev_lines,
+            "⚓ <b>MACRO OPENS (Y · M · W · D)</b>",
+            f"  ├ Year Open   : <code>${htf.get('year_open',0)}</code> ({'Trên ▲' if price >= htf.get('year_open',0) else 'Dưới ▼'})",
+            f"  ├ Month Open  : <code>${htf.get('monthly_open',0)}</code> ({'Trên ▲' if price >= htf.get('monthly_open',0) else 'Dưới ▼'})",
+            f"  ├ Week Open   : <code>${htf.get('weekly_open',0)}</code> ({'Trên ▲' if price >= htf.get('weekly_open',0) else 'Dưới ▼'})",
+            f"  ├ Daily Open  : <code>${htf.get('daily_open',0)}</code> ({'Trên ▲' if price >= htf.get('daily_open',0) else 'Dưới ▼'})",
+            f"  └ HTF Bias    : <b>{htf_bias.get('bias','RANGE_NEUTRAL')}</b> (4H: {htf_bias.get('h4_structure','?')})",
         ]
-        
-        lines.extend(ob_section)
-        
-        sr = data.get("support_resistance", {})
-        if sr and sr.get("nearest_support") and sr.get("nearest_resistance"):
-            lines.extend([
-                "",
-                "📍 <b>VÙNG HỖ TRỢ & KHÁNG CỰ (S/R)</b>",
-                f"  ├ 🔴 Kháng cự cản: <code>${sr.get('nearest_resistance')}</code> (+{sr.get('resistance_dist_pct')}%)",
-                f"  ├ 🟢 Hỗ trợ đỡ  : <code>${sr.get('nearest_support')}</code> (-{sr.get('support_dist_pct')}%)",
-                f"  └ 📊 Vol tại S/R : <b>{sr.get('vol_ratio')}x</b> ({sr.get('buy_pct')}% Mua / {sr.get('sell_pct')}% Bán)",
-            ])
-        
 
-        bayes_ev = data.get("bayes_ev")
-        if bayes_ev:
-            lines.extend([
-                "",
-                "🎲 <b>XÁC SUẤT (BAYES) & EV</b>",
-                "  ├ P(Win)    : <b>" + str(bayes_ev.get("p_win")) + "%</b>",
-                "  ├ Likelihood: " + str(bayes_ev.get("likelihood")),
-                "  └ Kỳ vọng EV: <b>" + str(bayes_ev.get("ev_ratio")) + " R</b>" + (" ✅" if bayes_ev.get("ev_ratio", 0) > 0.15 else " ⚠️"),
-            ])
+        lines.extend(ob_section)
+
         lines.extend([
             "",
-
-            "📌 <b>KẾ HOẠCH LỆNH</b>",
-            "  ├ Vào lệnh  : <code>$" + str(plan["entry"]) + "</code>",
-            "  ├ 🛑 Cắt lỗ: <code>$" + str(plan["sl"]) + "</code> (-" + str(data.get("sl_pct","1.5")) + "%)",
-            f"  ├ ⚡ Đòn bẩy : <b>{data.get('dynamic_leverage', plan.get('recommended_leverage', 10))}x</b> ({data.get('leverage_note', 'Linh động 5x-15x')})",
-        ])
-        if "tp_levels" in plan:
-            for lvl in plan["tp_levels"]:
-                lines.append(f"  ├ 🎯 TP{lvl['level']} ({int(lvl['close_pct']*100)}%): <code>${lvl['price']}</code>")
-        else:
-            lines.extend([
-                "  ├ 🎯 TP1    : <code>$" + str(plan.get("tp1", 0)) + "</code>",
-                "  ├ 🏆 TP2    : <code>$" + str(plan.get("tp2", 0)) + "</code>",
-            ])
-            
-        lines.extend([
-            "  └ ⚖️ R:R     : 1:" + str(data.get("rr_ratio","2.0")),
+            "📌 <b>KẾ HOẠCH LỆNH TRADERSZ (RANGE-TO-RANGE)</b>",
+            f"  ├ Entry     : <code>${plan['entry']}</code>",
+            f"  ├ 🛑 SL Râu : <code>${plan['sl']}</code> (-{data.get('sl_pct','1.5')}%)",
+            f"  ├ 🎯 TP1 (50% @ EQ): <code>${plan.get('tp1', 0)}</code> (+Dời SL Hòa Vốn)",
+            f"  ├ 🏆 TP2 (50% @ Biên): <code>${plan.get('tp2', 0)}</code>",
+            f"  ├ ⚡ Đòn bẩy: <b>{data.get('dynamic_leverage', plan.get('recommended_leverage', 5))}x</b> ({data.get('leverage_note', 'Linh động 5x-15x')})",
+            f"  └ ⚖️ R:R    : <b>1:{data.get('rr_ratio','2.0')}</b>",
             "",
             "🤖 <b>AI</b> <i>(" + llm_name + ")</i>",
             "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
             llm_clean,
             "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
             "",
-            "⏰ " + data.get("timestamp","") + "  |  💼 " + str(data.get("sl_pct","2")) + "% rủi ro/lệnh",
+            "⏰ " + data.get("timestamp", "") + "  |  Pure Naked Chart · TraderSZ Method",
         ])
         return "\n".join(lines)
+
