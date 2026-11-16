@@ -606,11 +606,110 @@ class TradersszFramework:
         }
 
     @staticmethod
+    def evaluate_btc_bias(
+        btc_klines_by_tf: Dict[str, Optional[Dict[str, List[float]]]],
+        btc_price: float,
+        btc_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Xác định thiên hướng dẫn dắt của BTC (Market Leader Bias) thuần Price Action TraderSZ:
+        - Không dùng chỉ báo trễ (EMA/RSI/MACD).
+        - Ưu tiên 1: BTC đang có tín hiệu SFP / Deviation Return-to-Range (LONG -> BULLISH, SHORT -> BEARISH).
+        - Ưu tiên 2: HTF Bias (vị thế so với YO/MO/WO/DO + cấu trúc đỉnh/đáy 4H).
+        - Ưu tiên 3: Vị thế nến Intraday so với Daily Open + Weekly Open + cấu trúc 4H.
+        """
+        if btc_result is None:
+            btc_result = TradersszFramework.evaluate_traderssz_complete(
+                klines_by_tf=btc_klines_by_tf,
+                current_price=btc_price,
+            )
+
+        btc_signal = btc_result.get("signal", "WAIT")
+        btc_setup = btc_result.get("setup", {}) or {}
+        htf_bias = btc_result.get("htf_bias", {}) or {}
+        htf_data = btc_result.get("htf_opens_and_ranges", {}) or {}
+
+        h4_struct = htf_bias.get("h4_structure", "NEUTRAL")
+        htf_dir = htf_bias.get("bias", "RANGE_NEUTRAL")
+        above_do = bool(htf_bias.get("above_do", False))
+        above_wo = bool(htf_bias.get("above_wo", False))
+        bull_opens = int(htf_bias.get("bull_opens_count", 2))
+
+        do = float(htf_data.get("daily_open", btc_price) or btc_price)
+        do_dist_pct = ((btc_price - do) / do * 100.0) if do > 0 else 0.0
+
+        # Kiểm tra thêm lực nến 1H thuần PA của BTC để bắt sớm nhịp pump/dump từ Open
+        h1_kl = (btc_klines_by_tf or {}).get("1h")
+        h1_push = "FLAT"
+        if h1_kl and len(h1_kl.get("close", [])) >= 2:
+            h1_o = float(h1_kl["open"][-1])
+            h1_c = float(h1_kl["close"][-1])
+            if h1_c > h1_o and btc_price > do:
+                h1_push = "UP"
+            elif h1_c < h1_o and btc_price < do:
+                h1_push = "DOWN"
+
+        if btc_signal == "LONG":
+            bias = "BULLISH"
+            strength = "STRONG"
+            tf_lbl = str(btc_setup.get("tf", "HTF")).upper()
+            rng_lbl = btc_setup.get("range_label", "Range")
+            reason = f"BTC đang kích hoạt LONG SFP ({tf_lbl} · {rng_lbl})"
+        elif btc_signal == "SHORT":
+            bias = "BEARISH"
+            strength = "STRONG"
+            tf_lbl = str(btc_setup.get("tf", "HTF")).upper()
+            rng_lbl = btc_setup.get("range_label", "Range")
+            reason = f"BTC đang kích hoạt SHORT SFP ({tf_lbl} · {rng_lbl})"
+        elif htf_dir == "BULLISH":
+            bias = "BULLISH"
+            strength = "MODERATE"
+            reason = f"BTC HTF Bias BULLISH (trên {bull_opens}/4 Opens, 4H: {h4_struct})"
+        elif htf_dir == "BEARISH":
+            bias = "BEARISH"
+            strength = "MODERATE"
+            reason = f"BTC HTF Bias BEARISH (trên {bull_opens}/4 Opens, 4H: {h4_struct})"
+        elif above_do and above_wo and h4_struct != "BEARISH":
+            bias = "BULLISH"
+            strength = "INTRADAY"
+            reason = "BTC giữ giá trên cả Daily Open & Weekly Open"
+        elif (not above_do) and (not above_wo) and h4_struct != "BULLISH":
+            bias = "BEARISH"
+            strength = "INTRADAY"
+            reason = "BTC nằm dưới cả Daily Open & Weekly Open"
+        elif h4_struct == "BULLISH" and above_do and do_dist_pct >= 0.25 and h1_push == "UP":
+            bias = "BULLISH"
+            strength = "INTRADAY"
+            reason = f"BTC cấu trúc 4H tăng + trên Daily Open (+{do_dist_pct:.2f}%)"
+        elif h4_struct == "BEARISH" and (not above_do) and do_dist_pct <= -0.25 and h1_push == "DOWN":
+            bias = "BEARISH"
+            strength = "INTRADAY"
+            reason = f"BTC cấu trúc 4H giảm + dưới Daily Open ({do_dist_pct:.2f}%)"
+        else:
+            bias = "NEUTRAL"
+            strength = "NEUTRAL"
+            reason = "BTC đi ngang cân bằng quanh Open/EQ — cho phép Altcoin đánh biên 2 đầu"
+
+        return {
+            "bias": bias,
+            "strength": strength,
+            "btc_signal": btc_signal,
+            "btc_price": round(float(btc_price), 2),
+            "h4_structure": h4_struct,
+            "htf_bias": htf_dir,
+            "above_do": above_do,
+            "above_wo": above_wo,
+            "bull_opens_count": bull_opens,
+            "reason": reason,
+        }
+
+    @staticmethod
     def evaluate_traderssz_complete(
         klines_by_tf: Dict[str, Optional[Dict[str, List[float]]]],
         current_price: float,
         sl_buffer_pct: float = 0.0020,
         min_rr: float = 1.5,
+        btc_bias: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Tổng hợp toàn diện hệ thống giao dịch thuần Price Action TraderSZ:
@@ -618,7 +717,8 @@ class TradersszFramework:
         2. HTF Opens (YO, MO, WO, DO) & Dealing Ranges (PDH/PDL, Monday Range, PWH/PWL, Asia)
         3. 50% Equilibrium & No-Trade Zone Check
         4. Multi-TF Deviation / SFP & 'Return to Range' Detection (1D, 4H, 1H, 15M)
-        5. Precision Wick SL + TP1 (50% EQ) + TP2 (Opposite Range Boundary)
+        5. BTC Market-Leader Directional Alignment (cho Altcoin Crypto không đánh ngược sóng BTC)
+        6. Precision Wick SL + TP1 (50% EQ) + TP2 (Opposite Range Boundary)
         """
         d1_klines  = klines_by_tf.get("1d")
         h4_klines  = klines_by_tf.get("4h")
@@ -655,9 +755,85 @@ class TradersszFramework:
                 if hit:
                     setups.append(hit)
 
+        btc_dir_bias = str((btc_bias or {}).get("bias", "NEUTRAL")).upper()
+
         if setups:
+            candidate_setups = setups
+            if btc_dir_bias == "BULLISH":
+                aligned_setups = [s for s in setups if s["direction"] == "LONG"]
+                if aligned_setups:
+                    candidate_setups = aligned_setups
+                else:
+                    blocked_best = max(setups, key=lambda s: (s["score"], s["rr_tp2"]))
+                    eq = htf_data.get("eq_50", current_price)
+                    rh = htf_data.get("range_high", current_price)
+                    return {
+                        "signal": "WAIT",
+                        "confidence": 50.0,
+                        "setup": {
+                            "detected": False,
+                            "setup_type": "BTC_ALIGNMENT_BLOCK",
+                            "blocked_direction": "SHORT",
+                            "blocked_tf": blocked_best.get("tf", ""),
+                            "blocked_range": blocked_best.get("range_label", ""),
+                        },
+                        "all_setups": [],
+                        "safe_sl": 0.0,
+                        "sl_pct": 0.0,
+                        "tp1_target": eq,
+                        "tp2_target": rh,
+                        "rr_ratio": 0.0,
+                        "is_htf_aligned": False,
+                        "btc_aligned": False,
+                        "btc_bias": btc_bias,
+                        "session": session_ctx,
+                        "htf_opens_and_ranges": htf_data,
+                        "htf_bias": htf_bias,
+                        "reason": (
+                            f"🛡️ Bỏ qua SHORT ({blocked_best.get('tf','').upper()} {blocked_best.get('range_label','')}) "
+                            f"vì ngược chiều BTC: {(btc_bias or {}).get('reason', 'BTC đang BULLISH')}. "
+                            f"Tuân thủ đồng pha BTC, chỉ canh LONG khi Altcoin quét đáy Range Low."
+                        ),
+                    }
+            elif btc_dir_bias == "BEARISH":
+                aligned_setups = [s for s in setups if s["direction"] == "SHORT"]
+                if aligned_setups:
+                    candidate_setups = aligned_setups
+                else:
+                    blocked_best = max(setups, key=lambda s: (s["score"], s["rr_tp2"]))
+                    eq = htf_data.get("eq_50", current_price)
+                    rl = htf_data.get("range_low", current_price)
+                    return {
+                        "signal": "WAIT",
+                        "confidence": 50.0,
+                        "setup": {
+                            "detected": False,
+                            "setup_type": "BTC_ALIGNMENT_BLOCK",
+                            "blocked_direction": "LONG",
+                            "blocked_tf": blocked_best.get("tf", ""),
+                            "blocked_range": blocked_best.get("range_label", ""),
+                        },
+                        "all_setups": [],
+                        "safe_sl": 0.0,
+                        "sl_pct": 0.0,
+                        "tp1_target": eq,
+                        "tp2_target": rl,
+                        "rr_ratio": 0.0,
+                        "is_htf_aligned": False,
+                        "btc_aligned": False,
+                        "btc_bias": btc_bias,
+                        "session": session_ctx,
+                        "htf_opens_and_ranges": htf_data,
+                        "htf_bias": htf_bias,
+                        "reason": (
+                            f"🛡️ Bỏ qua LONG ({blocked_best.get('tf','').upper()} {blocked_best.get('range_label','')}) "
+                            f"vì ngược chiều BTC: {(btc_bias or {}).get('reason', 'BTC đang BEARISH')}. "
+                            f"Tuân thủ đồng pha BTC, chỉ canh SHORT khi Altcoin quét đỉnh Range High."
+                        ),
+                    }
+
             # Chọn Setup tốt nhất (ưu tiên khung lớn hơn, Range uy tín hơn như Monday/PDH-PDL, và R:R cao)
-            best = max(setups, key=lambda s: (s["score"], s["rr_tp2"]))
+            best = max(candidate_setups, key=lambda s: (s["score"], s["rr_tp2"]))
             direction = best["direction"]
 
             # Tính Confidence thuần TraderSZ (72% - 96%)
@@ -678,7 +854,6 @@ class TradersszFramework:
 
             # Hợp lưu với Open (WO/MO/DO) hoặc HTF Bias
             wo = htf_data.get("weekly_open", current_price)
-            mo = htf_data.get("monthly_open", current_price)
             open_aligned = (
                 (direction == "LONG" and (current_price >= wo * 0.998 or htf_bias["bias"] == "BULLISH")) or
                 (direction == "SHORT" and (current_price <= wo * 1.002 or htf_bias["bias"] == "BEARISH"))
@@ -686,26 +861,38 @@ class TradersszFramework:
             if open_aligned:
                 conf += 4.0
 
+            btc_aligned = (
+                (btc_dir_bias == "BULLISH" and direction == "LONG") or
+                (btc_dir_bias == "BEARISH" and direction == "SHORT")
+            )
+            if btc_aligned:
+                conf += 3.0
+
             if session_ctx.get("is_killzone"):
                 conf += 3.0
 
             conf = round(min(96.0, max(70.0, conf)), 1)
+            reason_txt = best["reason"]
+            if btc_aligned:
+                reason_txt = f"{reason_txt} [Đồng pha BTC {btc_dir_bias}]"
 
             return {
                 "signal": direction,
                 "confidence": conf,
                 "setup": best,
-                "all_setups": setups[:5],
+                "all_setups": candidate_setups[:5],
                 "safe_sl": best["sl"],
                 "sl_pct": best["sl_pct"],
                 "tp1_target": best["tp1"],
                 "tp2_target": best["tp2"],
                 "rr_ratio": best["rr_tp2"],
                 "is_htf_aligned": open_aligned,
+                "btc_aligned": btc_aligned,
+                "btc_bias": btc_bias,
                 "session": session_ctx,
                 "htf_opens_and_ranges": htf_data,
                 "htf_bias": htf_bias,
-                "reason": best["reason"],
+                "reason": reason_txt,
             }
 
         # Không có Deviation / SFP rõ ràng tại biên Range -> ĐỨNG NGOÀI (WAIT)
@@ -744,6 +931,8 @@ class TradersszFramework:
             "tp2_target": rh if zone == "DISCOUNT" else rl,
             "rr_ratio": 0.0,
             "is_htf_aligned": False,
+            "btc_aligned": False,
+            "btc_bias": btc_bias,
             "session": session_ctx,
             "htf_opens_and_ranges": htf_data,
             "htf_bias": htf_bias,

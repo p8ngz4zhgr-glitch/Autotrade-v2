@@ -10,6 +10,8 @@
 # ═══════════════════════════════════════════════════════════
 
 import logging
+import threading
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional
@@ -28,10 +30,44 @@ class SignalEngine:
     TIMEFRAMES = ["15m", "1h", "4h", "1d"]
 
     _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="traderssz-tf")
+    _btc_cache_lock = threading.Lock()
+    _btc_context_cache: Optional[Dict[str, Any]] = None
+    _btc_cache_ts: float = 0.0
+    _btc_cache_ttl: float = 120.0
 
     def __init__(self):
         self.crypto = CryptoFetcher()
         self.stock = StockFetcher()
+
+    @classmethod
+    def _update_btc_cache(cls, btc_ctx: Dict[str, Any]):
+        with cls._btc_cache_lock:
+            cls._btc_context_cache = btc_ctx
+            cls._btc_cache_ts = time.time()
+
+    def _get_btc_context(self) -> Optional[Dict[str, Any]]:
+        """Lấy thiên hướng dẫn dắt thị trường của BTC (cached 120s để đồng bộ toàn bộ Altcoin Crypto)."""
+        now = time.time()
+        with self._btc_cache_lock:
+            if self._btc_context_cache is not None and (now - self._btc_cache_ts) < self._btc_cache_ttl:
+                return dict(self._btc_context_cache)
+        try:
+            btc_klines = self._fetch_all_klines("BTCUSDT", self.crypto)
+            btc_price = self.crypto.price("BTCUSDT")
+            if btc_price <= 0:
+                for tf in ("15m", "1h", "4h", "1d"):
+                    kl = btc_klines.get(tf)
+                    if kl and kl.get("close"):
+                        btc_price = float(kl["close"][-1])
+                        break
+            if btc_price <= 0:
+                return None
+            btc_ctx = TradersszFramework.evaluate_btc_bias(btc_klines, float(btc_price))
+            self._update_btc_cache(btc_ctx)
+            return dict(btc_ctx)
+        except Exception as e:
+            log.warning("Không thể lấy BTC Leader Bias (bỏ qua lọc đồng pha): %s", e)
+            return None
 
     def _fetcher(self, symbol: str):
         s_clean = symbol.upper().replace("-", "").replace("_", "")
@@ -148,13 +184,29 @@ class SignalEngine:
 
         price = round(float(live_price), 4)
 
-        # 2. Chạy Pure TraderSZ Engine (Opens + Ranges + 50% EQ + Deviation/SFP + Return to Range)
+        # 2. Xác định BTC Leader Bias (chỉ áp dụng cho Altcoin Crypto, không áp dụng cho Chứng khoán/Vàng)
+        is_btc = "BTC" in symbol.upper()
+        btc_ctx: Optional[Dict[str, Any]] = None
+        if atype == "CRYPTO" and not is_btc:
+            btc_ctx = self._get_btc_context()
+
+        # 3. Chạy Pure TraderSZ Engine (Opens + Ranges + 50% EQ + Deviation/SFP + BTC Alignment)
         traderssz_res = TradersszFramework.evaluate_traderssz_complete(
             klines_by_tf=klines_by_tf,
             current_price=price,
             sl_buffer_pct=getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0020),
             min_rr=getattr(cfg, "TRADERSSZ_MIN_RR", 1.5),
+            btc_bias=btc_ctx,
         )
+
+        if atype == "CRYPTO" and is_btc:
+            btc_ctx = TradersszFramework.evaluate_btc_bias(
+                btc_klines_by_tf=klines_by_tf,
+                btc_price=price,
+                btc_result=traderssz_res,
+            )
+            self._update_btc_cache(btc_ctx)
+            traderssz_res["btc_bias"] = btc_ctx
 
         final = traderssz_res["signal"]
         conf = float(traderssz_res["confidence"])
@@ -162,6 +214,17 @@ class SignalEngine:
         htf_bias = traderssz_res["htf_bias"]
         setup = traderssz_res["setup"]
         session_ctx = traderssz_res["session"]
+
+        if setup.get("setup_type") == "BTC_ALIGNMENT_BLOCK":
+            log.info(
+                "  🛡️ [BTC ALIGNMENT] %s: Chặn %s (%s %s) vì BTC đang %s (%s)",
+                symbol,
+                setup.get("blocked_direction", "?"),
+                str(setup.get("blocked_tf", "?")).upper(),
+                setup.get("blocked_range", ""),
+                (btc_ctx or {}).get("bias", "?"),
+                (btc_ctx or {}).get("reason", ""),
+            )
 
         # 3. Dữ liệu phái sinh / Orderbook (chỉ dùng kiểm tra thanh khoản cản sát TP1, không dùng chỉ báo trễ)
         oi_delta = 0.0
@@ -297,12 +360,13 @@ class SignalEngine:
         tf_summary = self._build_tf_summary(klines_by_tf, traderssz_res)
         size_mult = round(max(0.75, min(1.0, float(news_risk.get("size_mult", 1.0)))), 2)
 
+        btc_tag = f" | BTC:{btc_ctx.get('bias', 'NEUTRAL')}" if (atype == "CRYPTO" and btc_ctx) else ""
         log.info(
-            "  [TRADERSSZ] %s: %s %.1f%% | Zone:%s (%.1f%%) | Range:%s [$%.2f-$%.2f EQ:$%.2f] | SL:%.2f%% RR:1:%.2f",
+            "  [TRADERSSZ] %s: %s %.1f%% | Zone:%s (%.1f%%) | Range:%s [$%.2f-$%.2f EQ:$%.2f] | SL:%.2f%% RR:1:%.2f%s",
             symbol, final, conf,
             htf_data.get("market_zone"), htf_data.get("range_pos_pct", 50.0),
             htf_data.get("range_name"), htf_data.get("range_low", 0), htf_data.get("range_high", 0), htf_data.get("eq_50", 0),
-            sl_pct, rr_ratio,
+            sl_pct, rr_ratio, btc_tag,
         )
 
         return {
@@ -324,6 +388,7 @@ class SignalEngine:
             "sl_pct": sl_pct,
             "atr": round(atr_val, 4),
             "traderssz": traderssz_res,
+            "btc_context": btc_ctx,
             "liquidity_sweep": liquidity_sweep,
             "orderbook": ob_data,
             "oi_signal": oi_signal,

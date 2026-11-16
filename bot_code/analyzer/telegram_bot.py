@@ -237,6 +237,13 @@ class TelegramBot:
             if htf.get("asia_ready") else "  ├ Asia (00-08h): Đang hình thành"
         )
 
+        btc_ctx = data.get("btc_context") or tsz.get("btc_bias") or {}
+        btc_leader_lines = []
+        if atype == "CRYPTO" and "BTC" not in str(data.get("symbol", "")).upper() and btc_ctx:
+            btc_leader_lines.append(
+                f"  ├ BTC Leader  : <b>{btc_ctx.get('bias', 'NEUTRAL')}</b> ({btc_ctx.get('btc_signal', 'WAIT')}) · {self._to_safe_html(btc_ctx.get('reason', ''))}"
+            )
+
         lines = [
             HEADER.get(sig, sig) + " — " + sym_display,
             "━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -262,6 +269,7 @@ class TelegramBot:
             f"  ├ Month Open  : <code>${htf.get('monthly_open',0)}</code> ({'Trên ▲' if price >= htf.get('monthly_open',0) else 'Dưới ▼'})",
             f"  ├ Week Open   : <code>${htf.get('weekly_open',0)}</code> ({'Trên ▲' if price >= htf.get('weekly_open',0) else 'Dưới ▼'})",
             f"  ├ Daily Open  : <code>${htf.get('daily_open',0)}</code> ({'Trên ▲' if price >= htf.get('daily_open',0) else 'Dưới ▼'})",
+            *btc_leader_lines,
             f"  └ HTF Bias    : <b>{htf_bias.get('bias','RANGE_NEUTRAL')}</b> (4H: {htf_bias.get('h4_structure','?')})",
         ]
 

@@ -41,21 +41,26 @@ def _build_traderssz_summary(data: dict) -> str:
     htf = tsz.get("htf_opens_and_ranges", {}) or {}
     setup = tsz.get("setup", {}) or {}
     htf_bias = tsz.get("htf_bias", {}) or {}
+    btc_ctx = data.get("btc_context") or tsz.get("btc_bias") or {}
     final_sig = data.get("final", "WAIT")
     plan = data.get("plan", {}) or {}
+
+    btc_line = ""
+    if data.get("asset_type") == "CRYPTO" and "BTC" not in str(data.get("symbol", "")).upper() and btc_ctx:
+        btc_line = f"\n🧭 Đồng pha BTC: {btc_ctx.get('bias', 'NEUTRAL')} ({btc_ctx.get('reason', '')})."
 
     if final_sig in ("LONG", "SHORT") and setup.get("detected"):
         return (
             f"📌 Khung {str(setup.get('tf', '?')).upper()} xác nhận {setup.get('setup_type', 'SFP')} "
             f"tại {setup.get('range_label', htf.get('range_label', '?'))}.\n"
             f"🔄 Giá quét râu ${setup.get('sweep_extreme', 0)} qua mốc ${setup.get('swept_level', 0)} "
-            f"và đóng nến quay lại Range -> Kích hoạt {final_sig} thuần TraderSZ PA.\n"
+            f"và đóng nến quay lại Range -> Kích hoạt {final_sig} thuần TraderSZ PA.{btc_line}\n"
             f"🎯 Kế hoạch: SL ${plan.get('sl', 0)} | TP1 (50% EQ) ${plan.get('tp1', 0)} (+Hòa vốn) | TP2 (Biên đối diện) ${plan.get('tp2', 0)}."
         )
     return (
         f"⏳ Range: {htf.get('range_label', htf.get('range_name', '?'))} "
         f"[${htf.get('range_low', 0)} – EQ ${htf.get('eq_50', 0)} – ${htf.get('range_high', 0)}].\n"
-        f"🧭 Phân vùng: {htf.get('market_zone', '?')} | HTF Bias: {htf_bias.get('bias', 'RANGE_NEUTRAL')}.\n"
+        f"🧭 Phân vùng: {htf.get('market_zone', '?')} | HTF Bias: {htf_bias.get('bias', 'RANGE_NEUTRAL')}.{btc_line}\n"
         f"💬 {tsz.get('reason', 'Chờ giá quét biên RH/RL rồi đóng ngược lại Range mới vào lệnh.')}"
     )
 
