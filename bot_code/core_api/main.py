@@ -557,49 +557,82 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             }
 
         # ══════════════════════════════════════════════════════════
-        # [NEW] LỚP BẢO VỆ ĐỘNG (BREAKEVEN & LỌC NHIỄU TỪ EXCHANGE)
+        # [NEW] LỚP BẢO VỆ ĐỘNG (BREAKEVEN & QUẢN LÝ TP/SL TRADERSZ)
         # ══════════════════════════════════════════════════════════
         bx = get_bx(user)
-        leverage = getattr(user, 'leverage', 5) 
-        
+        leverage = getattr(user, 'leverage', 5)
+
         cache = _get_active_redis()
-        # Khởi tạo cờ Breakeven từ Redis/LocalStore để chống spam
         be_key = f"BREAKEVEN_{user.telegram_id}_{sym}_{direction}"
         is_breakeven = False
-        try: is_breakeven = bool(cache.get(be_key))
-        except: pass
-        
-        # Chạy ngầm hàm quản trị vị thế động
-        dynamic_status = bx.manage_position_dynamic(sym, analysis, leverage=leverage, redis_client=cache)
-        
+        try:
+            is_breakeven = bool(cache.get(be_key))
+        except Exception:
+            pass
+
+        # Đọc ENTRY_PLAN gốc TRƯỚC khi gọi manage_position_dynamic để dời Hòa vốn đúng theo TP1/TP2 của lệnh
+        plan = dict(analysis.get("plan", {}) or {})
+        tp_levels_raw = plan.get("tp_levels")
+        if cache:
+            try:
+                raw_ep = cache.get(f"ENTRY_PLAN_{user.telegram_id}_{sym}_{direction}")
+                if raw_ep:
+                    ep_data = json.loads(raw_ep) if isinstance(raw_ep, str) else raw_ep
+                    if isinstance(ep_data, dict):
+                        if float(ep_data.get("sl") or 0) > 0:
+                            plan["sl"] = float(ep_data["sl"])
+                        if float(ep_data.get("tp1") or 0) > 0:
+                            plan["tp1"] = float(ep_data["tp1"])
+                        if float(ep_data.get("tp2") or 0) > 0:
+                            plan["tp2"] = float(ep_data["tp2"])
+                        if ep_data.get("tp_levels"):
+                            tp_levels_raw = ep_data["tp_levels"]
+                            plan["tp_levels"] = tp_levels_raw
+            except Exception:
+                pass
+
+        if not tp_levels_raw:
+            tp_levels_raw = [
+                {"level": 1, "price": float(plan.get("tp1", 0) or 0), "close_pct": 0.5},
+                {"level": 2, "price": float(plan.get("tp2", 0) or 0), "close_pct": 0.5},
+            ]
+            plan["tp_levels"] = tp_levels_raw
+
+        pos_analysis = dict(analysis)
+        pos_analysis["plan"] = plan
+
+        # Chạy quản trị vị thế: Dời SL về Hòa vốn (Breakeven) khi đạt 50% TP1 hoặc qua TP1
+        dynamic_status = bx.manage_position_dynamic(sym, pos_analysis, leverage=leverage, redis_client=cache)
+
         if dynamic_status.get("action") in ("BREAKEVEN", "TRAILING_SL"):
+            if dynamic_status.get("action") == "BREAKEVEN" and cache:
+                try:
+                    cache.setex(be_key, 86400, "1")
+                    is_breakeven = True
+                except Exception:
+                    pass
             target_lvl = dynamic_status.get("level", 1)
             new_sl_val = dynamic_status.get("new_sl", entry)
             sl_notif_key = f"TRAILING_SL_{user.telegram_id}_{sym}_{direction}_{target_lvl}"
             is_sl_notified = False
             try:
                 is_sl_notified = bool(cache.get(sl_notif_key)) or _SENT_NOTIFICATIONS.get(sl_notif_key, False)
-            except:
+            except Exception:
                 is_sl_notified = _SENT_NOTIFICATIONS.get(sl_notif_key, False)
- 
+
             if not is_sl_notified:
-                if target_lvl >= 98:
-                    _tg_send(
-                        REGISTER_TOKEN, user.telegram_id, 
-                        f"🛡️ <b>TRAILING SL ATR (CHANDELIER): {sym}</b>\n"
-                        f"Giá tạo đỉnh/đáy mới! Tự động dời Stoploss đến <code>${new_sl_val:.4f}</code> để khóa lợi nhuận!"
-                    )
-                else:
-                    lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)" if target_lvl == 1 else f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
-                    _tg_send(
-                        REGISTER_TOKEN, user.telegram_id, 
-                        f"🛡️ <b>TRAILING SL KÍCH HOẠT: {sym}</b>\n"
-                        f"Giá đã đi được 50% chặng đường tới TP{target_lvl}. Tự động dời Stoploss về {lvl_str} để bảo vệ lợi nhuận!"
-                    )
+                lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)" if target_lvl == 1 else f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
+                _tg_send(
+                    REGISTER_TOKEN, user.telegram_id,
+                    f"🛡️ <b>DỜI SL HÒA VỐN / BẢO VỆ: {sym}</b>\n"
+                    f"Giá đã đi được 50% chặng đường tới TP{target_lvl}. Tự động dời Stoploss về {lvl_str} để bảo vệ vốn!"
+                )
                 _SENT_NOTIFICATIONS[sl_notif_key] = True
-                try: cache.setex(sl_notif_key, 86400, "1")
-                except: pass
-            
+                try:
+                    cache.setex(sl_notif_key, 86400, "1")
+                except Exception:
+                    pass
+
         elif dynamic_status.get("action") == "CLOSE":
             roe_closed = dynamic_status.get("roe", 0)
             close_type = dynamic_status.get("type", "ĐÓNG VỊ THẾ")
@@ -608,29 +641,26 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 REGISTER_TOKEN, user.telegram_id,
                 f"{close_icon} <b>THÔNG BÁO TỰ ĐỘNG: {sym} ({direction})</b>\n\n"
                 f"Loại: <b>{close_type}</b>\n"
-                f"Lãi/Lỗ (ROE): <b>{roe_closed:+.2f}%</b>\n"
-                f"Lý do: Đã chốt toàn bộ vị thế để bảo vệ lợi nhuận (đã trừ bù phí giao dịch sàn), tránh gồng lệnh bị đảo chiều cắn SL."
+                f"Lãi/Lỗ (ROE): <b>{roe_closed:+.2f}%</b>"
             )
             _save_journal(user.telegram_id, sym, direction, roe_closed, qty)
-            
-            # Xóa sạch cờ bộ nhớ khi lệnh đã đóng
-            try: 
+
+            try:
                 cache.delete(be_key)
                 cache.delete(f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}")
                 cache.delete(f"PEAK_PRICE_{sym}_{direction}")
                 cache.delete(f"SL_COOLDOWN_{sym}_{direction}")
-            except: pass
-            return  
+            except Exception:
+                pass
+            return
 
-
-        # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI (ĐƯA LÊN ĐẦU ĐỂ PHỤC VỤ QUYẾT ĐỊNH ĐỘNG)
+        # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI
         in_profit = False
         pnl_pct = 0.0
         net_pnl_usd = 0.0
-        
+
         if entry > 0:
             in_profit = (direction == "LONG" and current_price > entry) or (direction == "SHORT" and current_price < entry)
-            # Công thức tính toán ROE chuẩn hóa theo đòn bẩy 
             pnl_pct = ((current_price - entry) / entry) * 100 * leverage if direction == "LONG" else ((entry - current_price) / entry) * 100 * leverage
             gross_pnl_usd = (current_price - entry) * qty if direction == "LONG" else (entry - current_price) * qty
             fee_usd = qty * entry * 0.0010
@@ -638,27 +668,6 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             net_pnl_usd = pos_api_pnl if pos_api_pnl != 0 else (gross_pnl_usd - fee_usd)
 
         is_reversal = (direction == "LONG" and new_direction == "SHORT") or (direction == "SHORT" and new_direction == "LONG")
-        
-        # ══════════════════════════════════════════════════════════
-        # BẢO VỆ CẤU TRÚC RANGE TRADERSZ - CHỐNG CHỐT LỜI NON
-        # ══════════════════════════════════════════════════════════
-        tsz_bias = analysis.get("traderssz", {}).get("htf_bias", {}).get("bias", "RANGE_NEUTRAL")
-        hmm_regime = analysis.get("hmm", {}).get("regime", tsz_bias)
-
-        ai_same_dir = (new_direction == direction)
-        htf_same_dir = (direction == "LONG" and tsz_bias == "BULLISH") or (direction == "SHORT" and tsz_bias == "BEARISH")
-
-        # Vị thế còn hiệu lực nếu: TraderSZ đồng thuận, HOẶC đang giữ hướng trong Range chờ chạy tới EQ/Opposite Edge
-        is_trend_active = ai_same_dir or (new_direction == "WAIT" and htf_same_dir)
-        
-        # Bóc tách 4 mốc TP (thay cho tp1/tp2 cũ) 
-        plan = analysis.get("plan", {})
-        tp_levels_raw = plan.get("tp_levels")
-        if not tp_levels_raw:
-            tp_levels_raw = [
-                {"level": 1, "price": float(plan.get("tp1", 0)), "close_pct": 0.5},
-                {"level": 2, "price": float(plan.get("tp2", 0)), "close_pct": 0.5},
-            ]
 
         # ══════════════════════════════════════════════════════════
         # [BẢN VÁ LỖI TOÁN HỌC]: CHẶN TP ẢO DO AI ĐẢO VIEW
@@ -696,23 +705,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         emoji = "🛡️"
         action_type = ""
 
-        # Nâng ngưỡng Virtual SL tối đa lên -35.0% ROE (đủ không gian gồng nhiễu nến 2.5% - 3.5% spot ở đòn bẩy 10x-20x)
-        # Loại bỏ triệt để việc cắt lỗ nhảm khi PnL vừa mới âm nhẹ -2% đến -5% ROE do râu nến nhiễu.
-        DYNAMIC_SL_LIMIT = -35.0   
-        DYNAMIC_TP_LIMIT = 20.0    
+        DYNAMIC_SL_LIMIT = -35.0
 
-        user_cap = float(getattr(user, "capital", 50.0) or 50.0)
-        user_risk_pct = float(getattr(user, "max_risk_pct", 1.5) or 1.5)
-        user_risk_usd = user_cap * (user_risk_pct / 100.0)
-        
-        # Ngưỡng chốt lời động co giãn theo số vốn và quy mô rủi ro lệnh của User:
-        # Tối thiểu $2.50 USD hoặc 1.5R (user_risk_usd * 1.5)
-        # Giúp tài khoản lớn gồng lãi đúng kỳ vọng ($5 - $30+), không bị chốt non vài chục cent!
-        target_dynamic_tp_usd = max(2.50, user_risk_usd * 1.5)
-        sideway_dynamic_tp_usd = max(1.50, user_risk_usd * 1.0)
-
-        # 🚨 [TẦNG ƯU TIÊN 0]: PHẢN XẠ TỦY SỐNG (CHỐT LỜI CỨNG)
-        # Luôn chạy đầu tiên: Đã chạm TP là chốt ngay, ghi đè toàn bộ tín hiệu AI/HMM!
+        # 🚨 [TẦNG ƯU TIÊN 0]: PHẢN XẠ CHỐT TỪNG MỐC TP TRADERSZ (TP1 = 50% EQ -> DỜI HÒA VỐN, TP2 = BIÊN ĐỐI DIỆN)
         next_tp = tp_levels[tp_progress] if tp_progress < len(tp_levels) else None
         if next_tp and next_tp["price"] > 0:
             reached = (direction == "LONG" and current_price >= next_tp["price"]) or \
@@ -721,135 +716,42 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 action = "SCALE_OUT"
                 action_type = f"CHỐT LỜI TP{next_tp['level']}"
                 emoji = "🎯"
-                reason = (f"Phản xạ tự động: Giá đã quét qua TP{next_tp['level']} (${next_tp['price']:.4f}). "
-                          f"Khóa {int(next_tp['close_pct']*100)}% vị thế gốc, dời SL phần còn lại lên mốc trước đó.")
+                reason = (f"Giá chạm mốc TP{next_tp['level']} TraderSZ (${next_tp['price']:.4f}). "
+                          f"Xử lý TP{next_tp['level']} & dời SL về Hòa vốn bảo vệ phần còn lại.")
 
-        # NẾU CHƯA CHẠM MỐC TP NÀO, MỚI BẮT ĐẦU DÙNG TƯ DUY AI ĐỂ XÉT NGẮT LỆNH
         if action != "SCALE_OUT":
-            # 🦈 [TẦNG ƯU TIÊN 0.5]: KIỂM TRA BẪY QUÉT THANH KHOẢN CÁ MẶP (LIQUIDITY SWEEP & VIRTUAL SL)
-            sweep_data = analysis.get("liquidity_sweep", {})
-            sw_detected = sweep_data.get("detected", False)
-            sw_type = sweep_data.get("type", "NONE") if sw_detected else "NONE"
-            sw_price = sweep_data.get("price", 0.0)
-
-            is_sweep_against = (direction == "LONG" and sw_type == "BEARISH_SWEEP") or \
-                               (direction == "SHORT" and sw_type == "BULLISH_SWEEP")
-
-            is_sweep_same = (direction == "LONG" and sw_type == "BULLISH_SWEEP") or \
-                            (direction == "SHORT" and sw_type == "BEARISH_SWEEP")
-
-            if is_sweep_against and not in_profit and pnl_pct <= -25.0:
-                action = "CLOSE_ALL"
-                action_type = "CẮT LỖ KHẨN CẤP (SWEEP TRAP MẠNH)"
-                emoji = "🦈"
-                trap_name = "Bearish Sweep (Quét đỉnh xả hàng)" if sw_type == "BEARISH_SWEEP" else "Bullish Sweep (Quét đáy ép bán)"
-                reason = (f"CẢNH BÁO CÁ MẶP: Phát hiện bẫy thanh khoản {trap_name} tại giá ${sw_price:.4f} "
-                          f"ngược chiều lệnh {direction} khi PnL âm sâu ({pnl_pct:+.2f}%) -> Thoát lệnh bảo vệ tài sản.")
-
-            elif is_sweep_same and not in_profit:
-                # MM đang chọc râu quét SL phe ta nhưng nến đã rút chân Reclaim -> Kích hoạt VIRTUAL SL bảo vệ, KHÔNG cắt lỗ ở giá xấu nhất râu!
-                vsl_key = f"VIRTUAL_SL_LOG_{sym}_{sw_type}_{sw_price:.2f}"
-                if not _SENT_NOTIFICATIONS.get(vsl_key):
-                    log.info(f"  🛡️ [ANTI-MM VIRTUAL SL] %s: Phát hiện cá mập chọc râu Stop Hunt (%s @ ${sw_price:.4f}). "
-                             f"Nến đã rút chân Reclaim (PnL hiện tại: {pnl_pct:+.2f}%%) -> GIỮ VỊ THẾ ẢO, từ chối cắt lỗ đúng đáy/đỉnh râu!", sym, sw_type)
-                    _SENT_NOTIFICATIONS[vsl_key] = True
-
-            # [TẦNG ƯU TIÊN 1]: CHỐT CHẶN RỦI RO (CHỈ CẮT LỖ KHI ÂM SÂU VƯỢT NGƯỠNG DYNAMIC SL LIMIT)
-            elif pnl_pct <= DYNAMIC_SL_LIMIT:
+            # Bảo vệ cắt lỗ an toàn tối đa (-35% ROE) khi SL sàn bị trượt
+            if pnl_pct <= DYNAMIC_SL_LIMIT:
                 action = "CLOSE_ALL"
                 action_type = "CẮT LỖ BẢO VỆ VỐN (VIRTUAL SL TOÀN DIỆN)"
                 emoji = "🚨"
-                reason = f"Trạng thái âm {pnl_pct:.2f}% vượt quá ngưỡng lỗ tối đa cho phép ({DYNAMIC_SL_LIMIT}%) -> Kích hoạt Cắt lỗ bảo toàn tài sản."
+                reason = f"Trạng thái âm {pnl_pct:.2f}% vượt ngưỡng lỗ tối đa ({DYNAMIC_SL_LIMIT}%) -> Cắt lỗ bảo toàn tài khoản."
+            elif is_reversal:
+                # Nếu có tín hiệu đảo chiều PA và vị thế đang có lãi -> CHỈ dời SL về Hòa vốn (Breakeven), KHÔNG chốt lời non!
+                be_p = bx.breakeven_price(direction, entry)
+                can_set_be = (direction == "LONG" and current_price > be_p) or \
+                             (direction == "SHORT" and current_price < be_p)
 
-            # [TẦNG ƯU TIÊN 1.5]: CẢNH BÁO TIN XẤU & ĐỐI NGHỊCH HTF BIAS (CHỈ CẮT KHI ÂM TRÊN -25% ROE)
+                if can_set_be and not is_breakeven:
+                    upd_res = bx.update_sl_and_keep_remaining_tps(sym, direction, qty, be_p, tp_levels_raw, current_price)
+                    if not isinstance(upd_res, dict) or upd_res.get("sl_ok", True):
+                        if cache:
+                            try:
+                                cache.setex(be_key, 86400, "1")
+                            except Exception:
+                                pass
+                        _tg_send(
+                            REGISTER_TOKEN, user.telegram_id,
+                            f"🛡️ <b>DỜI SL HÒA VỐN (PA NGƯỢC CHIỀU): {sym} ({direction})</b>\n\n"
+                            f"🔒 Đã dời Stop Loss về <b>HÒA VỐN</b> (<code>${be_p:.4f}</code>)!\n"
+                            f"🎯 Vẫn giữ vị thế chạy tới TP1/TP2 chuẩn TraderSZ, không chốt non."
+                        )
+                        log.info(f"🛡️ [PA BREAKEVEN] {user.telegram_id} {sym} ({direction}): Dời SL về Breakeven ${be_p:.4f}")
+                action = "HOLD"
             else:
-                news_risk_data = analysis.get("news_risk", {})
-                has_news_risk = news_risk_data.get("active", False) or (news_risk_data.get("sl_tighten_mult", 1.0) < 1.0)
-
-                htf_bias_val = analysis.get("traderssz", {}).get("htf_bias", {}).get("bias", "RANGE_NEUTRAL")
-                is_bias_against = (direction == "LONG" and htf_bias_val == "BEARISH" and is_reversal) or \
-                                  (direction == "SHORT" and htf_bias_val == "BULLISH" and is_reversal)
-
-                if has_news_risk and pnl_pct <= -25.0:
-                    action = "CLOSE_ALL"
-                    action_type = "CẮT LỖ SỚM (NEWS RISK)"
-                    emoji = "📰"
-                    reason = f"Cảnh báo tin xấu từ AI Scanner khi lệnh âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ khẩn cấp."
-
-                elif is_bias_against and pnl_pct <= -25.0:
-                    action = "CLOSE_ALL"
-                    action_type = "CẮT LỖ SỚM (DEVIATION NGƯỢC CHIỀU HTF)"
-                    emoji = "📉"
-                    reason = f"Cấu trúc TraderSZ HTF đảo chiều chống lại vị thế khi PnL âm sâu ({pnl_pct:+.2f}%) -> Cắt lỗ sớm."
-
-            if action == "KEEP":
-                # [TẦNG ƯU TIÊN 2]: THỊ TRƯỜNG CÓ DẤU HIỆU ĐẢO CHIỀU SO VỚI LỆNH (REVERSAL CHECK)
-                # 1. NẾU LỆNH ĐANG LÃI TỪ 1.0 - 1.5 USD TRỞ LÊN GẶP ĐẢO CHIỀU -> CHỐT TOÀN BỘ ĐỂ KHÓA LỢI NHUẬN
-                # 2. NẾU LÃI NHỎ (< 1.0 USD) -> DỜI SL VỀ BREAKEVEN (HÒA VỐN) CẢ 2 CHIỀU ĐỂ BẢO VỆ VỐN
-                if is_reversal:
-                    if net_pnl_usd >= 1.00:
-                        action = "CLOSE_ALL"
-                        # Đảo chiều linh động: Chốt lời vị thế cũ xong, nếu tín hiệu đảo chiều rõ nét (Conf >= 75%),
-                        # tự động mở vị thế mới theo hướng mới (Flip Long <-> Short)
-                        should_reverse = bool(conf >= 75.0)
-                        action_type = "CHỐT LỜI ĐẢO CHIỀU (BẢO TOÀN LỢI NHUẬN)"
-                        emoji = "💰"
-                        phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
-                        reason = f"Lệnh đang lãi ròng +${net_pnl_usd:.2f} USD (>= $1.00 - $1.50) gặp dấu hiệu đảo chiều sang {new_direction} (Conf: {conf}%) trong {phase_str} -> Chốt toàn bộ lệnh để giữ trọn lợi nhuận, không để tụt về hòa vốn!"
-
-                    else:
-                        be_p = bx.breakeven_price(direction, entry)
-                        can_set_be = (direction == "LONG" and current_price > be_p) or \
-                                     (direction == "SHORT" and current_price < be_p)
-
-                        if can_set_be and not is_breakeven:
-                            action = "BREAKEVEN"
-                            action_type = "DỜI BREAKEVEN BẢO VỆ (DẤU HIỆU ĐẢO CHIỀU)"
-                            emoji = "🛡️"
-                            reason = f"Phát hiện dấu hiệu đảo chiều sang {new_direction} (Conf: {conf}%). Tự động dời SL về HÒA VỐN (${be_p:.4f}) cho vị thế {direction} để bảo toàn vốn 100%!"
-                            bx.update_sl_and_keep_remaining_tps(sym, direction, qty, be_p, tp_levels_raw, current_price)
-                            if cache:
-                                try: cache.setex(be_key, 86400, "1")
-                                except: pass
-                            _tg_send(
-                                REGISTER_TOKEN, user.telegram_id,
-                                f"🛡️ <b>DỜI BREAKEVEN CẢ 2 CHIỀU: {sym} ({direction})</b>\n\n"
-                                f"⚠️ <b>Dấu hiệu đảo chiều:</b> Phát hiện tín hiệu ngược chiều sang {new_direction} (Độ tin cậy: {conf:.1f}%)\n"
-                                f"🔒 <b>Hành động:</b> Đã tự động dời Stop Loss về <b>HÒA VỐN</b> (<code>${be_p:.4f}</code>)!\n"
-                                f"💡 <i>Vị thế được bảo vệ an toàn 100%. Nếu thị trường quay xe thật sẽ chạm Breakeven thoát hòa vốn (không lỗ). Nếu nến rút chân thì vẫn tiếp tục gồng lãi!</i>"
-                            )
-                            log.info(f"🛡️ [REVERSAL BREAKEVEN] {user.telegram_id} {sym} ({direction}): Dời SL về Breakeven ${be_p:.4f} do có dấu hiệu đảo chiều sang {new_direction} (Conf {conf}%)")
-                            action = "HOLD"
-                        elif is_reversal and conf >= 85 and pnl_pct <= -20.0:
-                            action = "CLOSE_ALL"
-                            should_reverse = True
-                            action_type = "CẮT LỖ ĐẢO CHIỀU MẠNH"
-                            phase_str = "thả rông TP2" if is_scaled_out else "tiến lên TP1"
-                            emoji = "🚨"
-                            reason = f"Phát hiện xu hướng ĐẢO CHIỀU CỰC MẠNH sang {new_direction} (Conf: {conf}%) khi PnL âm sâu ({pnl_pct:.2f}%) -> Đóng lệnh chuyển hướng."
-
-                # [TẦNG ƯU TIÊN 3]: XU THẾ ĐANG TIẾP DIỄN TỐT HOẶC MẤT ĐỘNG LƯỢNG NGẮN HẠN
-                # Giữ nguyên vị thế khi tín hiệu báo WAIT hoặc nhiễu nến nhỏ, để lệnh tự do vận động đến TP hoặc SL chuẩn
-                else:
-                    is_market_sideways = (hmm_regime == "SIDEWAYS")
-                    current_tp_limit = DYNAMIC_TP_LIMIT if not is_scaled_out else (DYNAMIC_TP_LIMIT * 1.5)
-                    
-                    # [CHỐT LỜI ĐỘNG]: Co giãn linh động theo số vốn (tối thiểu 1.5R / $2.50 USD)
-                    if net_pnl_usd >= target_dynamic_tp_usd:
-                        action = "CLOSE_ALL"
-                        action_type = f"CHỐT LỜI ĐỘNG (>= ${target_dynamic_tp_usd:.2f} USD)"
-                        emoji = "💰"
-                        phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
-                        reason = f"Đạt mục tiêu chốt lời động (+${net_pnl_usd:.2f} >= ${target_dynamic_tp_usd:.2f} USD, ROE: {pnl_pct:+.2f}%) trong {phase_str} -> Khóa lợi nhuận an toàn."
-                    elif is_market_sideways and (net_pnl_usd >= sideway_dynamic_tp_usd or pnl_pct >= current_tp_limit):
-                        action = "CLOSE_ALL"
-                        action_type = f"CHỐT LỜI ĐỘNG SIDEWAYS (>= ${sideway_dynamic_tp_usd:.2f} USD)"
-                        emoji = "✅"
-                        phase_str = "hành trình lên TP2" if is_scaled_out else "chặng đường lên TP1"
-                        reason = f"Thị trường rơi vào vùng nhiễu (SIDEWAYS) trong {phase_str}. Lợi nhuận +${net_pnl_usd:.2f} (>= ${sideway_dynamic_tp_usd:.2f} USD, ROE: {pnl_pct:.2f}%) -> Đóng lệnh an toàn."
-                    else:
-                        action = "HOLD"
-                        log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}%% (+${net_pnl_usd:.2f} USD) nằm trong vùng vận động an toàn, chờ chạm TP/SL chuẩn.")
+                # BỎ HOÀN TOÀN CHỐT LỜI ĐỘNG / CHỐT LỜI SIDEWAYS / CHỐT LỜI ĐẢO CHIỀU $1
+                action = "HOLD"
+                log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}%% (+${net_pnl_usd:.2f} USD), giữ chạy tới TP1/TP2 hoặc SL TraderSZ.")
 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
@@ -896,9 +798,29 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         if cache:
                             try: cache.delete(partial_key)
                             except: pass
+                    elif res.get("skipped_partial_moved_be"):
+                        new_sl = res.get("new_sl", 0)
+                        next_target = next_lv["price"] if next_lv else 0
+                        if cache:
+                            try:
+                                cache.setex(be_key, 86400, "1")
+                            except Exception:
+                                pass
+                        msg_be_hold = (
+                            f"🛡️ <b>CHẠM TP1 — DỜI SL HÒA VỐN: {sym}</b>\n\n"
+                            f"📊 Giá đã chạm TP1 (50% EQ) — giữ 100% vị thế {direction} chạy tới TP2\n"
+                            f"🔒 SL đã dời về Hòa vốn: <code>${new_sl:.4f}</code>\n"
+                            f"🎯 Target TP2: <code>${next_target:.4f}</code>"
+                        )
+                        _tg_send(REGISTER_TOKEN, user.telegram_id, msg_be_hold)
                     else:
                         new_sl = res.get("new_sl", 0)
                         next_target = next_lv["price"] if next_lv else 0
+                        if cache and lv["level"] == 1:
+                            try:
+                                cache.setex(be_key, 86400, "1")
+                            except Exception:
+                                pass
                         msg_partial = (
                             f"{emoji} <b>{action_type}: {sym}</b>\n\n"
                             f"📊 Đã chốt: {int(lv['close_pct']*100)}% vị thế gốc {direction} (PnL: {pnl_pct:+.2f}%)\n"
@@ -958,18 +880,39 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                 new_rr    = analysis.get("rr_ratio", 1.5)
                                 rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 5, sl_pct)
                                 bx.set_leverage(sym, leverage=rev_lev)
-                                bx.place_order(sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2, tp_levels=analysis.get("plan", {}).get("tp_levels", []),
-                                               leverage=rev_lev, p_win=new_p_win, rr_ratio=new_rr)
-                                
-                                _tg_send(
-                                    REGISTER_TOKEN, user.telegram_id,
-                                    f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
-                                    f"📈 {new_direction} | Conf: {conf:.1f}%\n"
-                                    f"⚡ Đòn bẩy: <b>{rev_lev}x</b> ({rev_reason})\n"
-                                    f"💰 Qty: {new_qty:.4f}\n"
-                                    f"🛑 SL: <code>${new_sl:.4f}</code>\n"
-                                    f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code>"
+                                rev_res = bx.place_order(
+                                    sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2,
+                                    tp_levels=analysis.get("plan", {}).get("tp_levels", []),
+                                    leverage=rev_lev, p_win=new_p_win, rr_ratio=new_rr
                                 )
+                                if rev_res.get("ok"):
+                                    if cache:
+                                        try:
+                                            cache.setex(
+                                                f"ENTRY_PLAN_{user.telegram_id}_{sym}_{new_direction}",
+                                                7 * 86400,
+                                                json.dumps({
+                                                    "sl": new_sl, "tp1": new_tp1, "tp2": new_tp2,
+                                                    "tp_levels": analysis.get("plan", {}).get("tp_levels", []),
+                                                })
+                                            )
+                                            cache.setex(
+                                                f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{new_direction}",
+                                                7 * 86400, str(rev_res.get("qty", new_qty))
+                                            )
+                                        except Exception:
+                                            pass
+                                    sl_tag = "✅" if rev_res.get("sl_ok", True) else "⚠️(đang tự đồng bộ)"
+                                    tp_tag = "✅" if rev_res.get("tp_ok", True) else "⚠️(đang tự đồng bộ)"
+                                    _tg_send(
+                                        REGISTER_TOKEN, user.telegram_id,
+                                        f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
+                                        f"📈 {new_direction} | Conf: {conf:.1f}%\n"
+                                        f"⚡ Đòn bẩy: <b>{rev_lev}x</b> ({rev_reason})\n"
+                                        f"💰 Qty: {rev_res.get('qty', new_qty):.4f}\n"
+                                        f"🛑 SL: <code>${(rev_res.get('sl_price') or new_sl):.4f}</code> {sl_tag}\n"
+                                        f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code> {tp_tag}"
+                                    )
                                 
     except Exception as e:
         log.warning("Evaluate reversal for %s %s error: %s", getattr(user, 'telegram_id', 'Unknown'), sym, e)
@@ -1057,12 +1000,60 @@ def sync_bingx_positions():
                     
                         # Evaluate for reversal / early close / lock profit
                         evaluate_reversal_for_position(user, p, cur, db)
-                        trig = triggers.get(sym, {})
+                        trig = triggers.get(sym, {}) if isinstance(triggers, dict) else {}
                         if not isinstance(trig, dict):
                             trig = {}
-                        sl   = trig.get("sl",  p.get("entry", 0) * (0.98 if p.get("direction") == "LONG" else 1.02))
-                        tp2  = trig.get("tp2", p.get("entry", 0) * (1.05 if p.get("direction") == "LONG" else 0.95))
-                        tp1  = p.get("entry", 0) * (1.025 if p.get("direction", "LONG") == "LONG" else 0.975)
+
+                        # [SELF-HEAL SL/TP] Nếu vị thế đang mở trên BingX bị thiếu SL hoặc TP -> Tự động đặt bù ngay!
+                        pos_dir = p.get("direction", "LONG")
+                        pos_entry = float(p.get("entry", 0) or 0)
+                        pos_qty = float(p.get("qty", 0) or 0)
+                        heal_cache = _get_active_redis()
+                        ep_sl = pos_entry * (0.98 if pos_dir == "LONG" else 1.02)
+                        ep_tp1 = pos_entry * (1.025 if pos_dir == "LONG" else 0.975)
+                        ep_tp2 = pos_entry * (1.04 if pos_dir == "LONG" else 0.96)
+                        ep_lvls = None
+                        if heal_cache:
+                            try:
+                                raw_ep = heal_cache.get(f"ENTRY_PLAN_{tid}_{sym}_{pos_dir}")
+                                if raw_ep:
+                                    ep_obj = json.loads(raw_ep) if isinstance(raw_ep, str) else raw_ep
+                                    if isinstance(ep_obj, dict):
+                                        ep_sl = float(ep_obj.get("sl") or ep_sl)
+                                        ep_tp1 = float(ep_obj.get("tp1") or ep_tp1)
+                                        ep_tp2 = float(ep_obj.get("tp2") or ep_tp2)
+                                        ep_lvls = ep_obj.get("tp_levels")
+                            except Exception:
+                                pass
+
+                        if triggers is not None and pos_entry > 0 and pos_qty > 0 and (not trig.get("sl") or not trig.get("tp2")):
+                            heal_key = f"SL_HEAL_COOLDOWN:{tid}:{sym}:{pos_dir}"
+                            already_healed = False
+                            if heal_cache:
+                                try:
+                                    already_healed = bool(heal_cache.get(heal_key))
+                                except Exception:
+                                    pass
+                            if not already_healed:
+                                log.warning(
+                                    "🩹 [SELF-HEAL SL/TP] %s (%s %s): Phát hiện thiếu trên BingX (SL=%s, TP=%s) -> Tự động đặt bù!",
+                                    tid, sym, pos_dir, bool(trig.get("sl")), bool(trig.get("tp2")),
+                                )
+                                heal_res = bx.ensure_sl_tp(sym, pos_dir, pos_qty, ep_sl, ep_tp2, tp_levels=ep_lvls)
+                                if heal_cache:
+                                    try:
+                                        ttl = 180 if (heal_res.get("sl_placed", True) and heal_res.get("tp_placed", True)) else 30
+                                        heal_cache.setex(heal_key, ttl, "1")
+                                    except Exception:
+                                        pass
+                                if heal_res.get("healed"):
+                                    refreshed = bx.get_trigger_orders()
+                                    if isinstance(refreshed, dict):
+                                        trig = refreshed.get(sym, {}) or refreshed.get(sym.replace("-", ""), {}) or trig
+
+                        sl   = trig.get("sl", ep_sl)
+                        tp2  = trig.get("tp2", ep_tp2)
+                        tp1  = ep_tp1
                         pnl  = p.get("pnl", 0)
                         margin = user.capital * (user.max_risk_pct / 100)
                         pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
@@ -1508,39 +1499,7 @@ def _execute_for_user(user: User, signal: dict):
             "funding": signal.get("funding", 0),
         }
 
-        # [NEW v6.5] CỔNG META-LABELING: lọc dựa trên thắng/thua THỰC TẾ đã
-        # tích luỹ trong TradeJournal cho đúng loại bối cảnh này — độc lập
-        # với việc engine/12-agent đã chọn hướng. Fail-open tuyệt đối: lỗi
-        # hoặc chưa đủ dữ liệu (< 30 lệnh có nhãn) -> KHÔNG chặn gì cả.
-        meta_db = SessionLocal()
-        try:
-            meta = MetaLabelFilter.evaluate(meta_db, entry_features)
-        finally:
-            meta_db.close()
-
-        if not meta["allow"]:
-            eng_conf = float(signal.get("confidence", 0))
-            bayes_p = float(signal.get("bayes_ev", {}).get("p_win", 0))
-            is_super_trend = (eng_conf >= 85.0 or bayes_p >= 65.0 or bool(signal.get("plan", {}).get("breakout_override")))
-            
-            if is_super_trend:
-                qty = float(round(qty * 0.70, 4))
-                log.info("🧠 [META-PRUDENT ENTRY] %s %s: Meta-model thận trọng (%s) nhưng Engine Siêu Mạnh (Conf %.1f%%, Bayes %.1f%%) -> Giảm 30% Vol (Qty: %.4f) vào lệnh đón trend an toàn.",
-                         sym, direction, meta["reason"], eng_conf, bayes_p, qty)
-                _tg_send(
-                    REGISTER_TOKEN, user.telegram_id,
-                    f"🧠 <b>META-FILTER CẢNH BÁO: {sym}</b>\n"
-                    f"Meta-model cảnh báo ({meta['reason']}), nhưng Engine Định Lượng Siêu Mạnh ({eng_conf:.1f}%) -> Tự động giảm 30% khối lượng để vào lệnh đón sóng an toàn!"
-                )
-            else:
-                log.warning("🧠 [META-VETO] %s %s: %s", sym, direction, meta["reason"])
-                _tg_send(
-                    REGISTER_TOKEN, user.telegram_id,
-                    f"🧠 <b>META-FILTER HUỶ LỆNH: {sym}</b>\n"
-                    f"{direction} bị lọc: {meta['reason']} (dựa trên {meta['n_samples']} lệnh lịch sử)."
-                )
-                return
-
+        # Vào lệnh trực tiếp theo Price Action TraderSZ — bỏ AI Meta-Filter phản biện/chặn lệnh
         bx   = get_bx(user)
         side = "BUY" if direction == "LONG" else "SELL"
         bx.set_leverage(sym, leverage=effective_leverage)
@@ -1548,24 +1507,33 @@ def _execute_for_user(user: User, signal: dict):
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
         sig_rr    = signal.get("rr_ratio", 1.5)
         tp_levels = signal.get("plan", {}).get("tp_levels", [])
+        if not tp_levels:
+            tp_levels = [
+                {"level": 1, "price": tp1, "close_pct": 0.50},
+                {"level": 2, "price": tp2, "close_pct": 0.50},
+            ]
         res = bx.place_order(sym, side, qty, sl, tp2, leverage=effective_leverage, p_win=sig_p_win, rr_ratio=sig_rr, tp_levels=tp_levels)
 
         if res.get("ok"):
+            actual_qty = res.get("qty", qty)
+            actual_sl  = float(res.get("sl_price") or sl)
+            actual_tp  = float(res.get("tp_price") or tp2)
+            sl_ok      = res.get("sl_ok", False)
+            tp_ok      = res.get("tp_ok", False)
+
             cache = _get_active_redis()
             if cache:
                 try:
                     cache.setex(pending_key, 60, "1")
-                    # Lưu snapshot feature để _save_journal gắn vào TradeJournal khi đóng lệnh
                     cache.setex(
                         f"ENTRY_FEATURES_{user.telegram_id}_{sym}_{direction}",
                         7 * 86400, json.dumps(entry_features)
                     )
-                    # [NEW v6.12] Lưu qty THẬT ĐÃ KHỚP trên sàn (res["qty"], sau
-                    # hệ số Kelly/Markowitz bên trong place_order — thường KHÁC
-                    # qty gốc caller yêu cầu) — không phải qty trước điều chỉnh.
-                    # Dùng để mỗi mốc TP (trong 4 mốc) chốt đúng % trên tổng thật
-                    # đã vào, không cộng dồn sai khi qty hiện tại shrink dần.
-                    actual_qty = res.get("qty", qty)
+                    cache.setex(
+                        f"ENTRY_PLAN_{user.telegram_id}_{sym}_{direction}",
+                        7 * 86400,
+                        json.dumps({"sl": actual_sl, "tp1": tp1, "tp2": actual_tp, "tp_levels": tp_levels})
+                    )
                     cache.setex(
                         f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{direction}",
                         7 * 86400, str(actual_qty)
@@ -1573,8 +1541,8 @@ def _execute_for_user(user: User, signal: dict):
                 except Exception:
                     pass
 
-            log.info("OK %s: %s %s qty=%.4f lev=%dx (%s)",
-                     user.telegram_id, direction, sym, qty, effective_leverage, lev_reason)
+            log.info("OK %s: %s %s qty=%.4f lev=%dx sl_ok=%s tp_ok=%s (%s)",
+                     user.telegram_id, direction, sym, actual_qty, effective_leverage, sl_ok, tp_ok, lev_reason)
             news_notice = ""
             if news_risk.get("active"):
                 news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - news_risk.get('size_mult', 0.5)) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
@@ -1587,15 +1555,18 @@ def _execute_for_user(user: User, signal: dict):
             else:
                 lev_tag += " 🛡️ (Sideway/Base 5x)"
 
+            sl_badge = "✅ Đã đặt sàn" if sl_ok else "⚠️ Chờ Self-Heal"
+            tp_badge = "✅ Đã đặt sàn" if tp_ok else "⚠️ Chờ Self-Heal"
+
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
                 f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
                 f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
                 f"⚡ Đòn bẩy: <b>{lev_tag}</b>\n"
-                f"💰 Qty: {qty:.4f} | Margin: ~${req_margin:.2f}{news_notice}\n"
-                f"🛑 SL: <code>${sl:.4f}</code> | Risk: ${risk_amt:.2f}\n"
+                f"💰 Qty: {actual_qty:.4f} | Margin: ~${req_margin:.2f}{news_notice}\n"
+                f"🛑 SL: <code>${actual_sl:.4f}</code> ({sl_badge}) | Risk: ${risk_amt:.2f}\n"
                 f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
-                f"🏆 TP2: <code>${tp2:.4f}</code> → đích 50% còn lại")
+                f"🏆 TP2: <code>${actual_tp:.4f}</code> ({tp_badge}) → đích 50% còn lại")
         else:
             # [FIX v6.6] TRƯỚC: "BingX loi %s: %s" với %s đầu = user.telegram_id
             # -> trông giống mã lỗi BingX nhưng thực ra là ID người dùng, gây hiểu
@@ -1655,7 +1626,9 @@ def _clear_history_cache_keys(user_id: Optional[str] = None) -> int:
             "PENDING:",
             "REVERSAL_CLOSED:",
             "SL_COOLDOWN_",
+            "SL_HEAL_COOLDOWN:",
             "ENTRY_FEATURES_",
+            "ENTRY_PLAN_",
             "SCALE_OUT_",
             "PEAK_PRICE_",
             "ORIGINAL_QTY_",

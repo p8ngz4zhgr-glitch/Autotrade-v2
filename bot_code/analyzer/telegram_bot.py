@@ -277,7 +277,7 @@ class TelegramBot:
             f"  ├ ⚡ Đòn bẩy: <b>{data.get('dynamic_leverage', plan.get('recommended_leverage', 5))}x</b> ({data.get('leverage_note', 'Linh động 5x-15x')})",
             f"  └ ⚖️ R:R    : <b>1:{data.get('rr_ratio','2.0')}</b>",
             "",
-            "🤖 <b>AI</b> <i>(" + llm_name + ")</i>",
+            "📐 <b>PHÂN TÍCH PA</b> <i>(" + llm_name + ")</i>",
             "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
             llm_clean,
             "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",

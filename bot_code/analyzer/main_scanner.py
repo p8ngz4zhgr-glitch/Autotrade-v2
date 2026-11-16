@@ -6,7 +6,6 @@ from datetime import datetime as dt_module
 import redis
 
 from analyzer.engine import SignalEngine
-from analyzer.llm_agents import LLMChain, MultiAgentPipeline
 from analyzer.telegram_bot import TelegramBot
 from analyzer.config import Config
 from core_api.models import SessionLocal, TradeJournal
@@ -32,15 +31,38 @@ def get_memory_for_ai(symbol: str) -> str:
             mem += f"- Lần trước đánh {l.direction}: {l.lesson}\n"
         return mem
     except Exception as e:
-        logging.getLogger("SignalBot").warning(f"Không thể lấy trí nhớ AI: {e}")
+        logging.getLogger("SignalBot").warning(f"Không thể lấy trí nhớ: {e}")
         return ""
+
+
+def _build_traderssz_summary(data: dict) -> str:
+    """Tạo tóm tắt thuần Price Action TraderSZ (không qua AI phản biện)."""
+    tsz = data.get("traderssz", {}) or {}
+    htf = tsz.get("htf_opens_and_ranges", {}) or {}
+    setup = tsz.get("setup", {}) or {}
+    htf_bias = tsz.get("htf_bias", {}) or {}
+    final_sig = data.get("final", "WAIT")
+    plan = data.get("plan", {}) or {}
+
+    if final_sig in ("LONG", "SHORT") and setup.get("detected"):
+        return (
+            f"📌 Khung {str(setup.get('tf', '?')).upper()} xác nhận {setup.get('setup_type', 'SFP')} "
+            f"tại {setup.get('range_label', htf.get('range_label', '?'))}.\n"
+            f"🔄 Giá quét râu ${setup.get('sweep_extreme', 0)} qua mốc ${setup.get('swept_level', 0)} "
+            f"và đóng nến quay lại Range -> Kích hoạt {final_sig} thuần TraderSZ PA.\n"
+            f"🎯 Kế hoạch: SL ${plan.get('sl', 0)} | TP1 (50% EQ) ${plan.get('tp1', 0)} (+Hòa vốn) | TP2 (Biên đối diện) ${plan.get('tp2', 0)}."
+        )
+    return (
+        f"⏳ Range: {htf.get('range_label', htf.get('range_name', '?'))} "
+        f"[${htf.get('range_low', 0)} – EQ ${htf.get('eq_50', 0)} – ${htf.get('range_high', 0)}].\n"
+        f"🧭 Phân vùng: {htf.get('market_zone', '?')} | HTF Bias: {htf_bias.get('bias', 'RANGE_NEUTRAL')}.\n"
+        f"💬 {tsz.get('reason', 'Chờ giá quét biên RH/RL rồi đóng ngược lại Range mới vào lệnh.')}"
+    )
 
 
 class SignalBot:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
     STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]
-
-    _PIPELINE_SEMAPHORE = threading.Semaphore(4)  # Tăng lên 4 luồng song song
 
     def __init__(self):
         self.log = logging.getLogger("SignalBot")
@@ -48,9 +70,7 @@ class SignalBot:
         self.db  = SessionLocal()
 
         self.engine       = SignalEngine()
-        self.llm          = LLMChain()
         self.tg           = TelegramBot()
-        self.pipeline     = MultiAgentPipeline(self.llm)
         self.last_signals = {}
         self._scan_count  = 0
         self._closed_notified = set()
@@ -122,142 +142,23 @@ class SignalBot:
             "confidence": data["confidence"],
             "plan":      data["plan"],
             "timestamp": data.get("timestamp", now),
-            # [FIX v6.2] Truyền edge thực (p_win/rr_ratio) để lớp Kelly sizing
-            # ở main.py/bingx_trader.py không còn phải dùng số mặc định chung chung.
             "bayes_ev":  data.get("bayes_ev", {}),
             "rr_ratio":  data.get("rr_ratio", 1.5),
-            # [NEW v6.5] Thêm context cho Meta-labeling filter (worker/meta_labeling.py)
             "hmm":       data.get("hmm", {}),
             "oi_signal": data.get("oi_signal", "N/A"),
             "funding":   data.get("funding", 0),
             "news_risk": data.get("news_risk", {}),
+            "traderssz": data.get("traderssz", {}),
+            "trade_regime": data.get("trade_regime", "RANGE_DEVIATION"),
         }
         try:
             client.lpush("TRADE_SIGNALS", json.dumps(payload))
             client.ltrim("TRADE_SIGNALS", 0, 99)
             self._pushed_signals[symbol] = now
             store_name = "Redis" if client == self.redis_client else "LocalStore (0% RAM/Quota)"
-            self.log.info(f"📤 Đã đẩy lệnh {data['final']} {symbol} vào Hàng đợi ({store_name}).")
+            self.log.info(f"📤 Đã đẩy lệnh {data['final']} {symbol} vào Hàng đợi ({store_name}) [Pure TraderSZ PA].")
         except Exception as e:
             self.log.error(f"❌ Lỗi đẩy Queue: {e}")
-
-    def _run_pipeline_sync(self, sym, data):
-        final_sig = data.get("final", "WAIT")
-        conf = data.get("confidence", 0)
-        ev_ratio = data.get("bayes_ev", {}).get("ev_ratio", 0)
-        if final_sig == "WAIT" and conf < 70 and ev_ratio < 0.3:
-            return
-        with self._PIPELINE_SEMAPHORE:
-            try:
-                result = self.pipeline.run(data)
-                msgs   = MultiAgentPipeline.format_telegram(result, sym)
-                for i, msg in enumerate(msgs):
-                    self.tg.send(msg)
-                    if i < len(msgs) - 1:
-                        time.sleep(1)
-                self.log.info("🤖 Pipeline %s hoàn thành (%d msgs)", sym, len(msgs))
-            except Exception as e:
-                self.log.error("❌ Pipeline %s: %s", sym, e)
-
-    def _run_pipeline(self, sym, data):
-        t = threading.Thread(
-            target=self._run_pipeline_sync,
-            args=(sym, data),
-            name=f"pipeline-{sym}",
-            daemon=True,
-        )
-        t.start()
-        self.log.info("  🔀 Pipeline %s → background thread [%s]", sym, t.name)
-
-    # ══════════════════════════════════════════════════════════════
-    # [FIX v6.3] CỔNG PHẢN BIỆN 12-AGENT TRƯỚC KHI VÀO LỆNH
-    # ──────────────────────────────────────────────────────────────
-    # Trước đây: push_to_queue() chạy TRƯỚC, pipeline 12-agent chạy song song
-    # ở luồng nền chỉ để gửi Telegram -> hội đồng phản biện không hề ảnh hưởng
-    # tới quyết định vào lệnh, trái với yêu cầu gốc ("12 agent phải tư duy
-    # phân tích để đưa ra nhận định phân tích để vào lệnh").
-    # Nay: với các tín hiệu LONG/SHORT (không phải WAIT), pipeline chạy ĐỒNG BỘ
-    # trước push_to_queue(), có timeout + fail-open (nếu LLM lỗi/treo thì GIỮ
-    # NGUYÊN quyết định gốc của engine, không để bot đứng hình vì API sập).
-    # Nếu hội đồng KHÔNG đồng thuận hướng lệnh (hoặc tự chấm WAIT) -> huỷ vào
-    # lệnh. Nếu đồng thuận -> dùng confidence đã hiệu chỉnh theo thống kê
-    # thắng/thua lịch sử (apply_statistical_overlay) thay cho confidence thô.
-    # ══════════════════════════════════════════════════════════════
-    _PIPELINE_GATE_TIMEOUT = 90  # giây — đủ cho 4 lượt gọi LLM tuần tự, có dự phòng
-
-    def _gate_with_pipeline(self, sym, data):
-        result_holder = {}
-
-        def _run():
-            with self._PIPELINE_SEMAPHORE:
-                try:
-                    result_holder["result"] = self.pipeline.run(data)
-                except Exception as e:
-                    result_holder["error"] = e
-
-        t = threading.Thread(target=_run, name=f"gate-{sym}", daemon=True)
-        t.start()
-        t.join(timeout=self._PIPELINE_GATE_TIMEOUT)
-
-        if t.is_alive():
-            self.log.warning("  ⏱️ [GATE] %s: Pipeline quá %ds -> fail-open, giữ tín hiệu gốc của engine.",
-                              sym, self._PIPELINE_GATE_TIMEOUT)
-            return data
-
-        if "result" not in result_holder:
-            self.log.warning("  ⚠️ [GATE] %s: Pipeline lỗi -> fail-open, giữ tín hiệu gốc. Lỗi: %s",
-                              sym, result_holder.get("error"))
-            return data
-
-        result = result_holder["result"]
-
-        try:
-            msgs = MultiAgentPipeline.format_telegram(result, sym)
-            for i, msg in enumerate(msgs):
-                self.tg.send(msg)
-                if i < len(msgs) - 1:
-                    time.sleep(1)
-        except Exception as e:
-            self.log.warning("  ⚠️ [GATE] format_telegram %s lỗi: %s", sym, e)
-
-        engine_dir = data.get("final", "WAIT")
-        panel_dir  = result.get("stat_direction", "WAIT")
-        panel_conf = result.get("stat_confidence")
-
-        if panel_dir != "WAIT" and panel_dir != engine_dir:
-            # Hội đồng AI chỉ ra hướng ĐỐI NGHỊCH hoàn toàn (ví dụ Engine LONG mà Panel SHORT) -> Phủ quyết cứng
-            self.log.warning("  🧠 [HARD VETO] %s: Engine đề xuất %s nhưng Hội đồng 12-agent phản đối (%s) -> HUỶ vào lệnh.",
-                              sym, engine_dir, panel_dir)
-            self.tg.send(
-                f"🧠 <b>HỘI ĐỒNG 12-AGENT PHỦ QUYẾT: {sym}</b>\n"
-                f"Engine đề xuất <b>{engine_dir}</b> nhưng hội đồng phản biện chỉ ra hướng ngược chiều "
-                f"<b>{panel_dir}</b> -> Đã HUỶ để phòng vệ rủi ro."
-            )
-            data["final"] = "WAIT"
-            data["veto_reason"] = f"panel={panel_dir} vs engine={engine_dir}"
-            return data
-        elif panel_dir == "WAIT" and panel_dir != engine_dir:
-            # Hội đồng AI thận trọng (chấm WAIT do chưa hoàn hảo 100%):
-            # Nếu Engine định lượng có Confidence >= 70% và thuận xu hướng -> Cho phép vào lệnh với Size cẩn trọng (x0.75) thay vì hủy bỏ
-            eng_conf = data.get("confidence", 0)
-            if eng_conf >= 70.0:
-                data["position_size_mult"] = round(data.get("position_size_mult", 1.0) * 0.75, 2)
-                self.log.info("  🛡️ [PRUDENT ENTRY] %s: Hội đồng AI phân vân (WAIT) nhưng Điểm Kỹ Thuật Cao (%.1f%%) -> Giữ lệnh %s, giảm Size x0.75 bảo toàn vốn.",
-                              sym, eng_conf, engine_dir)
-            else:
-                self.log.warning("  🧠 [SOFT VETO] %s: Engine %s có Conf thấp (%.1f%% < 70%%) và Hội đồng AI chấm WAIT -> HUỶ lệnh.",
-                                  sym, engine_dir, eng_conf)
-                data["final"] = "WAIT"
-                data["veto_reason"] = f"panel=WAIT and conf={eng_conf:.1f}% < 70%"
-                return data
-
-        if panel_conf is not None:
-            old_conf = data.get("confidence", 0)
-            data["confidence"] = panel_conf
-            self.log.info("  🧠 [GATE] %s: Đồng thuận %s | Confidence %.1f%% -> %.1f%% (đã hiệu chỉnh lịch sử)",
-                          sym, panel_dir, old_conf, panel_conf)
-
-        return data
 
     def _scan(self, symbols, label):
         self.log.info("─── %s ───", label)
@@ -282,38 +183,30 @@ class SignalBot:
                 final_sig = data.get("final", "WAIT")
                 conf = data.get("confidence", 0)
                 ev_ratio = data.get("bayes_ev", {}).get("ev_ratio", 0)
-                
-                # [LỌC SỚM TÀI NGUYÊN] Bỏ qua AI cho lệnh WAIT có toán học quá yếu
+
                 if final_sig == "WAIT" and ev_ratio < 0.2 and conf < 65:
-                    self.log.info("  ⏭️ [Early Filter] Bỏ qua AI cho %s (EV: %.2f, Conf: %.1f%%) để tiết kiệm server", sym, ev_ratio, conf)
-                    time.sleep(1.0)
+                    self.log.info("  ⏭️ [TraderSZ] %s: Chưa có SFP/Deviation (%s, Conf: %.1f%%)", sym, final_sig, conf)
+                    time.sleep(0.5)
                     continue
 
-                llm_text, llm = self.llm.analyze(data)
+                pa_text = _build_traderssz_summary(data)
                 htf = data.get("traderssz", {}).get("htf_opens_and_ranges", {})
 
-                self.log.info("  %s: %s %.1f%% | Zone:%s (%.1f%%) | Range:%s [$%.2f-$%.2f EQ:$%.2f] | LLM:%s",
+                self.log.info("  %s: %s %.1f%% | Zone:%s (%.1f%%) | Range:%s [$%.2f-$%.2f EQ:$%.2f] | Pure TraderSZ PA",
                               sym, data["final"], data["confidence"],
                               htf.get("market_zone", "?"), htf.get("range_pos_pct", 50.0),
-                              htf.get("range_name", "?"), htf.get("range_low", 0), htf.get("range_high", 0), htf.get("eq_50", 0),
-                              llm)
+                              htf.get("range_name", "?"), htf.get("range_low", 0), htf.get("range_high", 0), htf.get("eq_50", 0))
 
                 should, reason = self.should_send(sym, data)
                 if should:
-                    msg = self.tg.format_signal(data, llm_text, llm)
+                    msg = self.tg.format_signal(data, pa_text, "Pure TraderSZ PA")
                     self.tg.send(msg)
                     self.last_signals[sym] = data
                     self.log.info("  📱 Đã gửi [%s]: %s", reason, sym)
 
-                    if data["final"] != "WAIT":
-                        # [FIX v6.3] Phản biện 12-agent TRƯỚC khi vào lệnh (đồng bộ, fail-open)
-                        data = self._gate_with_pipeline(sym, data)
-                        self.last_signals[sym] = data  # confidence/final có thể đã đổi sau gate
-                        if data["final"] != "WAIT":
-                            self.push_to_queue(sym, data)
-                    else:
-                        # WAIT: không cần chặn lệnh, chạy pipeline nền để tham khảo như cũ
-                        self._run_pipeline(sym, data)
+                    if data["final"] in ("LONG", "SHORT"):
+                        # Vào lệnh trực tiếp theo tín hiệu Price Action TraderSZ — bỏ hoàn toàn AI phản biện
+                        self.push_to_queue(sym, data)
                 else:
                     self.log.info("  ⏭️  Bỏ qua [%s]: %s %s %.1f%%",
                                   reason, sym, data["final"], data["confidence"])
@@ -321,7 +214,7 @@ class SignalBot:
             except Exception as e:
                 self.log.error("  ❌ Lỗi xử lý %s: %s", sym, e)
 
-            time.sleep(1.5)
+            time.sleep(1.0)
 
     def run_crypto(self):
         self._scan_count += 1
