@@ -195,19 +195,7 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
     try:
         blackout_mins = int(os.getenv("MACRO_BLACKOUT_MINUTES", "90"))
 
-        # 1. Kiểm tra rủi ro tin xấu từ AI LLM News Agent
-        try:
-            from analyzer.news_agent import get_news_agent_risk
-            na_risk = get_news_agent_risk()
-            if na_risk.get("active"):
-                log.warning("📰 [NEWS RISK - LLM] Cảnh báo tin xấu (%s) -> Giảm 50%% vốn vào lệnh (size_mult=0.5), giữ SL an toàn sàn >=1.5%%.",
-                            na_risk.get("event"))
-                na_risk["pause_trading"] = na_risk.get("pause_trading", False)
-                return na_risk
-        except Exception as ex_na:
-            log.debug("Lỗi lấy news_agent_risk: %s", ex_na)
-
-        # 2. Kiểm tra lịch tin vĩ mô (CPI/PPI/NFP/FOMC...)
+        # Kiểm tra lịch tin vĩ mô (CPI/PPI/NFP/FOMC...) — đã bỏ AI LLM News Scanner phản biện
         events = get_high_impact_events(days_ahead=3)
         now = datetime.utcnow()
         for e in events:

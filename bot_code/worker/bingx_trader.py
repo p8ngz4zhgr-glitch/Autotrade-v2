@@ -31,6 +31,8 @@ class BingXExchange:
         self.api_secret = str(api_secret).strip() if api_secret else ""
         self._be_set_positions = set()
         self._dual_side_mode = None  # True = Hedge (LONG/SHORT), False = One-Way (BOTH)
+        self._separate_isolated_mode = False
+        self._position_ids_cache = {}
 
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
@@ -293,6 +295,9 @@ class BingXExchange:
                         direction = "LONG" if qty > 0 else "SHORT"
 
                     entry_val = p.get("avgPrice", p.get("entryPrice", 0))
+                    pid = str(p.get("positionId") or p.get("id") or "").strip()
+                    if pid and normalized_sym:
+                        self._position_ids_cache[(normalized_sym, direction)] = pid
 
                     positions.append({
                         "symbol": normalized_sym,
@@ -300,6 +305,7 @@ class BingXExchange:
                         "entry": float(entry_val),
                         "qty": abs(qty),
                         "pnl": float(p.get("unrealizedProfit", 0)),
+                        "position_id": pid,
                     })
             return positions
         else:
@@ -406,16 +412,59 @@ class BingXExchange:
             "orderId": str(order_id),
         })
 
+    def _resolve_position_id(self, symbol: str, position_side: str = "", force_refresh: bool = False) -> str:
+        norm_clean = self._normalize_symbol(symbol).replace("-", "").upper()
+        pos_dir = str(position_side or "").upper()
+        if not force_refresh and norm_clean:
+            if pos_dir in ("LONG", "SHORT") and (norm_clean, pos_dir) in self._position_ids_cache:
+                return self._position_ids_cache[(norm_clean, pos_dir)]
+            for (c_sym, _), pid in self._position_ids_cache.items():
+                if c_sym == norm_clean and pid:
+                    return pid
+
+        positions = self.get_open_positions(symbol)
+        if isinstance(positions, list):
+            for p in positions:
+                if p.get("symbol") == norm_clean and p.get("position_id"):
+                    if pos_dir in ("LONG", "SHORT") and p.get("direction") != pos_dir:
+                        continue
+                    return str(p["position_id"])
+            for p in positions:
+                if p.get("symbol") == norm_clean and p.get("position_id"):
+                    return str(p["position_id"])
+        return ""
+
     def _safe_order(self, params: dict) -> dict:
         clean_params = dict(params)
         order_type = str(clean_params.get("type", "")).upper()
+        side_val = str(clean_params.get("side", "")).upper()
         is_trigger = order_type in ("STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT")
+        raw_pos_side = str(clean_params.get("positionSide", "")).upper()
+        is_closing_market = (
+            (side_val == "SELL" and raw_pos_side == "LONG")
+            or (side_val == "BUY" and raw_pos_side == "SHORT")
+        )
+        is_closing_order = (
+            is_trigger
+            or is_closing_market
+            or str(clean_params.get("reduceOnly", "")).lower() == "true"
+            or str(clean_params.get("closePosition", "")).lower() == "true"
+        )
 
         # Điều chỉnh theo chế độ One-Way (BOTH) nếu tài khoản đang bật One-Way
         if not self.is_hedge_mode() and "positionSide" in clean_params:
             clean_params["positionSide"] = "BOTH"
             if is_trigger and str(clean_params.get("closePosition", "")).lower() != "true":
                 clean_params["reduceOnly"] = "true"
+
+        # Nếu tài khoản dùng Separate Isolated Mode -> gắn sẵn positionId khi đóng/cài SL-TP
+        if self._separate_isolated_mode and is_closing_order and not clean_params.get("positionId"):
+            lookup_dir = raw_pos_side if raw_pos_side in ("LONG", "SHORT") else (
+                "LONG" if side_val == "SELL" else ("SHORT" if side_val == "BUY" else "")
+            )
+            pid = self._resolve_position_id(clean_params.get("symbol", ""), lookup_dir)
+            if pid:
+                clean_params["positionId"] = pid
 
         for k, v in list(clean_params.items()):
             if isinstance(v, float):
@@ -426,30 +475,54 @@ class BingXExchange:
 
         res = self._request("POST", "/openApi/swap/v2/trade/order", clean_params)
 
-        err_code = res.get("code")
-        err_msg = str(res.get("msg", "")).lower()
-        is_mode_mismatch = (
-            err_code == 109400
-            or "positionside" in err_msg
-            or "position side" in err_msg
-            or "dual" in err_msg
-            or "one-way" in err_msg
-        )
+        # Cho phép tự sửa tối đa 2 lần nếu gặp lỗi PositionSide (Hedge vs One-Way) hoặc thiếu positionId (Separate Isolated)
+        for _ in range(2):
+            if res.get("code") == 0:
+                break
+            err_msg = str(res.get("msg", "")).lower()
+            fixed = False
 
-        if is_mode_mismatch and "positionSide" in clean_params:
-            if clean_params["positionSide"] != "BOTH":
-                self._dual_side_mode = False
-                clean_params["positionSide"] = "BOTH"
-                if is_trigger and str(clean_params.get("closePosition", "")).lower() != "true":
-                    clean_params["reduceOnly"] = "true"
-            else:
-                self._dual_side_mode = True
-                clean_params.pop("reduceOnly", None)
-                side_val = str(clean_params.get("side", "")).upper()
-                if is_trigger:
-                    clean_params["positionSide"] = "LONG" if side_val == "SELL" else "SHORT"
-                else:
-                    clean_params["positionSide"] = "LONG" if side_val == "BUY" else "SHORT"
+            needs_position_id = (
+                "positionid" in err_msg
+                or "separate isolated" in err_msg
+            )
+            is_mode_mismatch = (
+                "positionside" in err_msg
+                or "position side" in err_msg
+                or "dual" in err_msg
+                or "one-way" in err_msg
+                or "hedge mode" in err_msg
+            )
+
+            if needs_position_id and not clean_params.get("positionId"):
+                self._separate_isolated_mode = True
+                cur_ps = str(clean_params.get("positionSide", "")).upper()
+                lookup_dir = cur_ps if cur_ps in ("LONG", "SHORT") else (
+                    "LONG" if side_val == "SELL" else ("SHORT" if side_val == "BUY" else "")
+                )
+                pid = self._resolve_position_id(clean_params.get("symbol", ""), lookup_dir, force_refresh=True)
+                if pid:
+                    clean_params["positionId"] = pid
+                    fixed = True
+
+            if is_mode_mismatch and "positionSide" in clean_params:
+                if "hedge mode" in err_msg or clean_params["positionSide"] == "BOTH":
+                    self._dual_side_mode = True
+                    clean_params.pop("reduceOnly", None)
+                    if is_trigger:
+                        clean_params["positionSide"] = "LONG" if side_val == "SELL" else "SHORT"
+                    else:
+                        clean_params["positionSide"] = "LONG" if side_val == "BUY" else "SHORT"
+                    fixed = True
+                elif clean_params["positionSide"] != "BOTH":
+                    self._dual_side_mode = False
+                    clean_params["positionSide"] = "BOTH"
+                    if is_trigger and str(clean_params.get("closePosition", "")).lower() != "true":
+                        clean_params["reduceOnly"] = "true"
+                    fixed = True
+
+            if not fixed:
+                break
             res = self._request("POST", "/openApi/swap/v2/trade/order", clean_params)
 
         return res

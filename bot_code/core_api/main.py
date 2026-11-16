@@ -1753,17 +1753,6 @@ async def startup_event():
     threading.Thread(target=_register_telegram_webhook, daemon=True, name="webhook-register").start()
     threading.Thread(target=lambda: [time.sleep(600) or gc.collect() for _ in iter(int, 1)],
                      daemon=True, name="gc").start()
-                     
-    def run_news_agent():
-        while True:
-            try:
-                from analyzer.news_agent import scan_news_and_check_kill_switch
-                scan_news_and_check_kill_switch()
-            except Exception as e:
-                log.error(f"News agent error: {e}")
-            time.sleep(600)
-
-    threading.Thread(target=run_news_agent, daemon=True, name="news-agent").start()
 
     log.info("Tat ca threads khoi dong")
 
