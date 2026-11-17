@@ -319,6 +319,29 @@ class BingXExchange:
             "side": req_side,
         })
 
+    def get_margin_type(self, symbol: str) -> str:
+        res = self._request("GET", "/openApi/swap/v2/trade/marginType", {"symbol": symbol})
+        if isinstance(res, dict) and res.get("code") == 0:
+            data = res.get("data") or {}
+            if isinstance(data, dict):
+                return str(data.get("marginType", "") or "").upper()
+        return ""
+
+    def set_margin_type(self, symbol: str, margin_type: str) -> dict:
+        return self._request("POST", "/openApi/swap/v2/trade/marginType", {
+            "symbol": symbol,
+            "marginType": str(margin_type).upper(),
+        })
+
+    @staticmethod
+    def _is_order_source_mode_error(msg: str) -> bool:
+        m = str(msg or "").lower()
+        return (
+            "multi position mode" in m
+            or "cross multi" in m
+            or "order source" in m
+        )
+
     def get_open_positions(self, symbol: str = None):
         params = {}
         if symbol:
@@ -732,7 +755,36 @@ class BingXExchange:
 
         res = self._safe_order(params)
 
-        # Fallback: Nếu BingX từ chối gắn inline stopLoss/takeProfit (ví dụ vài cặp đặc thù hoặc giá giật),
+        # Fallback 1: Nếu bị từ chối do "cross multi position mode not support current order source",
+        # thử chuyển marginType của cặp này sang ISOLATED / SEPARATE_ISOLATED rồi đặt lại ngay
+        if res.get("code") != 0 and self._is_order_source_mode_error(res.get("msg", "")):
+            cur_mt = self.get_margin_type(symbol)
+            log.warning(
+                "⚠️ %s: Sàn từ chối (%s) | marginType hiện tại=%s -> thử chuyển sang ISOLATED/SEPARATE_ISOLATED...",
+                symbol, res.get("msg", ""), cur_mt or "?",
+            )
+            candidates = [mt for mt in ("ISOLATED", "SEPARATE_ISOLATED") if mt != cur_mt]
+            if not candidates:
+                candidates = ["ISOLATED", "SEPARATE_ISOLATED"]
+            for target_mt in candidates:
+                mt_res = self.set_margin_type(symbol, target_mt)
+                log.info(
+                    "⚙️ [MARGIN MODE] %s: Chuyển sang %s -> code=%s msg=%s",
+                    symbol, target_mt,
+                    mt_res.get("code") if isinstance(mt_res, dict) else "?",
+                    mt_res.get("msg") if isinstance(mt_res, dict) else mt_res,
+                )
+                if isinstance(mt_res, dict) and mt_res.get("code") == 0:
+                    time.sleep(0.2)
+                    try:
+                        self.set_leverage(symbol, leverage, side="ALL")
+                    except Exception:
+                        pass
+                    res = self._safe_order(params)
+                    if res.get("code") == 0 or not self._is_order_source_mode_error(res.get("msg", "")):
+                        break
+
+        # Fallback 2: Nếu BingX từ chối gắn inline stopLoss/takeProfit (ví dụ vài cặp đặc thù hoặc giá giật),
         # mở lệnh MARKET thuần trước rồi đặt SL/TP độc lập ngay lập tức
         if res.get("code") != 0 and (attached_sl or attached_tp):
             log.warning(
@@ -807,7 +859,14 @@ class BingXExchange:
                 "tp_price": effective_tps[-1]["price"] if effective_tps else tp_adj,
             }
 
-        return {"ok": False, "msg": res.get("msg", "Error placing order")}
+        err_msg = str(res.get("msg", "Error placing order"))
+        if self._is_order_source_mode_error(err_msg):
+            return {
+                "ok": False,
+                "margin_mode_blocked": True,
+                "msg": f"{err_msg} (Tài khoản BingX đang bật Cross Multi-Position cho {symbol} — cần đổi từ Cross sang Isolated hoặc tắt Đa vị thế trên App BingX)",
+            }
+        return {"ok": False, "msg": err_msg}
 
     def _sanitize_sl_tp_levels(self, symbol: str, position_side: str, cur_price: float, sl_price: float, tp_price: float, tp_levels: list = None):
         """

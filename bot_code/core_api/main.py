@@ -775,7 +775,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             else:
                 # BỎ HOÀN TOÀN CHỐT LỜI ĐỘNG / CHỐT LỜI SIDEWAYS / CHỐT LỜI ĐẢO CHIỀU $1
                 action = "HOLD"
-                log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}%% (+${net_pnl_usd:.2f} USD), giữ chạy tới TP1/TP2 hoặc SL TraderSZ.")
+                log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}% (${net_pnl_usd:+.2f} USD), giữ chạy tới TP1/TP2 hoặc SL TraderSZ.")
 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
@@ -1598,6 +1598,27 @@ def _execute_for_user(user: User, signal: dict):
             # -> trông giống mã lỗi BingX nhưng thực ra là ID người dùng, gây hiểu
             # nhầm khi debug (số trong log tưởng là error code, thực ra là Telegram ID).
             log.error("❌ Đặt lệnh %s thất bại cho user %s: %s", sym, user.telegram_id, res.get("msg"))
+            if res.get("margin_mode_blocked"):
+                cache = _get_active_redis()
+                notified = False
+                block_key = f"MARGIN_BLOCK_{user.telegram_id}_{sym}"
+                if cache:
+                    try:
+                        cache.setex(pending_key, 1800, "1")
+                        notified = bool(cache.get(block_key))
+                        if not notified:
+                            cache.setex(block_key, 3600, "1")
+                    except Exception:
+                        pass
+                if not notified:
+                    _tg_send(
+                        REGISTER_TOKEN, user.telegram_id,
+                        f"⚠️ <b>KHÔNG ĐẶT ĐƯỢC LỆNH {sym} ({direction})</b>\n\n"
+                        f"Sàn BingX từ chối: <code>cross multi position mode not support current order source</code>.\n\n"
+                        f"📌 <b>Cách xử lý trong 5 giây trên App BingX:</b>\n"
+                        f"1. Mở BingX Futures → chọn cặp <b>{sym}</b>\n"
+                        f"2. Chuyển chế độ ký quỹ từ <b>Cross</b> sang <b>Isolated (Cô lập)</b> hoặc đổi từ <b>Đa vị thế (Separate)</b> sang <b>Hợp nhất (Merged)</b>."
+                    )
 
     except Exception as e:
         log.error("_execute_for_user %s: %s", user.telegram_id, e)
