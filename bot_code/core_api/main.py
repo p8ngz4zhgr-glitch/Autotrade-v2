@@ -2734,6 +2734,7 @@ ADMIN_DASHBOARD_HTML = """
                                     <option value="SOLUSDT">SOLUSDT (Solana)</option>
                                     <option value="HYPEUSDT">HYPEUSDT (Hyperliquid)</option>
                                     <option value="XAUUSD">XAUUSD (Gold)</option>
+                                    <option value="NCCOXAG2USD-USDT">NCCOXAG2USDUSDT (Silver)</option>
                                     <option value="TSLA">TSLA (Tesla)</option>
                                     <option value="NVDA">NVDA (Nvidia)</option>
                                     <option value="SPY">SPY (S&P 500)</option>

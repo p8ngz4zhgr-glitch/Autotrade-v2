@@ -162,40 +162,41 @@ class CryptoFetcher:
         except Exception as e:
             log.debug("Bybit klines err %s %s: %s", bbt_sym, interval, e)
 
-        # BingX Klines Fallback
-        try:
-            r = self._session.get(
-                self.BGX + "/swap/v3/quote/klines",
-                params={"symbol": bgx_sym, "interval": bgx_iv, "limit": limit},
-                headers=self.HDR, timeout=10)
-            if r.status_code == 200:
-                d = r.json()
-                if d.get("code") == 0:
-                    data = d.get("data", [])
-                    if len(data) >= 10:
-                        # BingX có thể trả theo thứ tự mới->cũ hoặc cũ->mới, chuẩn hóa tăng dần theo time
-                        data = sorted(data, key=lambda c: int(c.get("time") or c.get("timestamp") or 0))
-                        closes = [float(c.get("close", 0)) for c in data]
-                        vols   = [max(float(c.get("volume", 0)), 0.001) for c in data]
-                        tbv_ratio = self._tbvol_ratio(closes)
-                        tbvols = []
-                        for i, c in enumerate(data):
-                            tbv = c.get("takerBuyVolume") or c.get("taker_buy_volume")
-                            if tbv and float(tbv) > 0:
-                                tbvols.append(float(tbv))
-                            else:
-                                tbvols.append(vols[i] * tbv_ratio)
-                        return {
-                            "timestamp":     [int(c.get("time") or c.get("timestamp") or 0) for c in data],
-                            "open":          [float(c.get("open", closes[i])) for i, c in enumerate(data)],
-                            "high":          [float(c.get("high", closes[i])) for i, c in enumerate(data)],
-                            "low":           [float(c.get("low",  closes[i])) for i, c in enumerate(data)],
-                            "close":         closes,
-                            "volume":        vols,
-                            "taker_buy_vol": tbvols,
-                        }
-        except Exception as e:
-            log.debug("BingX klines err %s %s: %s", bgx_sym, interval, e)
+        # BingX Klines Fallback (thử v3 trước, nếu lỗi/thiếu thử tiếp v2)
+        for bgx_ep in ("/swap/v3/quote/klines", "/swap/v2/quote/klines"):
+            try:
+                r = self._session.get(
+                    self.BGX + bgx_ep,
+                    params={"symbol": bgx_sym, "interval": bgx_iv, "limit": limit},
+                    headers=self.HDR, timeout=10)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d.get("code") == 0:
+                        data = d.get("data", []) or []
+                        if len(data) >= 10:
+                            # BingX có thể trả theo thứ tự mới->cũ hoặc cũ->mới, chuẩn hóa tăng dần theo time
+                            data = sorted(data, key=lambda c: int(c.get("time") or c.get("timestamp") or 0))
+                            closes = [float(c.get("close", 0)) for c in data]
+                            vols   = [max(float(c.get("volume", 0)), 0.001) for c in data]
+                            tbv_ratio = self._tbvol_ratio(closes)
+                            tbvols = []
+                            for i, c in enumerate(data):
+                                tbv = c.get("takerBuyVolume") or c.get("taker_buy_volume")
+                                if tbv and float(tbv) > 0:
+                                    tbvols.append(float(tbv))
+                                else:
+                                    tbvols.append(vols[i] * tbv_ratio)
+                            return {
+                                "timestamp":     [int(c.get("time") or c.get("timestamp") or 0) for c in data],
+                                "open":          [float(c.get("open", closes[i])) for i, c in enumerate(data)],
+                                "high":          [float(c.get("high", closes[i])) for i, c in enumerate(data)],
+                                "low":           [float(c.get("low",  closes[i])) for i, c in enumerate(data)],
+                                "close":         closes,
+                                "volume":        vols,
+                                "taker_buy_vol": tbvols,
+                            }
+            except Exception as e:
+                log.debug("BingX klines err %s %s %s: %s", bgx_ep, bgx_sym, interval, e)
 
         log.error("Không lấy được klines cho %s [%s]", symbol, interval)
         return None
@@ -415,23 +416,133 @@ class StockFetcher:
            "Accept": "application/json",
            "Referer": "https://finance.yahoo.com/"}
     CGK    = "https://api.coingecko.com/api/v3"
-    # Sửa GC%3DF thành GC=F để API requests không bị lỗi encode
-    YAHOO  = {"TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ", "NCCOGOLD2USD-USDT": "GC=F"}
+    BGX    = "https://open-api.bingx.com/openApi"
+    YAHOO  = {
+        "TSLA": "TSLA", "NVDA": "NVDA", "SPY": "SPY", "QQQ": "QQQ",
+        "NCSKTSLA2USD-USDT": "TSLA", "NCSKTSLA2USDUSDT": "TSLA",
+        "NCSKNVDA2USD-USDT": "NVDA", "NCSKNVDA2USDUSDT": "NVDA",
+        "NCSKSPY2USD-USDT": "SPY",   "NCSKSPY2USDUSDT": "SPY",
+        "NCSKQQQ2USD-USDT": "QQQ",   "NCSKQQQ2USDUSDT": "QQQ",
+        "NCCOGOLD2USD-USDT": "GC=F", "NCCOGOLD2USDUSDT": "GC=F",
+        "NCCOXAG2USD-USDT": "SI=F",  "NCCOXAG2USDUSDT": "SI=F",
+    }
     YH_IV  = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "1h", "1d": "1d", "1w": "1wk"}
     YH_RNG = {"5m": "2d", "15m": "5d", "1h": "30d", "4h": "30d", "1d": "1y", "1w": "2y"}
-    PLIM   = {"TSLA": (10, 5000), "NVDA": (10, 5000),
-               "SPY": (100, 1500), "QQQ": (100, 1500), "NCCOGOLD2USD-USDT": (1500, 6000)}
+    PLIM   = {
+        "TSLA": (10, 5000), "NVDA": (10, 5000),
+        "SPY": (100, 1500), "QQQ": (100, 1500),
+        "NCCOGOLD2USD-USDT": (1500, 6000), "NCCOGOLD2USDUSDT": (1500, 6000),
+        "NCCOXAG2USD-USDT": (10, 250),     "NCCOXAG2USDUSDT": (10, 250),
+    }
 
-    _SYNTHETIC_PRICES = {"NCCOGOLD2USD-USDT": 2350.0, "SPY": 540.0, "TSLA": 220.0, "NVDA": 120.0}
+    _SYNTHETIC_PRICES = {
+        "NCCOGOLD2USD-USDT": 2350.0,
+        "NCCOXAG2USD-USDT": 31.5,
+        "NCCOXAG2USDUSDT": 31.5,
+        "SPY": 540.0, "TSLA": 220.0, "NVDA": 120.0,
+    }
+
+    @classmethod
+    def _resolve_yahoo_and_bounds(cls, symbol: str):
+        s_u = str(symbol or "").strip().upper()
+        s_clean = s_u.replace("-", "").replace("_", "")
+        if s_u in cls.YAHOO:
+            yt = cls.YAHOO[s_u]
+        elif "NCCOGOLD" in s_clean or "GOLD" in s_clean or "XAU" in s_clean:
+            yt = "GC=F"
+        elif "NCCOXAG" in s_clean or "SILVER" in s_clean or "XAG" in s_clean:
+            yt = "SI=F"
+        else:
+            yt = s_u
+            for k in ("TSLA", "NVDA", "SPY", "QQQ"):
+                if k in s_clean:
+                    yt = k
+                    break
+        bounds = cls.PLIM.get(s_u) or cls.PLIM.get(yt) or (0, 1e9)
+        return yt, bounds
+
+    @staticmethod
+    def _bingx_contract(symbol: str) -> str:
+        s_u = str(symbol or "").strip().upper()
+        if s_u.endswith("USDT") and "-" not in s_u:
+            return s_u[:-4] + "-USDT"
+        return s_u
+
+    @staticmethod
+    def _is_silver(symbol: str) -> bool:
+        s = str(symbol or "").upper()
+        return "NCCOXAG" in s or "XAG" in s or "SILVER" in s
+
+    @staticmethod
+    def _is_commodity(symbol: str) -> bool:
+        s = str(symbol or "").upper()
+        return "NCCOGOLD" in s or "GOLD" in s or "XAU" in s or "NCCOXAG" in s or "XAG" in s or "SILVER" in s
 
     def __init__(self):
         self._session = _make_session(retries=2, backoff=0.5)
 
+    def _bingx_price(self, bgx_sym: str, lo: float, hi: float) -> float:
+        try:
+            r = self._session.get(
+                self.BGX + "/swap/v2/quote/ticker",
+                params={"symbol": bgx_sym},
+                headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("code") == 0 and d.get("data"):
+                    data = d["data"]
+                    if isinstance(data, dict):
+                        p = float(data.get("lastPrice") or data.get("markPrice") or 0)
+                        if lo < p < hi:
+                            return round(p, 4)
+        except Exception as e:
+            log.debug("BingX quote ticker %s: %s", bgx_sym, e)
+        return 0.0
+
+    def _bingx_klines(self, bgx_sym: str, interval: str, limit: int, lo: float, hi: float):
+        bgx_iv = {"5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d", "1w": "1w"}.get(interval, "1h")
+        min_bars = 30 if interval == "1d" else 10
+        for bgx_ep in ("/swap/v3/quote/klines", "/swap/v2/quote/klines"):
+            try:
+                r = self._session.get(
+                    self.BGX + bgx_ep,
+                    params={"symbol": bgx_sym, "interval": bgx_iv, "limit": limit},
+                    headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                if r.status_code == 200:
+                    d = r.json()
+                    if d.get("code") == 0:
+                        data = d.get("data", []) or []
+                        if len(data) >= min_bars:
+                            data = sorted(data, key=lambda c: int(c.get("time") or c.get("timestamp") or 0))
+                            closes = [float(c.get("close", 0)) for c in data]
+                            vols   = [max(float(c.get("volume", 0)), 0.001) for c in data]
+                            if closes and all(lo < x < hi for x in closes[-5:]):
+                                return {
+                                    "timestamp":     [int(c.get("time") or c.get("timestamp") or 0) for c in data],
+                                    "open":          [float(c.get("open", closes[i])) for i, c in enumerate(data)],
+                                    "high":          [float(c.get("high", closes[i])) for i, c in enumerate(data)],
+                                    "low":           [float(c.get("low",  closes[i])) for i, c in enumerate(data)],
+                                    "close":         closes,
+                                    "volume":        vols,
+                                    "taker_buy_vol": [v * 0.52 for v in vols],
+                                }
+            except Exception as e:
+                log.debug("BingX klines %s %s [%s]: %s", bgx_ep, bgx_sym, interval, e)
+        return None
+
     def price(self, symbol):
-        lo, hi = self.PLIM.get(symbol, (0, 1e9))
+        ticker, (lo, hi) = self._resolve_yahoo_and_bounds(symbol)
+        s_u = str(symbol or "").strip().upper()
+
+        # Hợp đồng BingX (NCCOXAG / NCSK*): ưu tiên giá khớp trực tiếp trên BingX trước
+        if "NCCOXAG" in s_u or "XAG" in s_u or "SILVER" in s_u or s_u.startswith("NCSK"):
+            bgx_sym = "NCCOXAG2USD-USDT" if self._is_silver(symbol) else self._bingx_contract(symbol)
+            bp = self._bingx_price(bgx_sym, lo, hi)
+            if bp > 0:
+                return bp
 
         # GOLD
-        if symbol == "NCCOGOLD2USD-USDT":
+        if "NCCOGOLD" in s_u or ticker == "GC=F":
             try:
                 r = self._session.get(
                     self.CGK + "/simple/price",
@@ -455,7 +566,6 @@ class StockFetcher:
                         headers=self.HDR, timeout=10)
                     if r.ok:
                         j = r.json()
-                        # Kiểm tra an toàn xem có "result" không
                         if j.get("chart", {}).get("result"):
                             data = j["chart"]["result"][0]
                             meta = data.get("meta", {})
@@ -473,8 +583,7 @@ class StockFetcher:
 
             return 0.0
 
-        # STOCKS
-        ticker = self.YAHOO.get(symbol, symbol)
+        # STOCKS & SILVER FALLBACK (Yahoo SI=F / TSLA / NVDA / SPY / QQQ)
         for base in ["query1", "query2"]:
             try:
                 r = self._session.get(
@@ -482,25 +591,33 @@ class StockFetcher:
                     headers=self.HDR, timeout=10)
                 if r.ok:
                     j = r.json()
-                    # Kiểm tra an toàn xem có "result" không
                     if j.get("chart", {}).get("result"):
                         data = j["chart"]["result"][0]
                         meta = data.get("meta", {})
-                        p = float(meta.get("regularMarketPrice", 0))
-                        if lo < p < hi:
-                            return round(p, 2)
+                        for key in ("regularMarketPrice", "chartPreviousClose"):
+                            p = float(meta.get(key, 0) or 0)
+                            if lo < p < hi:
+                                return round(p, 4 if ticker == "SI=F" else 2)
                         closes = [c for c in data["indicators"]["quote"][0].get("close", [])
                                   if c and lo < float(c) < hi]
                         if closes:
-                            return round(closes[-1], 2)
+                            return round(float(closes[-1]), 4 if ticker == "SI=F" else 2)
             except Exception as e:
                 log.warning("Yahoo price %s %s: %s", symbol, base, e)
 
         return 0.0
 
     def klines(self, symbol, interval, limit=100):
-        lo, hi  = self.PLIM.get(symbol, (0, 1e9))
-        ticker  = self.YAHOO.get(symbol, symbol)
+        ticker, (lo, hi) = self._resolve_yahoo_and_bounds(symbol)
+        s_u = str(symbol or "").strip().upper()
+
+        # SILVER & NCSK* BingX contracts: ưu tiên BingX contract klines (thử v3 -> v2), fallback Yahoo
+        if self._is_silver(symbol) or s_u.startswith("NCSK"):
+            bgx_sym = "NCCOXAG2USD-USDT" if self._is_silver(symbol) else self._bingx_contract(symbol)
+            bgx_kl = self._bingx_klines(bgx_sym, interval, limit, lo, hi)
+            if bgx_kl:
+                return bgx_kl
+
         yh_iv   = self.YH_IV.get(interval, "1h")
         yh_rng  = self.YH_RNG.get(interval, "30d")
 
@@ -514,7 +631,6 @@ class StockFetcher:
                     continue
                     
                 j = r.json()
-                # Kiểm tra an toàn để fix lỗi sập NoneType
                 if not j.get("chart", {}).get("result"):
                     continue
                     
@@ -556,7 +672,7 @@ class StockFetcher:
                 log.warning("Yahoo klines %s %s %s: %s", symbol, interval, base, e)
 
         # Fallback synthetic klines
-        is_open, _ = self.market_open() if symbol != "NCCOGOLD2USD-USDT" else self.is_gold_open()
+        is_open, _ = self.is_gold_open() if self._is_commodity(symbol) else self.market_open()
         if is_open:
             log.error("🚫 Yahoo FAIL khi thị trường đang MỞ cho %s [%s] — bỏ qua TF này", symbol, interval)
             return None
@@ -564,7 +680,7 @@ class StockFetcher:
         import random
         p = self.price(symbol)
         if p <= 0:
-            p = self._SYNTHETIC_PRICES.get(symbol, 100.0)
+            p = self._SYNTHETIC_PRICES.get(symbol, self._SYNTHETIC_PRICES.get(ticker, 100.0))
         c = [p * (1 + random.uniform(-0.003, 0.003)) for _ in range(limit)]
         c[-1] = p
         v = [random.uniform(1000, 5000) for _ in range(limit)]
@@ -594,11 +710,11 @@ class StockFetcher:
         now = datetime.now(et)
         wd, h = now.weekday(), now.hour
         if wd == 5:
-            return False, "📴 Gold đóng cửa (Thứ 7)"
+            return False, "📴 Vàng/Bạc đóng cửa (Thứ 7)"
         if wd == 6 and h < 18:
-            return False, "📴 Gold mở lại CN 18:00 ET"
+            return False, "📴 Vàng/Bạc mở lại CN 18:00 ET"
         if wd == 4 and h >= 17:
-            return False, "📴 Gold đóng từ T6 17:00 ET"
+            return False, "📴 Vàng/Bạc đóng từ T6 17:00 ET"
         if h == 17:
-            return False, "⏸️ Gold break 17:00–18:00 ET"
-        return True, "🟡 Gold Futures đang giao dịch"
+            return False, "⏸️ Vàng/Bạc break 17:00–18:00 ET"
+        return True, "🟡 Gold/Silver Futures đang giao dịch"

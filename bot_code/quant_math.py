@@ -11,7 +11,7 @@ class QuantRiskManager:
             "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"],
             "TECH_STOCKS": ["QQQ", "NVDA", "TSLA"],
             "BROAD_MARKET": ["SPY"],
-            "SAFE_HAVEN": ["NCCOGOLD2USD-USDT"]
+            "SAFE_HAVEN": ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT", "NCCOXAG2USDUSDT"]
         }
 
     def _get_asset_class(self, symbol):

@@ -67,7 +67,7 @@ def _build_traderssz_summary(data: dict) -> str:
 
 class SignalBot:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
-    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]
+    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
 
     def __init__(self):
         self.log = logging.getLogger("SignalBot")
@@ -235,8 +235,8 @@ class SignalBot:
     def run_stocks(self):
         try:
             self.log.info("═" * 45)
-            self.log.info("📈 Stock+Gold — %s", self.dt.now().strftime("%H:%M:%S"))
-            self._scan(self.STOCK_SYMBOLS, "STOCK+GOLD")
+            self.log.info("📈 Stock+Gold+Silver — %s", self.dt.now().strftime("%H:%M:%S"))
+            self._scan(self.STOCK_SYMBOLS, "STOCK+GOLD+SILVER")
         except Exception as e:
             self.log.error("❌ run_stocks: %s", e)
 
@@ -258,8 +258,8 @@ class SignalBot:
                 rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym[:4] + "</b> <code>$" +
                              str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
                              str(d["confidence"]) + "% [" + bar + "] " + ZONE_IC.get(zn, "⚪") + f"{zn} (EQ:${eq})")
-            rows.append("\n📈 <b>CỔ PHIẾU & VÀNG</b>")
-            for sym in ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]:
+            rows.append("\n📈 <b>CỔ PHIẾU · VÀNG · BẠC</b>")
+            for sym in self.STOCK_SYMBOLS:
                 d = self.last_signals.get(sym)
                 if not d or not d.get("final"): continue
                 htf = d.get("traderssz", {}).get("htf_opens_and_ranges", {})

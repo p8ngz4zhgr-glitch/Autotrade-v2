@@ -13,6 +13,7 @@ const SYMBOLS = [
   { name: "BNBUSDT", price: 612.4, defaultLev: 10, step: 0.05, decimal: 2, type: "CRYPTO", atrM5: 2.8 },
   { name: "HYPEUSDT", price: 18.25, defaultLev: 10, step: 0.01, decimal: 3, type: "CRYPTO", atrM5: 0.15 },
   { name: "XAUUSD", price: 2364.8, defaultLev: 20, step: 0.1, decimal: 2, type: "GOLD", atrM5: 4.2 },
+  { name: "NCCOXAG2USDUSDT", price: 31.5, defaultLev: 10, step: 0.01, decimal: 3, type: "SILVER", atrM5: 0.12 },
   { name: "TSLA", price: 184.5, defaultLev: 5, step: 0.05, decimal: 2, type: "STOCK", atrM5: 1.1 },
   { name: "NVDA", price: 124.8, defaultLev: 5, step: 0.05, decimal: 2, type: "STOCK", atrM5: 0.8 }
 ];
@@ -1520,7 +1521,7 @@ class QuantRiskManager:
             "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"],
             "TECH_STOCKS": ["QQQ", "NVDA", "TSLA"],
             "BROAD_MARKET": ["SPY"],
-            "SAFE_HAVEN": ["NCCOGOLD2USD-USDT"]
+            "SAFE_HAVEN": ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
         }
 
     def calculate_anti_liquidation_buffer(self, entry_price: float, sl_price: float, leverage: int, direction: str) -> dict:
@@ -1680,7 +1681,7 @@ cfg = Config()
 
 class SignalBot:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
-    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT"]
+    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
 
     def __init__(self):
         self.engine = SignalEngine()

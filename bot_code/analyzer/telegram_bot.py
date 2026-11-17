@@ -188,10 +188,12 @@ class TelegramBot:
         HEADER = {"LONG": "🟢 🚀 <b>TRADERSZ LONG (QUÉT ĐÁY RANGE)</b>",
                   "SHORT": "🔴 📉 <b>TRADERSZ SHORT (QUÉT ĐỈNH RANGE)</b>",
                   "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ QUÉT BIÊN RANGE</b>"}
-        AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇"}
+        AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇", "SILVER": "🥈"}
         ANAME  = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "BNBUSDT": "BNB Chain",
                   "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla", "NVDA": "NVIDIA",
-                  "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF", "NCCOGOLD2USD-USDT": "Vàng (XAU)"}
+                  "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF",
+                  "NCCOGOLD2USD-USDT": "Vàng (XAU)",
+                  "NCCOXAG2USD-USDT": "Bạc (XAG)", "NCCOXAG2USDUSDT": "Bạc (XAG)"}
         TF_IC  = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "⚪"}
         ZONE_IC = {"PREMIUM": "🔴 PREMIUM (Canh SHORT)", "DISCOUNT": "🟢 DISCOUNT (Canh LONG)", "NO_TRADE_EQ_ZONE": "⛔ NO-TRADE ZONE (Giữa 50% EQ)"}
 

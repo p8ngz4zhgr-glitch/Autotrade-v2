@@ -755,6 +755,15 @@ class TradersszFramework:
                 if hit:
                     setups.append(hit)
 
+        # Bảo vệ chuẩn TraderSZ: không đánh SHORT khi Dealing Range chính đang ở DISCOUNT,
+        # và không đánh LONG khi Dealing Range chính đang ở PREMIUM.
+        primary_zone = str(htf_data.get("market_zone", "NO_TRADE_EQ_ZONE")).upper()
+        if setups:
+            if primary_zone == "DISCOUNT":
+                setups = [s for s in setups if s["direction"] == "LONG"]
+            elif primary_zone == "PREMIUM":
+                setups = [s for s in setups if s["direction"] == "SHORT"]
+
         btc_dir_bias = str((btc_bias or {}).get("bias", "NEUTRAL")).upper()
 
         if setups:

@@ -73,19 +73,26 @@ class SignalEngine:
         s_clean = symbol.upper().replace("-", "").replace("_", "")
         if "NCCOGOLD" in s_clean or "GOLD" in s_clean or "XAU" in s_clean:
             return self.stock, "GOLD"
+        if "NCCOXAG" in s_clean or "SILVER" in s_clean or "XAG" in s_clean:
+            return self.stock, "SILVER"
         if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"):
             return self.crypto, "CRYPTO"
-        if s_clean in ("TSLA", "NVDA", "SPY", "QQQ"):
+        if (s_clean in ("TSLA", "NVDA", "SPY", "QQQ")
+                or any(k in s_clean for k in ("TSLA", "NVDA", "SPY", "QQQ"))
+                or s_clean.startswith("NCSK")):
             return self.stock, "STOCK"
         return self.crypto, "CRYPTO"
 
     def is_tradeable(self, symbol: str):
         s_clean = symbol.upper().replace("-", "").replace("_", "")
-        if "NCCOGOLD" in s_clean or "GOLD" in s_clean or "XAU" in s_clean:
+        if ("NCCOGOLD" in s_clean or "GOLD" in s_clean or "XAU" in s_clean
+                or "NCCOXAG" in s_clean or "SILVER" in s_clean or "XAG" in s_clean):
             return self.stock.is_gold_open()
         if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"):
             return True, "Crypto 24/7"
-        if s_clean in ("TSLA", "NVDA", "SPY", "QQQ"):
+        if (s_clean in ("TSLA", "NVDA", "SPY", "QQQ")
+                or any(k in s_clean for k in ("TSLA", "NVDA", "SPY", "QQQ"))
+                or s_clean.startswith("NCSK")):
             return self.stock.market_open()
         return True, "OK"
 
