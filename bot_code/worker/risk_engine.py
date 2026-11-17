@@ -28,7 +28,7 @@ class ScalpM5RiskManager:
         daily_target_usd: float = 30.0,       # Mục tiêu lợi nhuận $20 - $50/ngày (mặc định $30)
         daily_max_loss_usd: float = 15.0,     # Chặn lỗ tối đa trong ngày (15$ hoặc 3% vốn)
         risk_per_trade_pct: float = 1.0,      # Rủi ro tối đa mỗi lệnh: 1% vốn
-        max_leverage: int = 15,               # Đòn bẩy tối đa an toàn cho M5
+        max_leverage: int = 20,               # Đòn bẩy tối đa cho Crypto/Stock (10x - 20x; Vàng/Bạc x50)
         max_margin_ratio: float = 0.30,       # Ký quỹ mỗi lệnh không vượt quá 30% tổng tài khoản
         consecutive_loss_limit: int = 3,      # Tạm dừng nếu thua liên tiếp 3 lệnh
         cooldown_seconds: int = 3600          # Thời gian nghỉ sau khi chạm giới hạn (60 phút)
@@ -123,14 +123,14 @@ class ScalpM5RiskManager:
         risk_pct_override: float = None,
         market_regime: str = "NORMAL",
         is_trend_aligned: bool = False,
-        adx_val: float = 0.0
+        adx_val: float = 0.0,
+        symbol: str = ""
     ) -> dict:
         """
-        Tính toán quy mô lệnh Scalping M5 chuẩn mực:
+        Tính toán quy mô lệnh chuẩn mực:
         - Tính chính xác số USD chịu rủi ro (Risk USD)
         - Tính khoảng cách SL %
-        - Tính toán đòn bẩy linh động (Dynamic Leverage 5x - 15x: Trend nâng 10x-15x, Sideway giữ 5x)
-        - Bảo vệ chống cháy (Anti-Liquidation Shield: Liq cách SL >= 3x)
+        - Đòn bẩy linh động 10x - 20x (riêng Vàng/Bạc cố định 50x cho cả 2 chiều LONG/SHORT)
         - Tính ký quỹ (Margin USD) đảm bảo không quá 30% vốn
         - Tính các mốc TP1 (1.5R) và TP2 (2.5R)
         - Tính số lệnh thắng cần thiết để đạt $20 - $50
@@ -170,23 +170,26 @@ class ScalpM5RiskManager:
         notional_usd = risk_amount_usd / sl_pct
         contract_qty = notional_usd / entry_price
 
-        # 4. THIẾT KẾ ĐÒN BẨY LINH ĐỘNG (5x - 15x) VÀ BẢO VỆ CHỐNG CHÁY (Anti-Liquidation Shield)
-        # - Sideway / Counter-Trend: giữ đòn bẩy an toàn 5x để phòng thủ
-        # - Trend Following: nâng đòn bẩy linh động 10x - 15x
-        if market_regime in ("SIDEWAYS", "SIDEWAY_RANGE", "COUNTER_TREND"):
-            target_lev = 5
-        elif is_trend_aligned or market_regime == "TREND_FOLLOWING":
-            if adx_val >= 35.0:
-                target_lev = 15
-            elif adx_val >= 25.0:
-                target_lev = 12
-            else:
-                target_lev = 10
+        # 4. THIẾT KẾ ĐÒN BẨY LINH ĐỘNG (10x - 20x; riêng Vàng/Bạc x50 cho 2 chiều LONG/SHORT)
+        sym_up = str(symbol or "").upper()
+        is_precious_metal = any(k in sym_up for k in ("NCCOGOLD", "NCCOXAG", "XAU", "XAG", "GOLD", "SILVER"))
+        if is_precious_metal:
+            actual_leverage = 50
         else:
-            target_lev = 5
+            if market_regime in ("SIDEWAYS", "SIDEWAY_RANGE", "COUNTER_TREND"):
+                target_lev = 10
+            elif is_trend_aligned or market_regime == "TREND_FOLLOWING":
+                if adx_val >= 35.0:
+                    target_lev = 20
+                elif adx_val >= 25.0:
+                    target_lev = 16
+                else:
+                    target_lev = 14
+            else:
+                target_lev = max(10, min(20, int(user_leverage or 10)))
 
-        safe_max_lev = min(self.max_leverage, target_lev, max(5, int(round(0.60 / sl_pct))))
-        actual_leverage = max(5, min(15, safe_max_lev))
+            safe_max_lev = min(self.max_leverage, target_lev, max(10, int(round(0.60 / sl_pct))))
+            actual_leverage = max(10, min(20, safe_max_lev))
 
         # Ký quỹ yêu cầu
         required_margin = notional_usd / actual_leverage
@@ -301,7 +304,7 @@ class RiskEngine:
             daily_target_usd=30.0,
             daily_max_loss_usd=15.0,
             risk_per_trade_pct=1.0,
-            max_leverage=15
+            max_leverage=20
         )
 
     def validate_signal_for_user(self, user_id: str, symbol: str, signal_confidence: float, user_min_confidence: float) -> bool:

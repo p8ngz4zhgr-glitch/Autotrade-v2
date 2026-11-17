@@ -8,14 +8,14 @@ import {
 
 // Danh sách các cặp giao dịch hỗ trợ Scalping M5 & Futures
 const SYMBOLS = [
-  { name: "BTCUSDT", price: 92850.5, defaultLev: 10, step: 0.5, decimal: 1, type: "CRYPTO", atrM5: 185.0 },
-  { name: "ETHUSDT", price: 3452.2, defaultLev: 10, step: 0.1, decimal: 2, type: "CRYPTO", atrM5: 12.5 },
-  { name: "BNBUSDT", price: 612.4, defaultLev: 10, step: 0.05, decimal: 2, type: "CRYPTO", atrM5: 2.8 },
-  { name: "HYPEUSDT", price: 18.25, defaultLev: 10, step: 0.01, decimal: 3, type: "CRYPTO", atrM5: 0.15 },
-  { name: "XAUUSD", price: 2364.8, defaultLev: 20, step: 0.1, decimal: 2, type: "GOLD", atrM5: 4.2 },
-  { name: "NCCOXAG2USDUSDT", price: 31.5, defaultLev: 10, step: 0.01, decimal: 3, type: "SILVER", atrM5: 0.12 },
-  { name: "TSLA", price: 184.5, defaultLev: 5, step: 0.05, decimal: 2, type: "STOCK", atrM5: 1.1 },
-  { name: "NVDA", price: 124.8, defaultLev: 5, step: 0.05, decimal: 2, type: "STOCK", atrM5: 0.8 }
+  { name: "BTCUSDT", price: 92850.5, defaultLev: 15, step: 0.5, decimal: 1, type: "CRYPTO", atrM5: 185.0 },
+  { name: "ETHUSDT", price: 3452.2, defaultLev: 15, step: 0.1, decimal: 2, type: "CRYPTO", atrM5: 12.5 },
+  { name: "BNBUSDT", price: 612.4, defaultLev: 12, step: 0.05, decimal: 2, type: "CRYPTO", atrM5: 2.8 },
+  { name: "HYPEUSDT", price: 18.25, defaultLev: 12, step: 0.01, decimal: 3, type: "CRYPTO", atrM5: 0.15 },
+  { name: "XAUUSD", price: 2364.8, defaultLev: 50, step: 0.1, decimal: 2, type: "GOLD", atrM5: 4.2 },
+  { name: "NCCOXAG2USDUSDT", price: 31.5, defaultLev: 50, step: 0.01, decimal: 3, type: "SILVER", atrM5: 0.12 },
+  { name: "TSLA", price: 184.5, defaultLev: 10, step: 0.05, decimal: 2, type: "STOCK", atrM5: 1.1 },
+  { name: "NVDA", price: 124.8, defaultLev: 10, step: 0.05, decimal: 2, type: "STOCK", atrM5: 0.8 }
 ];
 
 export default function App() {
@@ -56,9 +56,9 @@ export default function App() {
   const [autoTrade, setAutoTrade] = useState(true);
   const [killSwitch, setKillSwitch] = useState(false);
   const [users] = useState([
-    { telegram_id: "6286755886", tier: "TIER1", capital: 350.0, leverage: 10, auto: true, risk: 1.0, conf: 68 },
-    { telegram_id: "8827361923", tier: "TIER2", capital: 1250.0, leverage: 10, auto: true, risk: 1.0, conf: 75 },
-    { telegram_id: "9018273612", tier: "TIER3", capital: 5500.0, leverage: 5, auto: true, risk: 0.8, conf: 80 }
+    { telegram_id: "6286755886", tier: "TIER1", capital: 350.0, leverage: 15, auto: true, risk: 1.0, conf: 68 },
+    { telegram_id: "8827361923", tier: "TIER2", capital: 1250.0, leverage: 12, auto: true, risk: 1.0, conf: 75 },
+    { telegram_id: "9018273612", tier: "TIER3", capital: 5500.0, leverage: 10, auto: true, risk: 0.8, conf: 80 }
   ]);
   const [logs, setLogs] = useState<string[]>([]);
   
@@ -212,10 +212,12 @@ export default function App() {
   const notionalUsd = riskAmountUsd / (slDistPct / 100);
   const contractQty = notionalUsd / price;
   
-  // 4. Giới hạn đòn bẩy an toàn (Safe Leverage) để chống cháy:
-  // Ngưỡng cháy (0.90 / Lev) phải xa ít nhất gấp 3x khoảng cách SL
-  const maxSafeLeverage = Math.min(scalpLeverage, Math.max(2, Math.floor(60 / slDistPct)));
-  const actualLev = Math.max(2, Math.min(scalpLeverage, maxSafeLeverage));
+  // 4. Đòn bẩy mới: 10x - 20x (riêng Vàng/Bạc cố định 50x cho cả 2 chiều LONG & SHORT)
+  const isPreciousMetal = selectedSym.type === "GOLD" || selectedSym.type === "SILVER";
+  const maxSafeLeverage = isPreciousMetal
+    ? 50
+    : Math.min(20, Math.max(10, Math.min(scalpLeverage, Math.floor(60 / slDistPct))));
+  const actualLev = isPreciousMetal ? 50 : Math.max(10, Math.min(20, maxSafeLeverage));
   const positionSizeUsd = accountBalance * actualLev;
   const tp1Pct = slDistPct * 1.5;
   const tp2Pct = slDistPct * 2.5;
@@ -543,7 +545,7 @@ export default function App() {
                   <span className="text-xs font-mono font-bold text-cyan-400">{scalpLeverage}x (An toàn: {actualLev}x)</span>
                 </div>
                 <div className="grid grid-cols-4 gap-1">
-                  {[5, 10, 15, 20].map(lev => (
+                  {[10, 15, 20, 50].map(lev => (
                     <button
                       key={lev}
                       onClick={() => setScalpLeverage(lev)}
@@ -553,7 +555,7 @@ export default function App() {
                           : "bg-[#070b16] text-[#718096] border-transparent hover:border-[#141d2e]"
                       }`}
                     >
-                      {lev}x
+                      {lev}x{lev === 50 ? " Au/Ag" : ""}
                     </button>
                   ))}
                 </div>
@@ -707,7 +709,10 @@ export default function App() {
                 <button
                   key={sym.name}
                   id={`sym-btn-${sym.name}`}
-                  onClick={() => setSelectedSym(sym)}
+                  onClick={() => {
+                    setSelectedSym(sym);
+                    setScalpLeverage(sym.defaultLev);
+                  }}
                   className={`py-2 px-2.5 rounded-lg text-xs font-bold transition-all flex flex-col items-center justify-between gap-1 border ${
                     selectedSym.name === sym.name 
                       ? "bg-emerald-950/30 text-[#05f38c] border-emerald-500/40 shadow-[0_0_15px_-3px_rgba(5,243,140,0.15)]"
@@ -1304,7 +1309,7 @@ class ScalpM5RiskManager:
         daily_target_usd: float = 30.0,       # Mục tiêu lợi nhuận $20 - $50/ngày (mặc định $30)
         daily_max_loss_usd: float = 15.0,     # Chặn lỗ tối đa trong ngày (15$ hoặc 3% vốn)
         risk_per_trade_pct: float = 1.0,      # Rủi ro tối đa mỗi lệnh: 1% vốn
-        max_leverage: int = 15,               # Đòn bẩy tối đa an toàn cho M5
+        max_leverage: int = 20,               # Đòn bẩy tối đa 10x-20x (Vàng/Bạc x50)
         max_margin_ratio: float = 0.30,       # Ký quỹ mỗi lệnh không vượt quá 30% tổng tài khoản
         consecutive_loss_limit: int = 3,      # Tạm dừng nếu thua liên tiếp 3 lệnh
         cooldown_seconds: int = 3600          # Thời gian nghỉ sau khi chạm giới hạn (60 phút)
@@ -1442,9 +1447,9 @@ class ScalpM5RiskManager:
         notional_usd = risk_amount_usd / sl_pct
         contract_qty = notional_usd / entry_price
 
-        # 4. THIẾT KẾ ĐÒN BẨY VÀ BẢO VỆ CHỐNG CHÁY (Anti-Liquidation Shield)
-        safe_max_lev = min(self.max_leverage, user_leverage, max(2, int(0.60 / sl_pct)))
-        actual_leverage = max(2, safe_max_lev)
+        # 4. ĐÒN BẨY (10x - 20x; Vàng/Bạc x50 cho 2 chiều LONG/SHORT)
+        safe_max_lev = min(self.max_leverage, user_leverage, max(10, int(0.60 / sl_pct)))
+        actual_leverage = max(10, min(20, safe_max_lev))
 
         # Ký quỹ yêu cầu
         required_margin = notional_usd / actual_leverage
@@ -1642,7 +1647,9 @@ class Config:
         self.DAILY_PROFIT_TARGET_USD  = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
         self.DAILY_MAX_LOSS_USD       = float(os.getenv("DAILY_MAX_LOSS_USD", "15.0"))
         self.MAX_RISK_PER_TRADE_PCT   = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.0"))
-        self.MAX_SAFE_LEVERAGE        = int(os.getenv("MAX_SAFE_LEVERAGE", "15"))
+        self.MAX_SAFE_LEVERAGE        = int(os.getenv("MAX_SAFE_LEVERAGE", "20"))
+        self.MIN_SAFE_LEVERAGE        = int(os.getenv("MIN_SAFE_LEVERAGE", "10"))
+        self.PRECIOUS_METALS_LEVERAGE = int(os.getenv("PRECIOUS_METALS_LEVERAGE", "50"))
         self.CONSECUTIVE_LOSS_LIMIT   = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
         self.AUTO_BREAKEVEN_ON_TP1    = os.getenv("AUTO_BREAKEVEN_ON_TP1", "true").lower() == "true"
 `,

@@ -65,17 +65,17 @@ TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
         "min_confidence": 68.0, "max_risk_pct": 2.0,
-        "max_positions": 5, "leverage": 5, "target_monthly": "5-8%",
+        "max_positions": 5, "leverage": 10, "target_monthly": "8-12%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
         "min_confidence": 70.0, "max_risk_pct": 1.5,
-        "max_positions": 3, "leverage": 5, "target_monthly": "4-6%",
+        "max_positions": 3, "leverage": 10, "target_monthly": "6-10%",
     },
     "TIER3": {
         "label": "Ca Map", "min_capital": 2000, "max_capital": float("inf"),
         "min_confidence": 75.0, "max_risk_pct": 1.0,
-        "max_positions": 5, "leverage": 3, "target_monthly": "3-5%",
+        "max_positions": 5, "leverage": 10, "target_monthly": "5-8%",
     },
 }
 MIN_CAPITAL_TO_TRADE = 20.0
@@ -456,17 +456,26 @@ def _register_telegram_webhook():
         log.warning("⚠️ Error registering Telegram Webhook: %s", e)
 
 
-def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 5, sl_pct: float = 0.02) -> tuple[int, str, dict]:
+def _is_precious_metal(symbol: str = "", asset_type: str = "") -> bool:
+    atype = str(asset_type or "").upper()
+    if atype in ("GOLD", "SILVER"):
+        return True
+    s = str(symbol or "").upper()
+    return any(k in s for k in ("NCCOGOLD", "NCCOXAG", "XAU", "XAG", "GOLD", "SILVER"))
+
+
+def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 10, sl_pct: float = 0.02) -> tuple[int, str, dict]:
     """
-    TÍNH TOÁN ĐÒN BẨY LINH ĐỘNG (DYNAMIC LEVERAGE 5x - 15x) THEO PHƯƠNG PHÁP TRADERSZ:
-    - Khi ở vùng giữa Range / No-Trade Zone hoặc Deviation ngược HTF Bias: giữ đòn bẩy 5x phòng thủ.
-    - Khi có Deviation / SFP chuẩn trên 1H/4H/1D: 6x - 10x.
-    - Khi A+ Setup (SFP khung 1H/4H/1D + Đồng thuận Macro Opens YO/MO/WO + R:R >= 2.5 + Conf >= 84%): 12x - 15x.
-    - CHỐT CHẶN AN TOÀN CHỐNG CHÁY (Anti-Liquidation Shield):
-        + Đảm bảo khoảng cách thanh lý luôn xa gấp >= 3x khoảng cách SL:
-          max_safe_by_sl = max(5, int(round(0.60 / sl_pct)))
-        + Giới hạn cứng trong khoảng [5, 15].
+    TÍNH TOÁN ĐÒN BẨY LINH ĐỘNG (10x - 20x; RIÊNG VÀNG/BẠC CỐ ĐỊNH 50x CHO 2 CHIỀU LONG/SHORT):
+    - Vàng / Bạc (NCCOGOLD, NCCOXAG, XAU, XAG): cố định 50x cho cả 2 chiều LONG và SHORT.
+    - Các mã khác (Crypto / Stock):
+      + Khi ở vùng giữa Range / Chưa có SFP: giữ đòn bẩy nền 10x.
+      + Khi có Deviation / SFP chuẩn trên 1H/4H: 12x - 15x.
+      + Khi A+ Setup (HTF Confluence + R:R >= 2.5 + Conf >= 84%): 18x - 20x.
+      + Anti-Liquidation Shield: giới hạn trong [10, 20].
     """
+    symbol = signal.get("symbol", "")
+    asset_type = signal.get("asset_type", "")
     direction = signal.get("direction") or signal.get("final") or "WAIT"
     trade_regime = signal.get("trade_regime", "RANGE_DEVIATION")
     tsz = signal.get("traderssz", {})
@@ -476,39 +485,54 @@ def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 5, sl_pct
     conf = float(signal.get("confidence", 70.0))
     setup_tf = str(setup.get("tf", ""))
 
+    if _is_precious_metal(symbol, asset_type):
+        effective_leverage = 50
+        mode = "PRECIOUS_METAL_50X"
+        reason = "Vàng/Bạc cố định 50x (2 chiều LONG/SHORT)"
+        meta = {
+            "mode": mode,
+            "target_lev": 50,
+            "effective_leverage": 50,
+            "is_htf_aligned": is_htf_aligned,
+            "setup_tf": setup_tf,
+            "shield_applied": False,
+            "reason": reason,
+        }
+        return effective_leverage, reason, meta
+
     if trade_regime == "NO_TRADE_RANGE" or direction == "WAIT":
-        target_lev = 5
+        target_lev = 10
         mode = "NO_TRADE_RANGE"
-        reason = "Vùng giữa Range / Chưa có SFP (Giữ đòn bẩy an toàn 5x)"
+        reason = "Vùng giữa Range / Chưa có SFP (Giữ đòn bẩy nền 10x)"
     elif trade_regime == "TREND_FOLLOWING" or (is_htf_aligned and setup_tf in ("1d", "4h", "1h") and rr_ratio >= 2.5):
         if conf >= 88.0 and rr_ratio >= 3.0:
-            target_lev = 15
+            target_lev = 20
             mode = "TRADERSZ_A_PLUS"
-            reason = f"TraderSZ A+ HTF Deviation + Opens Confluence (Conf: {conf:.1f}%, R:R 1:{rr_ratio:.1f}) -> 15x"
+            reason = f"TraderSZ A+ HTF Deviation + Opens Confluence (Conf: {conf:.1f}%, R:R 1:{rr_ratio:.1f}) -> 20x"
         else:
-            target_lev = 12
+            target_lev = 18
             mode = "TRADERSZ_HTF_ALIGNED"
-            reason = f"TraderSZ SFP đồng thuận HTF & Opens (Conf: {conf:.1f}%, R:R 1:{rr_ratio:.1f}) -> 12x"
+            reason = f"TraderSZ SFP đồng thuận HTF & Opens (Conf: {conf:.1f}%, R:R 1:{rr_ratio:.1f}) -> 18x"
     elif setup_tf in ("4h", "1h") and conf >= 78.0:
-        target_lev = 8 if is_htf_aligned else 6
+        target_lev = 15 if is_htf_aligned else 12
         mode = "RANGE_DEVIATION"
         reason = f"TraderSZ {setup_tf.upper()} Range Deviation/SFP -> {target_lev}x"
     else:
-        target_lev = 5
+        target_lev = max(10, min(20, int(user_base_leverage or 10)))
         mode = "RANGE_BASE"
-        reason = "Range Sweep phòng thủ (5x)"
+        reason = f"Range Sweep nền ({target_lev}x)"
 
-    # Lớp bảo vệ chống thanh lý (Anti-Liquidation Shield)
+    # Lớp bảo vệ chống thanh lý (Anti-Liquidation Shield) trong biên [10, 20]
     shield_applied = False
     if sl_pct and sl_pct > 0.001:
-        max_safe_by_sl = max(5, int(round(0.60 / sl_pct)))
+        max_safe_by_sl = max(10, int(round(0.60 / sl_pct)))
         if target_lev > max_safe_by_sl:
             shield_applied = True
             prev_lev = target_lev
             target_lev = max_safe_by_sl
-            reason += f" [Shield: Hạ từ {prev_lev}x về {target_lev}x do SL {sl_pct*100:.1f}% để thanh lý xa gấp 3x SL]"
+            reason += f" [Shield: Hạ từ {prev_lev}x về {target_lev}x do SL {sl_pct*100:.1f}%]"
 
-    effective_leverage = max(5, min(15, target_lev))
+    effective_leverage = max(10, min(20, target_lev))
 
     meta = {
         "mode": mode,
@@ -560,7 +584,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         # [NEW] LỚP BẢO VỆ ĐỘNG (BREAKEVEN & QUẢN LÝ TP/SL TRADERSZ)
         # ══════════════════════════════════════════════════════════
         bx = get_bx(user)
-        leverage = getattr(user, 'leverage', 5)
+        leverage = 50 if _is_precious_metal(sym) else max(10, int(getattr(user, 'leverage', 10) or 10))
 
         cache = _get_active_redis()
         be_key = f"BREAKEVEN_{user.telegram_id}_{sym}_{direction}"
@@ -878,8 +902,8 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             if new_qty > 0:
                                 new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
                                 new_rr    = analysis.get("rr_ratio", 1.5)
-                                rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 5, sl_pct)
-                                bx.set_leverage(sym, leverage=rev_lev)
+                                rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 10, sl_pct)
+                                bx.set_leverage(sym, leverage=rev_lev, side="ALL")
                                 rev_res = bx.place_order(
                                     sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2,
                                     tp_levels=analysis.get("plan", {}).get("tp_levels", []),
@@ -1063,7 +1087,7 @@ def sync_bingx_positions():
                             "direction": p.get("direction", "LONG"), "pct": pct,
                             "qty": p.get("qty", 0), "user_id": tid,
                             "entry": p.get("entry", 0), "sl": sl, "tp2": tp2,
-                            "leverage": user.leverage or 5
+                            "leverage": 50 if _is_precious_metal(sym) else max(10, int(user.leverage or 10))
                         }
                         current_all.append({
                             "user_id": tid, "tier": user.tier, "capital": user.capital,
@@ -1092,7 +1116,7 @@ def sync_bingx_positions():
                         entry = v.get("entry", 0)
                         sl = v.get("sl", 0)
                         tp2 = v.get("tp2", 0)
-                        lev = v.get("leverage", 5)
+                        lev = v.get("leverage", 50 if _is_precious_metal(symbol) else 10)
 
                         # Check if this close was already notified by reversal
                         was_reversal = False
@@ -1468,10 +1492,10 @@ def _execute_for_user(user: User, signal: dict):
                      user.telegram_id, today_pnl, target_daily)
             return
 
-        # 3. ĐÒN BẨY LINH ĐỘNG (DYNAMIC LEVERAGE 5x - 15x) & BẢO VỆ CHỐNG CHÁY (ANTI-LIQUIDATION SHIELD)
+        # 3. ĐÒN BẨY LINH ĐỘNG (10x - 20x; RIÊNG VÀNG/BẠC x50 CHO 2 CHIỀU LONG/SHORT)
         effective_leverage, lev_reason, lev_meta = calculate_dynamic_leverage(
             signal=signal,
-            user_base_leverage=user.leverage or 5,
+            user_base_leverage=user.leverage or 10,
             sl_pct=sl_pct
         )
         log.info("⚡ [DYNAMIC LEVERAGE] User %s | %s %s: Lev=%dx (%s)",
@@ -1502,7 +1526,7 @@ def _execute_for_user(user: User, signal: dict):
         # Vào lệnh trực tiếp theo Price Action TraderSZ — bỏ AI Meta-Filter phản biện/chặn lệnh
         bx   = get_bx(user)
         side = "BUY" if direction == "LONG" else "SELL"
-        bx.set_leverage(sym, leverage=effective_leverage)
+        bx.set_leverage(sym, leverage=effective_leverage, side="ALL")
         bx.cancel_all_orders(sym)
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
         sig_rr    = signal.get("rr_ratio", 1.5)
@@ -1548,12 +1572,14 @@ def _execute_for_user(user: User, signal: dict):
                 news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - news_risk.get('size_mult', 0.5)) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
 
             lev_tag = f"{effective_leverage}x"
-            if effective_leverage >= 10:
+            if effective_leverage >= 50:
+                lev_tag += " 🥇 (Vàng/Bạc x50 2 chiều LONG/SHORT)"
+            elif effective_leverage >= 18:
                 lev_tag += f" 🚀 (Trend Boost {effective_leverage}x)"
-            elif effective_leverage > 5:
+            elif effective_leverage > 10:
                 lev_tag += f" 📈 (Trend {effective_leverage}x)"
             else:
-                lev_tag += " 🛡️ (Sideway/Base 5x)"
+                lev_tag += " 🛡️ (Range Base 10x)"
 
             sl_badge = "✅ Đã đặt sàn" if sl_ok else "⚠️ Chờ Self-Heal"
             tp_badge = "✅ Đã đặt sàn" if tp_ok else "⚠️ Chờ Self-Heal"
@@ -1809,7 +1835,7 @@ async def tg_webhook_bot2(request: Request):
                     f"💰 Vốn: <b>${u.capital:.2f}</b>\n"
                     f"🏷 Tier: <b>{cfg['label']}</b>\n"
                     f"🎯 Min Confidence: <b>{u.min_confidence}%</b>\n"
-                    f"⚡ Leverage: <b>{u.leverage}x</b> <i>(Linh động 5x-15x theo Trend/Sideway)</i>\n"
+                    f"⚡ Leverage: <b>{u.leverage}x</b> <i>(Linh động 10x-20x | Vàng/Bạc 50x)</i>\n"
                     f"📈 Risk/Lệnh: <b>{u.max_risk_pct}%</b>\n"
                     f"🔄 Auto-trade: <b>{'BẬT' if u.auto_trade else 'TẮT'}</b>\n"
                     f"📊 Total PnL: <b>${u.total_pnl:+.2f}</b>")
@@ -1818,7 +1844,7 @@ async def tg_webhook_bot2(request: Request):
             parts = text.split()
             if len(parts) >= 2 and parts[1].isdigit():
                 val = int(parts[1])
-                if 5 <= val <= 15:
+                if 10 <= val <= 20:
                     db = SessionLocal()
                     u = db.query(User).filter(User.telegram_id == chat_id).first()
                     if u:
@@ -1826,22 +1852,20 @@ async def tg_webhook_bot2(request: Request):
                         db.commit()
                         _tg_send(REGISTER_TOKEN, chat_id,
                                  f"✅ Đã cập nhật đòn bẩy cơ bản của bạn lên <b>{val}x</b>!\n\n"
-                                 f"🤖 <b>Cơ chế đòn bẩy linh động (Dynamic Leverage):</b>\n"
-                                 f"• <b>Sideway / Ranging / Counter-Trend</b>: Giữ đòn bẩy phòng thủ <b>5x</b>.\n"
-                                 f"• <b>Thuận Trend (4H/1H đồng thuận)</b>: Tự động nâng lên <b>10x - 12x</b>.\n"
-                                 f"• <b>Super Trend (Breakout + ADX > 35)</b>: Đẩy tối đa <b>15x</b> để ăn trọn sóng.\n"
-                                 f"• <b>Anti-Liquidation Shield</b>: Khoảng cách thanh lý luôn cách điểm vào gấp ít nhất 3x khoảng cách SL.")
+                                 f"🤖 <b>Cơ chế đòn bẩy mới:</b>\n"
+                                 f"• <b>Vàng / Bạc (LONG &amp; SHORT)</b>: Cố định <b>50x</b> cho cả 2 chiều.\n"
+                                 f"• <b>Crypto / Chứng khoán</b>: Linh động <b>10x - 20x</b> theo cấu trúc Range &amp; HTF Bias.\n"
+                                 f"• <b>SFP Vùng Biên / A+ Setup</b>: Nâng lên <b>15x - 20x</b>; nền tối thiểu <b>10x</b>.")
                     db.close()
                 else:
-                    _tg_send(REGISTER_TOKEN, chat_id, "⚠️ Đòn bẩy hợp lệ từ <b>5x</b> đến <b>15x</b>. Ví dụ: <code>/donbay 10</code>")
+                    _tg_send(REGISTER_TOKEN, chat_id, "⚠️ Đòn bẩy hợp lệ cho Crypto/Stock từ <b>10x</b> đến <b>20x</b> (Vàng/Bạc tự động <b>50x</b>). Ví dụ: <code>/donbay 15</code>")
             else:
                 _tg_send(REGISTER_TOKEN, chat_id,
-                         "⚡ <b>HỆ THỐNG ĐÒN BẨY LINH ĐỘNG (5x - 15x)</b>\n\n"
-                         "• <b>Sideway / Đi ngang</b>: Tự động dùng đòn bẩy <b>5x</b> để phòng thủ, tránh bị cắn SL.\n"
-                         "• <b>Theo Trend (4H đồng thuận)</b>: Nâng đòn bẩy lên <b>10x - 12x</b>.\n"
-                         "• <b>Super Trend Breakout</b>: Nâng tối đa <b>15x</b> bắt sóng lớn.\n"
-                         "• <b>Anti-Liquidation Shield</b>: Luôn bảo vệ an toàn tuyệt đối, thanh lý cách xa gấp 3x khoảng cách SL.\n\n"
-                         "👉 Cú pháp chỉnh đòn bẩy cơ bản: <code>/donbay 10</code> hoặc <code>/donbay 15</code>")
+                         "⚡ <b>HỆ THỐNG ĐÒN BẨY MỚI (10x - 20x | VÀNG/BẠC 50x)</b>\n\n"
+                         "• <b>Vàng &amp; Bạc (XAU / XAG)</b>: Cố định <b>50x</b> cho cả 2 chiều LONG và SHORT.\n"
+                         "• <b>Nền cơ bản (Crypto / Stock)</b>: Tối thiểu <b>10x</b>.\n"
+                         "• <b>SFP / A+ HTF Confluence</b>: Tự động nâng lên <b>15x - 20x</b>.\n\n"
+                         "👉 Cú pháp chỉnh đòn bẩy cơ bản: <code>/donbay 10</code> hoặc <code>/donbay 20</code>")
 
         elif text == "/dashboard":
             dash_url = (RENDER_URL or "") + f"/my-dashboard?uid={chat_id}"
@@ -2610,7 +2634,7 @@ ADMIN_DASHBOARD_HTML = """
                             </div>
                             <div>
                                 <label class="text-[10px] text-[#718096] font-bold block uppercase mb-1">Leverage</label>
-                                <input type="number" id="form-user-lev" value="5"
+                                <input type="number" id="form-user-lev" value="10"
                                        class="w-full bg-[#040811] border border-[#1b263e] rounded p-2 text-xs font-mono text-[#e2e8f0]">
                             </div>
                         </div>

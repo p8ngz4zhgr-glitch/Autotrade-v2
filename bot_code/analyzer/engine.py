@@ -317,30 +317,42 @@ class SignalEngine:
             {"level": 2, "price": round(tp2, 4), "close_pct": 0.50},
         ]
 
-        # 6. Xác định Regime & Đòn bẩy linh động (5x - 15x) thuần theo TraderSZ + Anti-Liquidation Shield
+        # 6. Xác định Regime & Đòn bẩy linh động (10x - 20x; riêng Vàng/Bạc cố định 50x cho 2 chiều LONG/SHORT)
         is_htf_aligned = bool(traderssz_res.get("is_htf_aligned", False))
+        sym_up = str(symbol or "").upper()
+        is_precious_metal = atype in ("GOLD", "SILVER") or any(
+            k in sym_up for k in ("NCCOGOLD", "NCCOXAG", "XAU", "XAG", "GOLD", "SILVER")
+        )
+
         if final == "WAIT":
             trade_regime = "NO_TRADE_RANGE"
-            rec_leverage = 5
-            lev_note = "Chờ quét biên Range (5x)"
         elif is_htf_aligned and setup.get("tf") in ("1d", "4h", "1h") and rr_ratio >= 2.5 and conf >= 84.0:
             trade_regime = "TREND_FOLLOWING"
-            rec_leverage = 12 if conf < 88.0 else 15
-            lev_note = f"TraderSZ A+ HTF Confluence ({rec_leverage}x)"
-        elif setup.get("tf") in ("4h", "1h") and conf >= 78.0:
-            trade_regime = "RANGE_DEVIATION"
-            rec_leverage = 8 if is_htf_aligned else 6
-            lev_note = f"TraderSZ Range SFP ({rec_leverage}x)"
         else:
             trade_regime = "RANGE_DEVIATION"
-            rec_leverage = 5
-            lev_note = "Range Sweep Phòng Thủ (5x)"
 
-        # Anti-Liquidation Shield: Đảm bảo khoảng cách thanh lý luôn xa ít nhất 3x khoảng cách SL
-        if sl_pct > 0.001:
-            max_safe_by_sl = max(5, int(60.0 / sl_pct))
-            rec_leverage = min(rec_leverage, max_safe_by_sl)
-        rec_leverage = max(5, min(15, rec_leverage))
+        if is_precious_metal:
+            rec_leverage = 50
+            lev_note = "Vàng/Bạc cố định 50x (2 chiều LONG/SHORT)"
+        else:
+            if final == "WAIT":
+                rec_leverage = 10
+                lev_note = "Chờ quét biên Range (10x)"
+            elif trade_regime == "TREND_FOLLOWING":
+                rec_leverage = 18 if conf < 88.0 else 20
+                lev_note = f"TraderSZ A+ HTF Confluence ({rec_leverage}x)"
+            elif setup.get("tf") in ("4h", "1h") and conf >= 78.0:
+                rec_leverage = 15 if is_htf_aligned else 12
+                lev_note = f"TraderSZ Range SFP ({rec_leverage}x)"
+            else:
+                rec_leverage = 10
+                lev_note = "Range Sweep Phòng Thủ (10x)"
+
+            # Anti-Liquidation Shield: Khống chế trong biên 10x - 20x theo khoảng cách SL
+            if sl_pct > 0.001:
+                max_safe_by_sl = max(10, int(60.0 / sl_pct))
+                rec_leverage = min(rec_leverage, max_safe_by_sl)
+            rec_leverage = max(10, min(20, rec_leverage))
 
         # 7. Expectancy (EV) thuần dựa trên Xác suất SFP & Risk:Reward
         p_win = round(min(0.80, max(0.40, conf / 100.0 * 0.78)), 3)

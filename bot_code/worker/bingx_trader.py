@@ -47,6 +47,11 @@ class BingXExchange:
             return sym[:-4] + "-USDT"
         return sym
 
+    @staticmethod
+    def _is_precious_metal(symbol: str) -> bool:
+        s = str(symbol or "").upper()
+        return any(k in s for k in ("NCCOGOLD", "NCCOXAG", "XAU", "XAG", "GOLD", "SILVER"))
+
     def _sign(self, params: dict) -> str:
         # BingX Swap V2 yêu cầu ký chuỗi raw key=val đã sắp xếp (không URL-encode dấu {}":, của JSON stopLoss/takeProfit)
         raw_query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
@@ -254,18 +259,65 @@ class BingXExchange:
         return 0.0
 
     def set_leverage(self, symbol: str, leverage: int, side: str = "ALL") -> dict:
-        res = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+        target_lev = int(leverage)
+        if self._is_precious_metal(symbol):
+            target_lev = 50
+        req_side = str(side or "ALL").upper()
+
+        # Trong chế độ Hedge (LONG/SHORT), đặt rõ cho CẢ 2 CHIỀU LONG & SHORT
+        if req_side in ("ALL", "BOTH"):
+            if self.is_hedge_mode():
+                res_l = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+                    "symbol": symbol,
+                    "leverage": target_lev,
+                    "side": "LONG",
+                })
+                res_s = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+                    "symbol": symbol,
+                    "leverage": target_lev,
+                    "side": "SHORT",
+                })
+                ok_l = isinstance(res_l, dict) and res_l.get("code") == 0
+                ok_s = isinstance(res_s, dict) and res_s.get("code") == 0
+                if ok_l and ok_s:
+                    log.info("✅ Đã set đòn bẩy %s: LONG=%dx & SHORT=%dx", symbol, target_lev, target_lev)
+                    return {"code": 0, "msg": "SUCCESS", "long": res_l, "short": res_s}
+                # Fallback One-Way mode nếu tài khoản không ở Hedge mode
+                res_b = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+                    "symbol": symbol,
+                    "leverage": target_lev,
+                    "side": "BOTH",
+                })
+                if isinstance(res_b, dict) and res_b.get("code") == 0:
+                    return res_b
+                return res_l if ok_l else (res_s if ok_s else res_l)
+            else:
+                res_b = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+                    "symbol": symbol,
+                    "leverage": target_lev,
+                    "side": "BOTH",
+                })
+                if isinstance(res_b, dict) and res_b.get("code") == 0:
+                    return res_b
+                res_l = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+                    "symbol": symbol,
+                    "leverage": target_lev,
+                    "side": "LONG",
+                })
+                res_s = self._request("POST", "/openApi/swap/v2/trade/leverage", {
+                    "symbol": symbol,
+                    "leverage": target_lev,
+                    "side": "SHORT",
+                })
+                if isinstance(res_l, dict) and res_l.get("code") == 0:
+                    return {"code": 0, "msg": "SUCCESS", "long": res_l, "short": res_s}
+                return res_b
+
+        return self._request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": symbol,
-            "leverage": leverage,
-            "side": side,
+            "leverage": target_lev,
+            "side": req_side,
         })
-        if isinstance(res, dict) and res.get("code") == 109400:
-            res = self._request("POST", "/openApi/swap/v2/trade/leverage", {
-                "symbol": symbol,
-                "leverage": leverage,
-                "side": "BOTH",
-            })
-        return res
 
     def get_open_positions(self, symbol: str = None):
         params = {}
@@ -529,7 +581,12 @@ class BingXExchange:
 
         return res
 
-    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 5, p_win: float = 0.5, rr_ratio: float = 1.5, tp_levels: list = None) -> dict:
+    def place_order(self, symbol: str, side: str, qty: float, sl_price: float, tp_price: float, leverage: int = 10, p_win: float = 0.5, rr_ratio: float = 1.5, tp_levels: list = None) -> dict:
+        if self._is_precious_metal(symbol):
+            leverage = 50
+        else:
+            leverage = max(10, min(20, int(leverage or 10)))
+
         open_positions = self.get_open_positions(symbol)
         if open_positions is None:
             return {"ok": False, "msg": "Không kiểm tra được vị thế hiện tại trên BingX"}
@@ -1214,7 +1271,11 @@ class BingXExchange:
     # ════════════════════════════════════════════════════════════════════
     # CƠ CHẾ LỌC NHIỄU, KÉO SL HÒA VỐN SỚM (EARLY BREAKEVEN) VÀ GỒNG LÃI
     # ════════════════════════════════════════════════════════════════════
-    def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 5, redis_client=None) -> dict:
+    def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 10, redis_client=None) -> dict:
+        if self._is_precious_metal(symbol):
+            leverage = 50
+        else:
+            leverage = max(10, int(leverage or 10))
         open_positions = self.get_open_positions(symbol)
         if not open_positions:
             return {"action": "NONE", "msg": "Không có vị thế mở."}

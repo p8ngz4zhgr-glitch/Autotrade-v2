@@ -170,8 +170,11 @@ class QuantRiskManager:
         risk_usd = capital * (risk_pct / 100.0)
         notional_usd = risk_usd / sl_pct
 
-        # Khống chế đòn bẩy để bảo vệ tài khoản
-        max_safe_lev = min(leverage, max(3, int(0.60 / sl_pct)))
+        # Khống chế đòn bẩy (10x - 20x; giữ nguyên 50x nếu là Vàng/Bạc)
+        if leverage >= 50:
+            max_safe_lev = 50
+        else:
+            max_safe_lev = max(10, min(20, min(leverage, max(10, int(0.60 / sl_pct)))))
         margin_usd = notional_usd / max_safe_lev
 
         # Nếu ký quỹ vượt 25% vốn, điều chỉnh giảm

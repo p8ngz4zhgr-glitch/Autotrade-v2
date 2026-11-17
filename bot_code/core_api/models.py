@@ -38,7 +38,7 @@ class User(Base):
     min_confidence        = Column(Float,    default=68.0)
     max_risk_pct          = Column(Float,    default=2.0)
     max_positions         = Column(Integer,  default=2)
-    leverage              = Column(Integer,  default=5)
+    leverage              = Column(Integer,  default=10)
     auto_trade            = Column(Boolean,  default=False)
 
     registered_at         = Column(DateTime, default=datetime.utcnow)
@@ -131,6 +131,9 @@ def _ensure_schema_migrations():
                 with engine.begin() as conn:
                     conn.execute(text("ALTER TABLE app_config ADD COLUMN strategy_reset_tag VARCHAR DEFAULT ''"))
                 log.info("✅ [Migration] Đã thêm cột app_config.strategy_reset_tag")
+        if "users" in tables:
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE users SET leverage = 10 WHERE leverage IS NULL OR leverage < 10"))
     except Exception as e:
         log.warning("⚠️ [Migration] Schema migration lỗi (bỏ qua, không chặn khởi động): %s", e)
 

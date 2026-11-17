@@ -284,7 +284,7 @@ class TelegramBot:
             f"  ├ 🛑 SL Râu : <code>${plan['sl']}</code> (-{data.get('sl_pct','1.5')}%)",
             f"  ├ 🎯 TP1 (50% @ EQ): <code>${plan.get('tp1', 0)}</code> (+Dời SL Hòa Vốn)",
             f"  ├ 🏆 TP2 (50% @ Biên): <code>${plan.get('tp2', 0)}</code>",
-            f"  ├ ⚡ Đòn bẩy: <b>{data.get('dynamic_leverage', plan.get('recommended_leverage', 5))}x</b> ({data.get('leverage_note', 'Linh động 5x-15x')})",
+            f"  ├ ⚡ Đòn bẩy: <b>{data.get('dynamic_leverage', plan.get('recommended_leverage', 10))}x</b> ({data.get('leverage_note', 'Linh động 10x-20x | Vàng/Bạc 50x')})",
             f"  └ ⚖️ R:R    : <b>1:{data.get('rr_ratio','2.0')}</b>",
             "",
             "📐 <b>PHÂN TÍCH PA</b> <i>(" + llm_name + ")</i>",
