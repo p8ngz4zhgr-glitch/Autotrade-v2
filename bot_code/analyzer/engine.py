@@ -141,7 +141,13 @@ class SignalEngine:
             if active_tf == tf and active_dir in ("LONG", "SHORT"):
                 tf_dir = active_dir
                 tf_score = int(traderssz_res.get("confidence", 80))
-                note = "Breakout Tiếp Diễn" if active_setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION" else f"SFP {active_setup.get('setup_type')}"
+                st = active_setup.get("setup_type", "")
+                if st == "RANGE_BREAKOUT_CONTINUATION":
+                    note = "Breakout Tiếp Diễn"
+                elif st == "LEVEL_RECLAIM_SR_FLIP":
+                    note = "Reclaim & S/R Flip"
+                else:
+                    note = f"SFP {st}"
             elif eq > 0:
                 if c >= rh:
                     tf_dir = "LONG" if active_dir == "LONG" else "WAIT"
@@ -382,7 +388,9 @@ class SignalEngine:
         }
 
         tf_summary = self._build_tf_summary(klines_by_tf, traderssz_res)
-        size_mult = round(max(0.75, min(1.0, float(news_risk.get("size_mult", 1.0)))), 2)
+        monday_mult = float(htf_data.get("monday_size_mult", 1.0) or 1.0)
+        news_mult = float(news_risk.get("size_mult", 1.0) or 1.0)
+        size_mult = round(max(0.65, min(1.0, news_mult * monday_mult)), 2)
 
         btc_tag = f" | BTC:{btc_ctx.get('bias', 'NEUTRAL')}" if (atype == "CRYPTO" and btc_ctx) else ""
         log.info(

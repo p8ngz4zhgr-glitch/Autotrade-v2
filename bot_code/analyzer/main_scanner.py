@@ -50,16 +50,32 @@ def _build_traderssz_summary(data: dict) -> str:
         btc_line = f"\n🧭 Đồng pha BTC: {btc_ctx.get('bias', 'NEUTRAL')} ({btc_ctx.get('reason', '')})."
 
     if final_sig in ("LONG", "SHORT") and setup.get("detected"):
-        if setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION":
+        extra_tags = []
+        if setup.get("msb_confirmed"):
+            extra_tags.append(f"15m MSB ✅ @ ${setup.get('msb_level', 0)}")
+        if setup.get("liquidity_pool_swept"):
+            extra_tags.append("Quét cụm EQH/EQL ✅")
+        if setup.get("is_failed_breakout"):
+            extra_tags.append("Failed Breakout ⚡")
+        extra_line = ("\n✨ Hợp lưu: " + " | ".join(extra_tags)) if extra_tags else ""
+
+        st = setup.get("setup_type", "SFP")
+        if st == "RANGE_BREAKOUT_CONTINUATION":
             return (
                 f"📌 Khung {str(setup.get('tf', '?')).upper()} xác nhận PHÁ VỠ RANGE (Breakout Continuation) "
-                f"tại {setup.get('range_label', htf.get('range_label', '?'))}.\n"
+                f"tại {setup.get('range_label', htf.get('range_label', '?'))}.{extra_line}\n"
                 f"🚀 Giá phá dứt khoát mốc ${setup.get('swept_level', 0)} và giữ ngoài biên -> Tiếp diễn {final_sig} thuần TraderSZ PA.{btc_line}\n"
                 f"🎯 Kế hoạch: SL ${plan.get('sl', 0)} | TP1 ${plan.get('tp1', 0)} (+Hòa vốn) | TP2 (Mở rộng Range) ${plan.get('tp2', 0)}."
             )
+        if st == "LEVEL_RECLAIM_SR_FLIP":
+            return (
+                f"📌 Khung 1H xác nhận RECLAIM & S/R FLIP tại {setup.get('range_label', '?')} (${setup.get('swept_level', 0)}).{extra_line}\n"
+                f"🔄 Quét râu ${setup.get('sweep_extreme', 0)} rồi đóng nến tái chiếm mốc Open -> Kích hoạt {final_sig} thuần TraderSZ PA.{btc_line}\n"
+                f"🎯 Kế hoạch: SL ${plan.get('sl', 0)} | TP1 (50% EQ) ${plan.get('tp1', 0)} (+Hòa vốn) | TP2 (Biên đối diện) ${plan.get('tp2', 0)}."
+            )
         return (
-            f"📌 Khung {str(setup.get('tf', '?')).upper()} xác nhận {setup.get('setup_type', 'SFP')} "
-            f"tại {setup.get('range_label', htf.get('range_label', '?'))}.\n"
+            f"📌 Khung {str(setup.get('tf', '?')).upper()} xác nhận {st} "
+            f"tại {setup.get('range_label', htf.get('range_label', '?'))}.{extra_line}\n"
             f"🔄 Giá quét râu ${setup.get('sweep_extreme', 0)} qua mốc ${setup.get('swept_level', 0)} "
             f"và đóng nến quay lại Range -> Kích hoạt {final_sig} thuần TraderSZ PA.{btc_line}\n"
             f"🎯 Kế hoạch: SL ${plan.get('sl', 0)} | TP1 (50% EQ) ${plan.get('tp1', 0)} (+Hòa vốn) | TP2 (Biên đối diện) ${plan.get('tp2', 0)}."

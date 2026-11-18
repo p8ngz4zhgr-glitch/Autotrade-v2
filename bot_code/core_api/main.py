@@ -963,31 +963,73 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 action_type = "CẮT LỖ BẢO VỆ VỐN (VIRTUAL SL TOÀN DIỆN)"
                 emoji = "🚨"
                 reason = f"Trạng thái âm {pnl_pct:.2f}% vượt ngưỡng lỗ tối đa ({DYNAMIC_SL_LIMIT}%) -> Cắt lỗ bảo toàn tài khoản."
-            elif is_reversal:
+            else:
+                # 🛡️ FAILED BREAKOUT KILL-SWITCH (TraderSZ):
+                # Nếu vị thế đang giữ là BREAKOUT CONTINUATION mà giá đóng quay ngược lại vào trong Range
+                # hoặc xuất hiện tín hiệu ngược dạng Return-to-Range/SFP -> Cắt nhanh Breakout giả & đảo chiều!
+                held_setup_type = str((ep_data or {}).get("setup_type", "") or "")
+                held_swept_lvl = float((ep_data or {}).get("swept_level", 0) or 0)
+                new_setup_obj = (analysis.get("traderssz", {}) or {}).get("setup", {}) or {}
+                new_setup_type = str(new_setup_obj.get("setup_type", "") or "")
+                is_failed_bo_close = False
+                if held_setup_type == "RANGE_BREAKOUT_CONTINUATION" and held_swept_lvl > 0:
+                    if direction == "LONG" and current_price < held_swept_lvl * 0.9975:
+                        is_failed_bo_close = True
+                    elif direction == "SHORT" and current_price > held_swept_lvl * 1.0025:
+                        is_failed_bo_close = True
+
                 min_conf = float(getattr(user, "min_confidence", 68) or 68)
                 rev_plan = analysis.get("plan", {}) or {}
                 has_valid_rev_plan = float(rev_plan.get("entry", 0) or 0) > 0 and float(rev_plan.get("sl", 0) or 0) > 0
+                is_failed_bo_rev = bool(
+                    is_reversal
+                    and (held_setup_type == "RANGE_BREAKOUT_CONTINUATION" or new_setup_obj.get("is_failed_breakout"))
+                    and new_setup_type in ("DEVIATION_RETURN_TO_RANGE", "SFP_WICK_REJECTION", "LEVEL_RECLAIM_SR_FLIP")
+                    and conf >= min(64.0, min_conf)
+                    and has_valid_rev_plan
+                )
 
-                if conf >= min_conf and has_valid_rev_plan:
+                if is_failed_bo_rev:
                     action = "CLOSE_ALL"
                     should_reverse = True
-                    action_type = "ĐÓNG TOÀN BỘ & ĐẢO CHIỀU THEO TÍN HIỆU MỚI"
-                    emoji = "🔄"
+                    action_type = "FAILED BREAKOUT KILL-SWITCH & ĐẢO CHIỀU"
+                    emoji = "⚡"
                     reason = (
-                        f"Phát hiện tín hiệu đảo chiều {direction} → {new_direction} (Conf {conf:.1f}% >= {min_conf:.0f}%) "
-                        f"-> Đóng toàn bộ vị thế cũ & vào lệnh theo tín hiệu mới."
+                        f"Phát hiện Breakout giả (Failed Breakout): {direction} đảo sang {new_direction} "
+                        f"({new_setup_type}, Conf {conf:.1f}%) -> Cắt nhanh & đảo theo SFP quay lại Range."
                     )
-                    log.info("🔄 [REVERSAL TRIGGERED] %s %s: %s", user.telegram_id, sym, reason)
+                    log.info("⚡ [FAILED BREAKOUT REVERSAL] %s %s: %s", user.telegram_id, sym, reason)
+                elif is_failed_bo_close and not (new_direction == direction and new_setup_type == "RANGE_BREAKOUT_CONTINUATION"):
+                    action = "CLOSE_ALL"
+                    should_reverse = False
+                    action_type = "CẮT NHANH FAILED BREAKOUT (QUAY LẠI RANGE)"
+                    emoji = "⚡"
+                    reason = (
+                        f"Lệnh Breakout {direction} đã mất mốc biên ${held_swept_lvl:.4f} (giá hiện tại ${current_price:.4f}) "
+                        f"-> Thoát nhanh bảo vệ vốn theo kỷ luật TraderSZ."
+                    )
+                    log.info("⚡ [FAILED BREAKOUT EXIT] %s %s: %s", user.telegram_id, sym, reason)
+                elif is_reversal:
+                    if conf >= min_conf and has_valid_rev_plan:
+                        action = "CLOSE_ALL"
+                        should_reverse = True
+                        action_type = "ĐÓNG TOÀN BỘ & ĐẢO CHIỀU THEO TÍN HIỆU MỚI"
+                        emoji = "🔄"
+                        reason = (
+                            f"Phát hiện tín hiệu đảo chiều {direction} → {new_direction} (Conf {conf:.1f}% >= {min_conf:.0f}%) "
+                            f"-> Đóng toàn bộ vị thế cũ & vào lệnh theo tín hiệu mới."
+                        )
+                        log.info("🔄 [REVERSAL TRIGGERED] %s %s: %s", user.telegram_id, sym, reason)
+                    else:
+                        action = "HOLD"
+                        log.info(
+                            "Giữ vị thế %s (%s): Tín hiệu ngược %s (%.1f%%) chưa đạt min_conf %.1f%% hoặc thiếu plan SL/TP.",
+                            sym, direction, new_direction, conf, min_conf
+                        )
                 else:
+                    # BỎ HOÀN TOÀN CHỐT LỜI ĐỘNG / CHỐT LỜI SIDEWAYS / CHỐT LỜI ĐẢO CHIỀU $1
                     action = "HOLD"
-                    log.info(
-                        "Giữ vị thế %s (%s): Tín hiệu ngược %s (%.1f%%) chưa đạt min_conf %.1f%% hoặc thiếu plan SL/TP.",
-                        sym, direction, new_direction, conf, min_conf
-                    )
-            else:
-                # BỎ HOÀN TOÀN CHỐT LỜI ĐỘNG / CHỐT LỜI SIDEWAYS / CHỐT LỜI ĐẢO CHIỀU $1
-                action = "HOLD"
-                log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}% (${net_pnl_usd:+.2f} USD), giữ chạy tới TP1/TP2 hoặc SL TraderSZ.")
+                    log.info(f"Giữ vị thế {sym} ({direction}): PnL {pnl_pct:+.2f}% (${net_pnl_usd:+.2f} USD), giữ chạy tới TP1/TP2 hoặc SL TraderSZ.")
 
         # ══════════════════════════════════════════════════════════
         # THỰC THI GIAO DỊCH (BẢO LƯU TOÀN BỘ CẤU TRÚC GỐC)
@@ -1140,12 +1182,15 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                         try:
                                             for sv in _sym_variants(sym):
                                                 cache.setex(f"PENDING:{user.telegram_id}:{sv}:{new_direction}", 90, "1")
+                                                rev_setup = (analysis.get("traderssz", {}) or {}).get("setup", {}) or {}
                                                 cache.setex(
                                                     f"ENTRY_PLAN_{user.telegram_id}_{sv}_{new_direction}",
                                                     7 * 86400,
                                                     json.dumps({
                                                         "sl": actual_rev_sl, "tp1": new_tp1, "tp2": actual_rev_tp,
                                                         "tp_levels": rev_tp_levels,
+                                                        "setup_type": rev_setup.get("setup_type", ""),
+                                                        "swept_level": float(rev_setup.get("swept_level", 0) or 0),
                                                     })
                                                 )
                                                 cache.setex(
@@ -1742,8 +1787,14 @@ def _execute_for_user(user: User, signal: dict):
             log.warning("SL qua gan entry (%.4f%%) - bo qua", sl_pct * 100)
             return
 
-        # [NEW v6.11] Tính hệ số co khối lượng theo tin tức vĩ mô / Fed Rate
+        # [NEW v6.11] Tính hệ số co khối lượng theo tin tức vĩ mô / Fed Rate / Monday Range Rule
         size_mult_combined = 1.0
+        htf_meta = (signal.get("traderssz", {}) or {}).get("htf_opens_and_ranges", {}) or {}
+        monday_mult = float(htf_meta.get("monday_size_mult", 1.0) or 1.0)
+        if monday_mult < 1.0:
+            size_mult_combined *= monday_mult
+            log.info("📅 [MONDAY RANGE RULE] %s: Đang tạo biên Thứ Hai -> điều chỉnh size x%.2f", sym, monday_mult)
+
         news_risk = signal.get("news_risk", {}) or {}
         if news_risk.get("active"):
             size_m = max(0.75, float(news_risk.get("size_mult", 1.0)))
@@ -1852,10 +1903,16 @@ def _execute_for_user(user: User, signal: dict):
                             f"ENTRY_FEATURES_{user.telegram_id}_{sv}_{direction}",
                             7 * 86400, json.dumps(entry_features)
                         )
+                        sig_setup = (signal.get("traderssz", {}) or {}).get("setup", {}) or {}
                         cache.setex(
                             f"ENTRY_PLAN_{user.telegram_id}_{sv}_{direction}",
                             7 * 86400,
-                            json.dumps({"sl": actual_sl, "tp1": tp1, "tp2": actual_tp, "tp_levels": tp_levels})
+                            json.dumps({
+                                "sl": actual_sl, "tp1": tp1, "tp2": actual_tp,
+                                "tp_levels": tp_levels,
+                                "setup_type": sig_setup.get("setup_type", ""),
+                                "swept_level": float(sig_setup.get("swept_level", 0) or 0),
+                            })
                         )
                         cache.setex(
                             f"ORIGINAL_QTY_{user.telegram_id}_{sv}_{direction}",

@@ -185,12 +185,20 @@ class TelegramBot:
             stat_note = (f"\n  └ {icon} AI Stat: <b>{stat_conf:.1f}%</b> "
                          f"({sign}{delta}% vs raw)")
 
-        is_breakout = setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION"
+        st_type = setup.get("setup_type", "")
+        is_breakout = st_type == "RANGE_BREAKOUT_CONTINUATION"
+        is_reclaim = st_type == "LEVEL_RECLAIM_SR_FLIP"
         if is_breakout:
             HEADER = {
                 "LONG": "🟢 🚀 <b>TRADERSZ LONG (PHÁ ĐỈNH RANGE · TIẾP DIỄN TĂNG)</b>",
                 "SHORT": "🔴 📉 <b>TRADERSZ SHORT (PHÁ ĐÁY RANGE · TIẾP DIỄN GIẢM)</b>",
                 "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ XÁC NHẬN RANGE</b>",
+            }
+        elif is_reclaim:
+            HEADER = {
+                "LONG": "🟢 ♻️ <b>TRADERSZ LONG (RECLAIM OPEN · S/R FLIP)</b>",
+                "SHORT": "🔴 ♻️ <b>TRADERSZ SHORT (MẤT MỐC OPEN · S/R FLIP)</b>",
+                "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ QUÉT BIÊN RANGE</b>",
             }
         else:
             HEADER = {
@@ -230,6 +238,15 @@ class TelegramBot:
             raw_zone = "BREAKOUT_ABOVE_RH"
         zone_str = ZONE_IC.get(raw_zone, raw_zone or "?")
 
+        confluences = []
+        if setup.get("msb_confirmed"):
+            confluences.append(f"15M MSB ✅ (${setup.get('msb_level', 0)})")
+        if setup.get("liquidity_pool_swept"):
+            confluences.append("Quét cụm EQH/EQL ✅")
+        if setup.get("is_failed_breakout"):
+            confluences.append("Failed Breakout ⚡")
+        conf_line = [f"  └ Hợp lưu Pro   : <b>{' · '.join(confluences)}</b>"] if confluences else []
+
         setup_block = []
         if setup.get("detected"):
             if is_breakout:
@@ -237,8 +254,18 @@ class TelegramBot:
                     "",
                     "🚀 <b>XÁC NHẬN PHÁ VỠ RANGE (BREAKOUT CONTINUATION)</b>",
                     f"  ├ Khung & Range : <b>{str(setup.get('tf','?')).upper()}</b> · {setup.get('range_label','')}",
-                    f"  ├ Mô hình       : <b>{setup.get('setup_type','RANGE_BREAKOUT_CONTINUATION')}</b>" + (" (Retest biên ✅)" if setup.get("is_retest") else ""),
+                    f"  ├ Mô hình       : <b>{st_type}</b>" + (" (Retest biên ✅)" if setup.get("is_retest") else ""),
                     f"  ├ Biên bị phá   : <code>${setup.get('swept_level', 0)}</code> (Điểm tựa SL: <code>${setup.get('sweep_extreme', 0)}</code>)",
+                    *conf_line,
+                ]
+            elif is_reclaim:
+                setup_block = [
+                    "",
+                    "♻️ <b>XÁC NHẬN RECLAIM LEVEL &amp; S/R FLIP</b>",
+                    f"  ├ Khung & Mốc   : <b>{str(setup.get('tf','?')).upper()}</b> · {setup.get('range_label','')}",
+                    f"  ├ Mô hình       : <b>{st_type}</b>" + (" (Retest ✅)" if setup.get("is_retest") else ""),
+                    f"  ├ Mốc Reclaim   : <code>${setup.get('swept_level', 0)}</code> (Râu quét: <code>${setup.get('sweep_extreme', 0)}</code>)",
+                    *conf_line,
                 ]
             else:
                 setup_block = [
@@ -247,6 +274,7 @@ class TelegramBot:
                     f"  ├ Khung & Range : <b>{str(setup.get('tf','?')).upper()}</b> · {setup.get('range_label','')}",
                     f"  ├ Mô hình       : <b>{setup.get('setup_type','SFP')}</b>" + (" (Retest biên ✅)" if setup.get("is_retest") else ""),
                     f"  ├ Mốc đã quét   : <code>${setup.get('swept_level', 0)}</code> (Đỉnh/Đáy râu: <code>${setup.get('sweep_extreme', 0)}</code>)",
+                    *conf_line,
                 ]
         else:
             setup_block = [
@@ -277,6 +305,12 @@ class TelegramBot:
                 f"  ├ BTC Leader  : <b>{btc_ctx.get('bias', 'NEUTRAL')}</b> ({btc_ctx.get('btc_signal', 'WAIT')}) · {self._to_safe_html(btc_ctx.get('reason', ''))}"
             )
 
+        pools = htf.get("liquidity_pools", {}) or {}
+        eqh_str = ", ".join(f"${x}" for x in (pools.get("eqh") or [])[:2]) or "Không"
+        eql_str = ", ".join(f"${x}" for x in (pools.get("eql") or [])[:2]) or "Không"
+        m_rule = htf.get("monday_rule_state", "STANDARD")
+        m_tag = " (Đang tạo biên Thứ Hai · -25% size)" if m_rule == "MONDAY_FORMING" else (" (Cửa sổ săn Monday 🔥)" if m_rule == "MONDAY_HUNT_WINDOW" else "")
+
         lines = [
             HEADER.get(sig, sig) + " — " + sym_display,
             "━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -286,12 +320,13 @@ class TelegramBot:
             f"🕐 Phiên     : {session.get('session','?')} ({'Killzone 🔥' if session.get('is_killzone') else 'Normal'})",
             *setup_block,
             "",
-            "📐 <b>TRADERSZ DEALING RANGE & 50% EQ</b>",
-            f"  ├ Range chính : <b>{htf.get('range_label', htf.get('range_name','?'))}</b>",
-            f"  ├ Range High  : <code>${htf.get('range_high',0)}</code>",
+            "📐 <b>TRADERSZ DEALING RANGE &amp; 50% EQ</b>",
+            f"  ├ Range chính : <b>{htf.get('range_label', htf.get('range_name','?'))}</b>{m_tag}",
+            f"  ├ Range High  : <code>${htf.get('range_high',0)}</code> (75%: <code>${htf.get('q75',0)}</code>)",
             f"  ├ 50% EQ      : <code>${htf.get('eq_50',0)}</code> (Vị trí: {htf.get('range_pos_pct',50)}%)",
-            f"  ├ Range Low   : <code>${htf.get('range_low',0)}</code>",
+            f"  ├ Range Low   : <code>${htf.get('range_low',0)}</code> (25%: <code>${htf.get('q25',0)}</code>)",
             f"  ├ Phân vùng   : <b>{zone_str}</b>",
+            f"  ├ Thanh khoản : EQH [{eqh_str}] | EQL [{eql_str}]",
             f"  ├ PDH / PDL   : <code>${htf.get('pdh',0)}</code> / <code>${htf.get('pdl',0)}</code>",
             f"  ├ Monday Range: <code>${htf.get('monday_low',0)}</code> – <code>${htf.get('monday_high',0)}</code>",
             f"  ├ Weekly Range: <code>${htf.get('pwl',0)}</code> – <code>${htf.get('pwh',0)}</code>",
