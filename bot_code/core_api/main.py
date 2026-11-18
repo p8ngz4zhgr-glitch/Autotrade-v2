@@ -886,28 +886,18 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 emoji = "🚨"
                 reason = f"Trạng thái âm {pnl_pct:.2f}% vượt ngưỡng lỗ tối đa ({DYNAMIC_SL_LIMIT}%) -> Cắt lỗ bảo toàn tài khoản."
             elif is_reversal:
-                is_protected, cur_sl, prot_reason = _is_position_protected_runner(
-                    bx, user, sym, direction, entry, current_price,
-                    net_pnl_usd=net_pnl_usd, triggers=triggers
-                )
                 min_conf = float(getattr(user, "min_confidence", 68) or 68)
                 rev_plan = analysis.get("plan", {}) or {}
                 has_valid_rev_plan = float(rev_plan.get("entry", 0) or 0) > 0 and float(rev_plan.get("sl", 0) or 0) > 0
 
-                if is_protected:
-                    action = "HOLD"
-                    log.info(
-                        "🛡️ [PROTECTED RUNNER] %s %s (%s): Có tín hiệu đảo chiều %s (%.1f%%) nhưng GIỮ GỒNG tiếp (%s).",
-                        user.telegram_id, sym, direction, new_direction, conf, prot_reason
-                    )
-                elif conf >= min_conf and has_valid_rev_plan:
+                if conf >= min_conf and has_valid_rev_plan:
                     action = "CLOSE_ALL"
                     should_reverse = True
-                    action_type = "ĐẢO CHIỀU THEO TÍN HIỆU MỚI"
+                    action_type = "ĐÓNG TOÀN BỘ & ĐẢO CHIỀU THEO TÍN HIỆU MỚI"
                     emoji = "🔄"
                     reason = (
-                        f"Tín hiệu đảo chiều {direction} → {new_direction} (Conf {conf:.1f}% >= {min_conf:.0f}%). "
-                        f"Vị thế cũ chưa đủ điều kiện gồng ({prot_reason}) -> Đóng & đảo chiều theo tín hiệu."
+                        f"Phát hiện tín hiệu đảo chiều {direction} → {new_direction} (Conf {conf:.1f}% >= {min_conf:.0f}%) "
+                        f"-> Đóng toàn bộ vị thế cũ & vào lệnh theo tín hiệu mới."
                     )
                     log.info("🔄 [REVERSAL TRIGGERED] %s %s: %s", user.telegram_id, sym, reason)
                 else:
@@ -1540,12 +1530,12 @@ def _execute_for_user(user: User, signal: dict):
         if not sym or direction == "WAIT":
             return
 
-        pending_key = f"PENDING:{user.telegram_id}:{sym}"
+        pending_key = f"PENDING:{user.telegram_id}:{sym}:{direction}"
         cache = _get_active_redis()
         if cache:
             try:
                 if cache.get(pending_key):
-                    log.info("Cooldown %s %s - skip", user.telegram_id, sym)
+                    log.info("Cooldown %s %s (%s) - skip", user.telegram_id, sym, direction)
                     return
             except Exception:
                 pass
@@ -1575,35 +1565,17 @@ def _execute_for_user(user: User, signal: dict):
             if isinstance(p, dict) and p.get("symbol", "").replace("-", "").upper() == clean_sym
         ]
 
-        # Nếu đã có vị thế CÙNG CHIỀU -> bỏ qua, không nhồi thêm lệnh
-        if any(p.get("direction") == direction for p in same_sym_positions):
+        # Nếu đã có vị thế CÙNG CHIỀU (và không có vị thế ngược chiều) -> bỏ qua, không nhồi thêm lệnh
+        opposite_positions = [p for p in same_sym_positions if p.get("direction") != direction]
+        if any(p.get("direction") == direction for p in same_sym_positions) and not opposite_positions:
             log.info("BingX xac nhan da co vi the cung chieu %s (%s) - bo qua", sym, direction)
             return
 
-        # Nếu đang có vị thế NGƯỢC CHIỀU -> kiểm tra điều kiện giữ gồng (entry đẹp & SL đã dời dương)
+        # Nếu đang có vị thế NGƯỢC CHIỀU -> ĐÓNG TOÀN BỘ vị thế cũ & đi theo tín hiệu đảo chiều mới
         reversed_closed_sym = False
-        if same_sym_positions:
-            triggers = bx_live.get_trigger_orders()
-            for old_pos in same_sym_positions:
-                old_dir = old_pos.get("direction", "LONG")
-                old_entry = float(old_pos.get("entry", 0) or 0)
-                old_qty = float(old_pos.get("qty", 0) or 0)
-                old_pnl = float(old_pos.get("pnl", 0) or 0)
-                cur_px = bx_live.get_latest_price(sym) or float(signal.get("plan", {}).get("entry", 0) or old_entry)
-                is_prot, _, prot_reason = _is_position_protected_runner(
-                    bx_live, user, sym, old_dir, old_entry, cur_px,
-                    net_pnl_usd=old_pnl, triggers=triggers
-                )
-                if is_prot:
-                    log.info(
-                        "🛡️ [PROTECTED RUNNER] User %s | Giữ vị thế %s %s (%s) — bỏ qua tín hiệu đảo chiều %s.",
-                        user.telegram_id, old_dir, sym, prot_reason, direction
-                    )
-                    return
-
-            # Chưa đủ điều kiện gồng (chưa dời SL về dương / chưa có entry đẹp) -> Đóng & Đảo chiều theo tín hiệu mới
+        if opposite_positions:
             bx_live.cancel_all_orders(sym)
-            for old_pos in same_sym_positions:
+            for old_pos in opposite_positions:
                 old_dir = old_pos.get("direction", "LONG")
                 old_entry = float(old_pos.get("entry", 0) or 0)
                 old_qty = float(old_pos.get("qty", 0) or 0)
@@ -1630,7 +1602,7 @@ def _execute_for_user(user: User, signal: dict):
                 _save_journal(user.telegram_id, sym, old_dir, old_roe, old_qty)
                 _tg_send(
                     REGISTER_TOKEN, user.telegram_id,
-                    f"🔄 <b>ĐẢO CHIỀU THEO TÍN HIỆU MỚI: {sym}</b>\n\n"
+                    f"🔄 <b>ĐÓNG TOÀN BỘ & ĐẢO CHIỀU THEO TÍN HIỆU MỚI: {sym}</b>\n\n"
                     f"📊 Đóng vị thế cũ: {old_dir} @ ${old_entry:.4f} (PnL ~${old_pnl:+.2f})\n"
                     f"➡️ Chuẩn bị vào lệnh mới hướng <b>{direction}</b> (Conf: {signal.get('confidence', 0):.1f}%)"
                 )
