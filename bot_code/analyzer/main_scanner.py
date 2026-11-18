@@ -192,6 +192,11 @@ class SignalBot:
 
                 data = self.engine.full_analysis(sym, db=self.db)
                 data["ai_memory"] = get_memory_for_ai(sym)
+                try:
+                    clean_k = str(sym).replace("-", "").upper()
+                    local_store.setex(f"SHARED_ANALYSIS:{clean_k}", 180, json.dumps(data, default=str))
+                except Exception:
+                    pass
 
                 final_sig = data.get("final", "WAIT")
                 conf = data.get("confidence", 0)

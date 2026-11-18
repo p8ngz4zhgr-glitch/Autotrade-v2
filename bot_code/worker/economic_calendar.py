@@ -187,6 +187,16 @@ def get_high_impact_events(days_ahead: int = 7) -> list:
     return events
 
 
+_LAST_NEWS_LOG_TS = {}
+
+
+def _log_news_throttled(key: str, msg: str, *args, interval: int = 600):
+    now_ts = time.time()
+    if now_ts - _LAST_NEWS_LOG_TS.get(key, 0.0) >= interval:
+        _LAST_NEWS_LOG_TS[key] = now_ts
+        log.warning(msg, *args)
+
+
 def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
     """
     Kết quả dùng trực tiếp cho engine.py/bingx_trader.py/main.py/main_scanner.py:
@@ -206,14 +216,20 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
             
             # Cửa sổ ngắt lệnh cứng (mặc định 90 phút trước/sau giờ ra tin lớn)
             if (et - timedelta(minutes=blackout_mins)) <= now <= (et + timedelta(minutes=blackout_mins)):
-                log.warning("🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ %d phút ra tin lớn: %s (%s) -> TẠM DỪNG MỞ VỊ THẾ BẢO VỆ VỐN!",
-                            blackout_mins, e["name"], e["time"])
+                _log_news_throttled(
+                    f"blackout:{e['name']}",
+                    "🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ %d phút ra tin lớn: %s (%s) -> TẠM DỪNG MỞ VỊ THẾ BẢO VỆ VỐN!",
+                    blackout_mins, e["name"], e["time"],
+                )
                 return {"active": True, "event": e["name"], "pause_trading": True, "size_mult": 0.0, "sl_tighten_mult": 1.0}
 
             # Cửa sổ ảnh hưởng rộng (12h trước -> 6h sau) -> giảm 50% vốn
             if (et - timedelta(hours=hours_before)) <= now <= (et + timedelta(hours=hours_after)):
-                log.warning("📰 [NEWS WINDOW - CALENDAR] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm 50%% vốn vào lệnh, quản trị rủi ro.",
-                            e["name"], e["time"])
+                _log_news_throttled(
+                    f"window:{e['name']}",
+                    "📰 [NEWS WINDOW - CALENDAR] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm 50%% vốn vào lệnh, quản trị rủi ro.",
+                    e["name"], e["time"],
+                )
                 return {"active": True, "event": e["name"], "pause_trading": False, "size_mult": 0.5, "sl_tighten_mult": 0.9}
         return {"active": False, "event": None, "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
     except Exception as ex:

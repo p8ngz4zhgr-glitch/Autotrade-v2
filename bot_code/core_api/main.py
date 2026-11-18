@@ -57,6 +57,44 @@ LIVE_POSITIONS = {}
 LAST_SIGNALS = []
 _LAST_REVERSAL_EVAL = {}
 _SENT_NOTIFICATIONS = {}
+_USER_SYM_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_USER_SYM_LOCKS_GUARD = threading.Lock()
+
+
+def _clean_sym(sym: str) -> str:
+    return str(sym or "").replace("-", "").upper().strip()
+
+
+def _sym_variants(sym: str) -> list[str]:
+    raw = str(sym or "").strip().upper()
+    if not raw:
+        return []
+    norm = BingXExchange._normalize_symbol(raw)
+    clean = norm.replace("-", "").upper()
+    out = []
+    for cand in (raw, norm, clean):
+        if cand and cand not in out:
+            out.append(cand)
+    return out
+
+
+def _to_scanner_sym(sym: str) -> str:
+    clean = _clean_sym(sym)
+    if "NCCOGOLD2USD" in clean:
+        return "NCCOGOLD2USD-USDT"
+    if "NCCOXAG2USD" in clean:
+        return "NCCOXAG2USD-USDT"
+    return clean
+
+
+def _get_user_sym_lock(user_id: str, sym: str) -> threading.Lock:
+    key = (str(user_id), _clean_sym(sym))
+    with _USER_SYM_LOCKS_GUARD:
+        lock = _USER_SYM_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _USER_SYM_LOCKS[key] = lock
+        return lock
 
 # ══════════════════════════════════════════════════════════════════
 # TIER CONFIG
@@ -658,23 +696,39 @@ def _calc_order_sizing(
 def _clear_position_caches(cache, user_id: str, sym: str, direction: str):
     if not cache:
         return
-    keys = [
-        f"BREAKEVEN_{user_id}_{sym}_{direction}",
-        f"SCALE_OUT_{user_id}_{sym}_{direction}",
-        f"ENTRY_PLAN_{user_id}_{sym}_{direction}",
-        f"ORIGINAL_QTY_{user_id}_{sym}_{direction}",
-        f"PEAK_PRICE_{sym}_{direction}",
-        f"SL_COOLDOWN_{sym}_{direction}",
-        f"TRAILING_SL_{user_id}_{sym}_{direction}_1",
-        f"TRAILING_SL_{user_id}_{sym}_{direction}_2",
-        f"SL_HEAL_COOLDOWN:{user_id}:{sym}:{direction}",
-        f"TP1_DONE:{user_id}:{sym}:{direction}",
-    ]
-    for k in keys:
+    for s_var in _sym_variants(sym):
+        keys = [
+            f"BREAKEVEN_{user_id}_{s_var}_{direction}",
+            f"SCALE_OUT_{user_id}_{s_var}_{direction}",
+            f"ENTRY_PLAN_{user_id}_{s_var}_{direction}",
+            f"ORIGINAL_QTY_{user_id}_{s_var}_{direction}",
+            f"PEAK_PRICE_{s_var}_{direction}",
+            f"SL_COOLDOWN_{s_var}_{direction}",
+            f"TRAILING_SL_{user_id}_{s_var}_{direction}_1",
+            f"TRAILING_SL_{user_id}_{s_var}_{direction}_2",
+            f"SL_HEAL_COOLDOWN:{user_id}:{s_var}:{direction}",
+            f"TP1_DONE:{user_id}:{s_var}:{direction}",
+        ]
+        for k in keys:
+            try:
+                cache.delete(k)
+            except Exception:
+                pass
+
+
+def _get_entry_plan_from_cache(cache, user_id: str, sym: str, direction: str) -> Optional[dict]:
+    if not cache:
+        return None
+    for s_var in _sym_variants(sym):
         try:
-            cache.delete(k)
+            raw_ep = cache.get(f"ENTRY_PLAN_{user_id}_{s_var}_{direction}")
+            if raw_ep:
+                ep_data = json.loads(raw_ep) if isinstance(raw_ep, str) else raw_ep
+                if isinstance(ep_data, dict):
+                    return ep_data
         except Exception:
             pass
+    return None
 
 
 def _is_position_protected_runner(
@@ -739,37 +793,65 @@ def _is_position_protected_runner(
     return False, current_sl, f"SL chưa dời về vùng dương (SL=${current_sl:.4f} vs Entry=${entry:.4f})"
 
 
-def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, db: Session, triggers: Optional[dict] = None):
+def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, db: Session, triggers: Optional[dict] = None) -> dict:
     sym = pos["symbol"]
+    clean_sym = _clean_sym(sym)
+    scanner_sym = _to_scanner_sym(sym)
     direction = pos["direction"]
     qty = float(pos.get("qty", 0))
     entry = float(pos.get("entry", 0))
-    
+
     if qty <= 0:
-        return
-        
+        return {"action": "SKIP"}
+
     now = time.time()
-    
-    try:
-        # 1. LẤY PHÂN TÍCH TỪ AI (MẮT THẦN GIÁM SÁT)
-        cached = _LAST_REVERSAL_EVAL.get(sym)
-        if cached and isinstance(cached, dict) and now - cached.get("time", 0) < 180:
+    cache_ttl = 150 if _is_precious_metal(sym) else 180
+
+    with _get_user_sym_lock(user.telegram_id, sym):
+      try:
+        # 1. DÙNG CHUNG CACHE PHÂN TÍCH VỚI SIGNALBOT (TRÁNH 2 LUỒNG PHÂN TÍCH LỆCH NHAU)
+        cached = _LAST_REVERSAL_EVAL.get(clean_sym)
+        analysis = None
+        if cached and isinstance(cached, dict) and now - cached.get("time", 0) < cache_ttl:
             new_direction = cached.get("direction", "WAIT")
             conf = cached.get("conf", 0)
             analysis = cached.get("analysis", {})
         else:
+            # Kiểm tra cache mới nhất từ SignalBot trong local_store
+            try:
+                raw_shared = local_store.get(f"SHARED_ANALYSIS:{clean_sym}")
+                if raw_shared:
+                    shared_data = json.loads(raw_shared) if isinstance(raw_shared, str) else raw_shared
+                    if isinstance(shared_data, dict) and shared_data.get("plan"):
+                        analysis = shared_data
+                        new_direction = analysis.get("final", "WAIT")
+                        conf = float(analysis.get("confidence", 0) or 0)
+                        _LAST_REVERSAL_EVAL[clean_sym] = {
+                            "time": now,
+                            "direction": new_direction,
+                            "conf": conf,
+                            "analysis": analysis,
+                        }
+            except Exception:
+                analysis = None
+
+        if analysis is None:
             from analyzer.engine import SignalEngine
             engine = SignalEngine()
-            analysis = engine.full_analysis(sym, db=db)
+            analysis = engine.full_analysis(scanner_sym, db=db)
             new_direction = analysis.get("final", "WAIT")
-            conf = analysis.get("confidence", 0)
-            
-            _LAST_REVERSAL_EVAL[sym] = {
+            conf = float(analysis.get("confidence", 0) or 0)
+
+            _LAST_REVERSAL_EVAL[clean_sym] = {
                 "time": now,
                 "direction": new_direction,
                 "conf": conf,
-                "analysis": analysis
+                "analysis": analysis,
             }
+            try:
+                local_store.setex(f"SHARED_ANALYSIS:{clean_sym}", cache_ttl, json.dumps(analysis, default=str))
+            except Exception:
+                pass
 
         # ══════════════════════════════════════════════════════════
         # [NEW] LỚP BẢO VỆ ĐỘNG (BREAKEVEN & QUẢN LÝ TP/SL TRADERSZ)
@@ -781,30 +863,24 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         be_key = f"BREAKEVEN_{user.telegram_id}_{sym}_{direction}"
         is_breakeven = False
         try:
-            is_breakeven = bool(cache.get(be_key))
+            is_breakeven = any(bool(cache.get(f"BREAKEVEN_{user.telegram_id}_{sv}_{direction}")) for sv in _sym_variants(sym)) if cache else False
         except Exception:
             pass
 
         # Đọc ENTRY_PLAN gốc TRƯỚC khi gọi manage_position_dynamic để dời Hòa vốn đúng theo TP1/TP2 của lệnh
         plan = dict(analysis.get("plan", {}) or {})
         tp_levels_raw = plan.get("tp_levels")
-        if cache:
-            try:
-                raw_ep = cache.get(f"ENTRY_PLAN_{user.telegram_id}_{sym}_{direction}")
-                if raw_ep:
-                    ep_data = json.loads(raw_ep) if isinstance(raw_ep, str) else raw_ep
-                    if isinstance(ep_data, dict):
-                        if float(ep_data.get("sl") or 0) > 0:
-                            plan["sl"] = float(ep_data["sl"])
-                        if float(ep_data.get("tp1") or 0) > 0:
-                            plan["tp1"] = float(ep_data["tp1"])
-                        if float(ep_data.get("tp2") or 0) > 0:
-                            plan["tp2"] = float(ep_data["tp2"])
-                        if ep_data.get("tp_levels"):
-                            tp_levels_raw = ep_data["tp_levels"]
-                            plan["tp_levels"] = tp_levels_raw
-            except Exception:
-                pass
+        ep_data = _get_entry_plan_from_cache(cache, user.telegram_id, sym, direction)
+        if ep_data:
+            if float(ep_data.get("sl") or 0) > 0:
+                plan["sl"] = float(ep_data["sl"])
+            if float(ep_data.get("tp1") or 0) > 0:
+                plan["tp1"] = float(ep_data["tp1"])
+            if float(ep_data.get("tp2") or 0) > 0:
+                plan["tp2"] = float(ep_data["tp2"])
+            if ep_data.get("tp_levels"):
+                tp_levels_raw = ep_data["tp_levels"]
+                plan["tp_levels"] = tp_levels_raw
 
         if not tp_levels_raw:
             tp_levels_raw = [
@@ -817,7 +893,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         pos_analysis["plan"] = plan
 
         # Chạy quản trị vị thế: Dời SL về Hòa vốn (Breakeven) khi đạt 50% TP1 hoặc qua TP1
-        dynamic_status = bx.manage_position_dynamic(sym, pos_analysis, leverage=leverage, redis_client=cache)
+        dynamic_status = bx.manage_position_dynamic(
+            sym, pos_analysis, leverage=leverage, redis_client=cache, target_direction=direction
+        )
 
         if dynamic_status.get("action") in ("BREAKEVEN", "TRAILING_SL"):
             triggers = None  # Cần đọc lại SL mới vừa dời trên BingX nếu kiểm tra đảo chiều
@@ -861,14 +939,14 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             )
             _save_journal(user.telegram_id, sym, direction, roe_closed, qty)
 
-            try:
-                cache.delete(be_key)
-                cache.delete(f"SCALE_OUT_{user.telegram_id}_{sym}_{direction}")
-                cache.delete(f"PEAK_PRICE_{sym}_{direction}")
-                cache.delete(f"SL_COOLDOWN_{sym}_{direction}")
-            except Exception:
-                pass
-            return
+            if cache:
+                _clear_position_caches(cache, user.telegram_id, sym, direction)
+                for sv in _sym_variants(sym):
+                    try:
+                        cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sv}:{direction}", 120, "1")
+                    except Exception:
+                        pass
+            return {"action": "CLOSED", "old_direction": direction}
 
         # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI
         in_profit = False
@@ -1052,15 +1130,17 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             elif action == "CLOSE_ALL":
                 bx.cancel_all_orders(sym)
                 res = bx.close_position(sym, qty, direction)
-                
+
                 if res.get("ok"):
+                    bx.wait_position_closed(sym, direction, timeout=2.5)
                     if cache:
                         try:
-                            cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
+                            for sv in _sym_variants(sym):
+                                cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sv}:{direction}", 120, "1")
                             _clear_position_caches(cache, user.telegram_id, sym, direction)
                         except Exception:
                             pass
-                        
+
                     msg_rev_close = (
                         f"{emoji} <b>{action_type}: {sym}</b>\n\n"
                         f"📊 Vị thế cũ: {direction} @ ${entry:.4f}\n"
@@ -1071,8 +1151,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     if ADMIN_CHAT_ID and str(user.telegram_id) != str(ADMIN_CHAT_ID):
                         _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user.telegram_id}</code>:\n" + msg_rev_close)
                     _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
-                    time.sleep(1.5)
-                    
+
                     # --- VÀO LỆNH NGƯỢC LẠI THEO TÍN HIỆU ĐẢO CHIỀU ---
                     if should_reverse:
                         new_entry = float(analysis["plan"]["entry"])
@@ -1121,20 +1200,24 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                 if rev_res.get("ok"):
                                     actual_rev_qty = float(rev_res.get("qty", new_qty))
                                     actual_rev_margin = round((actual_rev_qty * new_entry) / max(1, rev_lev), 2)
+                                    actual_rev_sl = float(rev_res.get("sl_price") or new_sl)
+                                    actual_rev_tp = float(rev_res.get("tp_price") or new_tp2)
                                     if cache:
                                         try:
-                                            cache.setex(
-                                                f"ENTRY_PLAN_{user.telegram_id}_{sym}_{new_direction}",
-                                                7 * 86400,
-                                                json.dumps({
-                                                    "sl": new_sl, "tp1": new_tp1, "tp2": new_tp2,
-                                                    "tp_levels": rev_tp_levels,
-                                                })
-                                            )
-                                            cache.setex(
-                                                f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{new_direction}",
-                                                7 * 86400, str(actual_rev_qty)
-                                            )
+                                            for sv in _sym_variants(sym):
+                                                cache.setex(f"PENDING:{user.telegram_id}:{sv}:{new_direction}", 90, "1")
+                                                cache.setex(
+                                                    f"ENTRY_PLAN_{user.telegram_id}_{sv}_{new_direction}",
+                                                    7 * 86400,
+                                                    json.dumps({
+                                                        "sl": actual_rev_sl, "tp1": new_tp1, "tp2": actual_rev_tp,
+                                                        "tp_levels": rev_tp_levels,
+                                                    })
+                                                )
+                                                cache.setex(
+                                                    f"ORIGINAL_QTY_{user.telegram_id}_{sv}_{new_direction}",
+                                                    7 * 86400, str(actual_rev_qty)
+                                                )
                                         except Exception:
                                             pass
                                     sl_tag = "✅" if rev_res.get("sl_ok", True) else "⚠️(đang tự đồng bộ)"
@@ -1145,12 +1228,16 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                         f"📈 {new_direction} | Conf: {conf:.1f}%\n"
                                         f"⚡ Đòn bẩy: <b>{rev_lev}x</b> ({rev_reason})\n"
                                         f"💰 Qty: {actual_rev_qty:.4f} | Margin: ~${actual_rev_margin:.2f}\n"
-                                        f"🛑 SL: <code>${(rev_res.get('sl_price') or new_sl):.4f}</code> {sl_tag}\n"
-                                        f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code> {tp_tag}"
+                                        f"🛑 SL: <code>${actual_rev_sl:.4f}</code> {sl_tag}\n"
+                                        f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${actual_rev_tp:.4f}</code> {tp_tag}"
                                     )
-                                
-    except Exception as e:
+                                    return {"action": "REVERSED", "old_direction": direction, "new_direction": new_direction}
+                    return {"action": "CLOSED", "old_direction": direction}
+
+        return {"action": action}
+      except Exception as e:
         log.warning("Evaluate reversal for %s %s error: %s", getattr(user, 'telegram_id', 'Unknown'), sym, e)
+        return {"action": "ERROR"}
 
 def _cleanup_inactive_users():
     """Tự động dọn dẹp người dùng không hoạt động và dữ liệu nhật ký quá hạn (>180 ngày)."""
@@ -1232,10 +1319,32 @@ def sync_bingx_positions():
                         if not sym:
                             continue
                         cur  = bx.get_latest_price(sym) or p.get("entry", 0)
-                    
+
                         # Evaluate for reversal / breakeven / trailing SL
-                        evaluate_reversal_for_position(user, p, cur, db, triggers=triggers)
-                        trig = triggers.get(sym, {}) if isinstance(triggers, dict) else {}
+                        eval_res = evaluate_reversal_for_position(user, p, cur, db, triggers=triggers) or {}
+                        eval_act = eval_res.get("action")
+                        if eval_act == "CLOSED":
+                            # Vị thế đã bị đóng — không self-heal và không đưa lại vào current_map
+                            continue
+                        if eval_act == "REVERSED":
+                            # Vị thế cũ vừa đóng & đảo sang chiều mới -> đồng bộ lại vị thế mới trên BingX
+                            new_dir = eval_res.get("new_direction")
+                            fresh_list = bx.get_open_positions(sym)
+                            fresh_pos = None
+                            if isinstance(fresh_list, list):
+                                fresh_pos = next(
+                                    (fp for fp in fresh_list if fp.get("symbol") == _clean_sym(sym) and fp.get("direction") == new_dir),
+                                    None,
+                                )
+                            if not fresh_pos:
+                                continue
+                            p = fresh_pos
+                            fresh_trigs = bx.get_trigger_orders()
+                            if isinstance(fresh_trigs, dict):
+                                triggers = fresh_trigs
+                            cur = bx.get_latest_price(sym) or p.get("entry", cur)
+
+                        trig = (triggers.get(sym, {}) or triggers.get(_clean_sym(sym), {})) if isinstance(triggers, dict) else {}
                         if not isinstance(trig, dict):
                             trig = {}
 
@@ -1248,18 +1357,12 @@ def sync_bingx_positions():
                         ep_tp1 = pos_entry * (1.025 if pos_dir == "LONG" else 0.975)
                         ep_tp2 = pos_entry * (1.04 if pos_dir == "LONG" else 0.96)
                         ep_lvls = None
-                        if heal_cache:
-                            try:
-                                raw_ep = heal_cache.get(f"ENTRY_PLAN_{tid}_{sym}_{pos_dir}")
-                                if raw_ep:
-                                    ep_obj = json.loads(raw_ep) if isinstance(raw_ep, str) else raw_ep
-                                    if isinstance(ep_obj, dict):
-                                        ep_sl = float(ep_obj.get("sl") or ep_sl)
-                                        ep_tp1 = float(ep_obj.get("tp1") or ep_tp1)
-                                        ep_tp2 = float(ep_obj.get("tp2") or ep_tp2)
-                                        ep_lvls = ep_obj.get("tp_levels")
-                            except Exception:
-                                pass
+                        ep_obj = _get_entry_plan_from_cache(heal_cache, tid, sym, pos_dir)
+                        if ep_obj:
+                            ep_sl = float(ep_obj.get("sl") or ep_sl)
+                            ep_tp1 = float(ep_obj.get("tp1") or ep_tp1)
+                            ep_tp2 = float(ep_obj.get("tp2") or ep_tp2)
+                            ep_lvls = ep_obj.get("tp_levels")
 
                         if triggers is not None and pos_entry > 0 and pos_qty > 0 and (not trig.get("sl") or not trig.get("tp2")):
                             heal_key = f"SL_HEAL_COOLDOWN:{tid}:{sym}:{pos_dir}"
@@ -1329,15 +1432,16 @@ def sync_bingx_positions():
                         tp2 = v.get("tp2", 0)
                         lev = v.get("leverage", 50 if _is_precious_metal(symbol) else 10)
 
-                        # Check if this close was already notified by reversal
+                        # Check if this close was already notified by reversal (kiểm tra cả dạng có dấu '-' lẫn không dấu '-')
                         was_reversal = False
                         cache = _get_active_redis()
                         if cache:
                             try:
-                                rev_key = f"REVERSAL_CLOSED:{user_id}:{symbol}:{direction}"
-                                if cache.get(rev_key):
-                                    was_reversal = True
-                                    cache.delete(rev_key)
+                                for sv in _sym_variants(symbol):
+                                    rev_key = f"REVERSAL_CLOSED:{user_id}:{sv}:{direction}"
+                                    if cache.get(rev_key):
+                                        was_reversal = True
+                                        cache.delete(rev_key)
                             except Exception:
                                 pass
 
@@ -1591,24 +1695,25 @@ async def _trade_worker_async():
 
 
 def _execute_for_user(user: User, signal: dict):
-    try:
-        sym       = signal.get("symbol", "")
-        direction = signal.get("final", "WAIT")
-        if not sym or direction == "WAIT":
-            return
+    sym       = signal.get("symbol", "")
+    direction = signal.get("final", "WAIT")
+    if not sym or direction == "WAIT":
+        return
 
+    with _get_user_sym_lock(user.telegram_id, sym):
+      try:
         pending_key = f"PENDING:{user.telegram_id}:{sym}:{direction}"
         cache = _get_active_redis()
         if cache:
             try:
-                if cache.get(pending_key):
+                if any(cache.get(f"PENDING:{user.telegram_id}:{sv}:{direction}") for sv in _sym_variants(sym)):
                     log.info("Cooldown %s %s (%s) - skip", user.telegram_id, sym, direction)
                     return
             except Exception:
                 pass
 
         bx_live = get_bx(user)
-        clean_sym = sym.replace("-", "").upper()
+        clean_sym = _clean_sym(sym)
         try:
             live = bx_live.get_open_positions()
         except Exception as e:
@@ -1653,6 +1758,7 @@ def _execute_for_user(user: User, signal: dict):
                 if not close_res.get("ok"):
                     log.error("❌ Đóng vị thế %s %s để đảo chiều thất bại: %s", sym, old_dir, close_res.get("msg"))
                     return
+                bx_live.wait_position_closed(sym, old_dir, timeout=2.5)
                 reversed_closed_sym = True
                 old_lev = 50 if _is_precious_metal(sym) else max(10, int(user.leverage or 10))
                 cur_px = bx_live.get_latest_price(sym) or float(signal.get("plan", {}).get("entry", 0) or old_entry)
@@ -1662,7 +1768,8 @@ def _execute_for_user(user: User, signal: dict):
                     old_roe = 0.0
                 if cache:
                     try:
-                        cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{old_dir}", 120, "1")
+                        for sv in _sym_variants(sym):
+                            cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sv}:{old_dir}", 120, "1")
                         _clear_position_caches(cache, user.telegram_id, sym, old_dir)
                     except Exception:
                         pass
@@ -1673,8 +1780,6 @@ def _execute_for_user(user: User, signal: dict):
                     f"📊 Đóng vị thế cũ: {old_dir} @ ${old_entry:.4f} (PnL ~${old_pnl:+.2f})\n"
                     f"➡️ Chuẩn bị vào lệnh mới hướng <b>{direction}</b> (Conf: {signal.get('confidence', 0):.1f}%)"
                 )
-            if reversed_closed_sym:
-                time.sleep(1.2)
 
         with _POS_LOCK:
             total_pos = sum(
@@ -1816,20 +1921,21 @@ def _execute_for_user(user: User, signal: dict):
             cache = _get_active_redis()
             if cache:
                 try:
-                    cache.setex(pending_key, 60, "1")
-                    cache.setex(
-                        f"ENTRY_FEATURES_{user.telegram_id}_{sym}_{direction}",
-                        7 * 86400, json.dumps(entry_features)
-                    )
-                    cache.setex(
-                        f"ENTRY_PLAN_{user.telegram_id}_{sym}_{direction}",
-                        7 * 86400,
-                        json.dumps({"sl": actual_sl, "tp1": tp1, "tp2": actual_tp, "tp_levels": tp_levels})
-                    )
-                    cache.setex(
-                        f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{direction}",
-                        7 * 86400, str(actual_qty)
-                    )
+                    for sv in _sym_variants(sym):
+                        cache.setex(f"PENDING:{user.telegram_id}:{sv}:{direction}", 90, "1")
+                        cache.setex(
+                            f"ENTRY_FEATURES_{user.telegram_id}_{sv}_{direction}",
+                            7 * 86400, json.dumps(entry_features)
+                        )
+                        cache.setex(
+                            f"ENTRY_PLAN_{user.telegram_id}_{sv}_{direction}",
+                            7 * 86400,
+                            json.dumps({"sl": actual_sl, "tp1": tp1, "tp2": actual_tp, "tp_levels": tp_levels})
+                        )
+                        cache.setex(
+                            f"ORIGINAL_QTY_{user.telegram_id}_{sv}_{direction}",
+                            7 * 86400, str(actual_qty)
+                        )
                 except Exception:
                     pass
 
@@ -1888,8 +1994,8 @@ def _execute_for_user(user: User, signal: dict):
                         f"2. Chuyển chế độ ký quỹ từ <b>Cross</b> sang <b>Isolated (Cô lập)</b> hoặc đổi từ <b>Đa vị thế (Separate)</b> sang <b>Hợp nhất (Merged)</b>."
                     )
 
-    except Exception as e:
-        log.error("_execute_for_user %s: %s", user.telegram_id, e)
+      except Exception as e:
+          log.error("_execute_for_user %s: %s", user.telegram_id, e)
 def run_trade_worker():
     asyncio.run(_trade_worker_async())
 

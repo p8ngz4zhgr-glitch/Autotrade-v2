@@ -493,19 +493,22 @@ class BingXExchange:
         norm_clean = self._normalize_symbol(symbol).replace("-", "").upper()
         pos_dir = str(position_side or "").upper()
         if not force_refresh and norm_clean:
-            if pos_dir in ("LONG", "SHORT") and (norm_clean, pos_dir) in self._position_ids_cache:
-                return self._position_ids_cache[(norm_clean, pos_dir)]
-            for (c_sym, _), pid in self._position_ids_cache.items():
-                if c_sym == norm_clean and pid:
+            if pos_dir in ("LONG", "SHORT"):
+                pid = self._position_ids_cache.get((norm_clean, pos_dir))
+                if pid:
                     return pid
+            else:
+                for (c_sym, _), pid in self._position_ids_cache.items():
+                    if c_sym == norm_clean and pid:
+                        return pid
 
         positions = self.get_open_positions(symbol)
         if isinstance(positions, list):
-            for p in positions:
-                if p.get("symbol") == norm_clean and p.get("position_id"):
-                    if pos_dir in ("LONG", "SHORT") and p.get("direction") != pos_dir:
-                        continue
-                    return str(p["position_id"])
+            if pos_dir in ("LONG", "SHORT"):
+                for p in positions:
+                    if p.get("symbol") == norm_clean and p.get("direction") == pos_dir and p.get("position_id"):
+                        return str(p["position_id"])
+                return ""
             for p in positions:
                 if p.get("symbol") == norm_clean and p.get("position_id"):
                     return str(p["position_id"])
@@ -818,8 +821,13 @@ class BingXExchange:
             order_id = res.get("data", {}).get("orderId")
             log.info("✅ Placed Market Order %s OK: %s (Qty: %s)", order_id, side, safe_qty)
 
-            # Đợi 0.3s cho vị thế khớp hoàn toàn trên sổ lệnh BingX
-            time.sleep(0.3)
+            # Đợi 0.45s và đồng bộ lại positionId của vị thế MỚI vừa khớp trên BingX
+            # (tránh dùng nhầm positionId cũ sau khi đảo chiều gây lỗi 'Position not exist')
+            time.sleep(0.45)
+            try:
+                self.get_open_positions(symbol)
+            except Exception:
+                pass
 
             # Nếu chưa gắn inline đủ cả SL & TP (ví dụ có 2 mốc TP hoặc inline fallback), gọi đặt phần còn thiếu
             sl_ok = attached_sl
@@ -1079,7 +1087,7 @@ class BingXExchange:
                     remaining_tp_qty = max(0.0, remaining_tp_qty - tp_qty)
                 if tp_qty <= 0:
                     continue
-                res_tp = self._safe_order({
+                tp_params = {
                     "symbol": symbol,
                     "side": opposite_side,
                     "type": "TAKE_PROFIT_MARKET",
@@ -1087,19 +1095,30 @@ class BingXExchange:
                     "quantity": tp_qty,
                     "positionSide": position_side,
                     "workingType": "CONTRACT_PRICE",
-                })
+                }
+                res_tp = self._safe_order(tp_params)
+                if res_tp.get("code") != 0 and "position not exist" in str(res_tp.get("msg", "")).lower():
+                    # Đợi sàn đồng bộ positionId của lệnh vừa mở rồi thử lại 1 lần
+                    time.sleep(0.5)
+                    norm_clean = self._normalize_symbol(symbol).replace("-", "").upper()
+                    self._position_ids_cache.pop((norm_clean, position_side), None)
+                    try:
+                        self.get_open_positions(symbol)
+                    except Exception:
+                        pass
+                    res_tp = self._safe_order(tp_params)
                 if res_tp.get("code") == 0:
                     success_tp_count += 1
                     log.info(f"🎯 Đặt Take Profit {lvl.get('level')} OK: {symbol} tại {lvl_price} (Qty: {tp_qty})")
                 else:
                     log.warning(f"⚠️ Đặt Take Profit {lvl.get('level')} ({symbol} Qty {tp_qty}) lỗi: {res_tp.get('msg', 'Unknown')}")
 
-        # Fallback: Nếu các mốc TP chia nhỏ đều thất bại -> đặt 1 lệnh TP toàn phần (quantity hoặc closePosition=true)
+        # Fallback: Nếu các mốc TP chia nhỏ đều thất bại -> đặt 1 lệnh TP toàn phần theo quantity
         if success_tp_count == 0 and (tp_price > 0 or adjusted_tp_levels):
             fallback_tp_price = tp_price if tp_price > 0 else adjusted_tp_levels[0].get("price", 0)
             fallback_tp_price = self._format_price(symbol, fallback_tp_price)
             if fallback_tp_price > 0:
-                res_tp = self._safe_order({
+                fb_params = {
                     "symbol": symbol,
                     "side": opposite_side,
                     "type": "TAKE_PROFIT_MARKET",
@@ -1107,7 +1126,17 @@ class BingXExchange:
                     "quantity": qty_fmt,
                     "positionSide": position_side,
                     "workingType": "CONTRACT_PRICE",
-                })
+                }
+                res_tp = self._safe_order(fb_params)
+                if res_tp.get("code") != 0 and "position not exist" in str(res_tp.get("msg", "")).lower():
+                    time.sleep(0.5)
+                    norm_clean = self._normalize_symbol(symbol).replace("-", "").upper()
+                    self._position_ids_cache.pop((norm_clean, position_side), None)
+                    try:
+                        self.get_open_positions(symbol)
+                    except Exception:
+                        pass
+                    res_tp = self._safe_order(fb_params)
                 if res_tp.get("code") == 0:
                     success_tp_count += 1
                     log.info(f"🎯 Đặt Take Profit Toàn Phần (Fallback) OK: {symbol} tại {fallback_tp_price} (Qty: {qty_fmt})")
@@ -1230,19 +1259,42 @@ class BingXExchange:
         })
 
     def close_position(self, symbol: str, qty: float, direction: str) -> dict:
-        opposite_side = "SELL" if direction == "LONG" else "BUY"
+        pos_dir = str(direction or "").upper()
+        opposite_side = "SELL" if pos_dir == "LONG" else "BUY"
         qty_fmt = self._format_qty(symbol, qty) or qty
         params = {
             "symbol": symbol,
             "side": opposite_side,
             "type": "MARKET",
             "quantity": qty_fmt,
-            "positionSide": direction,
+            "positionSide": pos_dir,
         }
         res = self._safe_order(params)
         if res.get("code") in (0, 101205):
+            norm_clean = self._normalize_symbol(symbol).replace("-", "").upper()
+            self._position_ids_cache.pop((norm_clean, pos_dir), None)
             return {"ok": True}
         return {"ok": False, "msg": res.get("msg", "Error closing")}
+
+    def wait_position_closed(self, symbol: str, direction: str, timeout: float = 2.5) -> bool:
+        """Đợi và xác nhận vị thế cũ đã đóng xong trên BingX trước khi mở chiều ngược lại."""
+        pos_dir = str(direction or "").upper()
+        norm_clean = self._normalize_symbol(symbol).replace("-", "").upper()
+        self._position_ids_cache.pop((norm_clean, pos_dir), None)
+        deadline = time.time() + max(0.4, float(timeout))
+        while time.time() < deadline:
+            positions = self.get_open_positions(symbol)
+            if isinstance(positions, list):
+                still_open = any(
+                    p.get("symbol") == norm_clean and p.get("direction") == pos_dir and float(p.get("qty", 0) or 0) > 0
+                    for p in positions
+                )
+                if not still_open:
+                    self._position_ids_cache.pop((norm_clean, pos_dir), None)
+                    return True
+            time.sleep(0.4)
+        self._position_ids_cache.pop((norm_clean, pos_dir), None)
+        return False
 
     def handle_tp1_hit(self, symbol: str, direction: str, total_qty: float, entry_price: float, tp2_price: float) -> dict:
         log.info(f"Đang xóa lệnh SL/TP cũ của {symbol}...")
@@ -1342,7 +1394,7 @@ class BingXExchange:
     # ════════════════════════════════════════════════════════════════════
     # CƠ CHẾ LỌC NHIỄU, KÉO SL HÒA VỐN SỚM (EARLY BREAKEVEN) VÀ GỒNG LÃI
     # ════════════════════════════════════════════════════════════════════
-    def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 10, redis_client=None) -> dict:
+    def manage_position_dynamic(self, symbol: str, analysis_result: dict, leverage: int = 10, redis_client=None, target_direction: str = "") -> dict:
         if self._is_precious_metal(symbol):
             leverage = 50
         else:
@@ -1350,8 +1402,14 @@ class BingXExchange:
         open_positions = self.get_open_positions(symbol)
         if not open_positions:
             return {"action": "NONE", "msg": "Không có vị thế mở."}
-            
-        pos = open_positions[0]
+
+        target_dir = str(target_direction or "").upper()
+        pos = next(
+            (p for p in open_positions if not target_dir or p.get("direction") == target_dir),
+            None,
+        )
+        if not pos:
+            return {"action": "NONE", "msg": f"Không có vị thế {target_dir} đang mở."}
         direction = pos.get("direction")
         entry_price = float(pos.get("entry", 0))
         current_qty = float(pos.get("qty", 0))
