@@ -502,63 +502,6 @@ def _is_precious_metal(symbol: str = "", asset_type: str = "") -> bool:
     return any(k in s for k in ("NCCOGOLD", "NCCOXAG", "XAU", "XAG", "GOLD", "SILVER"))
 
 
-def _apply_precious_metal_entry_sl_tp(
-    symbol: str,
-    direction: str,
-    entry_price: float,
-    sl: float,
-    tp1: float,
-    tp2: float,
-    tp_levels: list = None,
-    asset_type: str = "",
-) -> tuple[float, float, float, list]:
-    """
-    Cố định SL/TP1/TP2 khi vào lệnh cho Vàng/Bạc:
-      - Vàng: SL = 15 giá, TP1 = 20 giá, TP2 = 30 giá
-      - Bạc (~$31-$50): quy đổi 1/100 (SL = 0.15, TP1 = 0.20, TP2 = 0.30 USD)
-        để an toàn ở đòn bẩy 50x (~1.8% thanh lý), giữ chuẩn tỷ lệ 15:20:30.
-    """
-    levels = list(tp_levels) if isinstance(tp_levels, list) and tp_levels else [
-        {"level": 1, "price": tp1, "close_pct": 0.50},
-        {"level": 2, "price": tp2, "close_pct": 0.50},
-    ]
-    if not _is_precious_metal(symbol, asset_type) or direction not in ("LONG", "SHORT") or entry_price <= 0:
-        return sl, tp1, tp2, levels
-
-    sym_up = str(symbol or "").upper()
-    atype_up = str(asset_type or "").upper()
-    is_silver = (
-        atype_up == "SILVER"
-        or "NCCOXAG" in sym_up
-        or "XAG" in sym_up
-        or "SILVER" in sym_up
-        or entry_price < 500.0
-    )
-    if is_silver:
-        sl_dist = float(os.getenv("SILVER_SL_POINTS", "0.15"))
-        tp1_dist = float(os.getenv("SILVER_TP1_POINTS", "0.20"))
-        tp2_dist = float(os.getenv("SILVER_TP2_POINTS", "0.30"))
-    else:
-        sl_dist = float(os.getenv("GOLD_SL_POINTS", "15.0"))
-        tp1_dist = float(os.getenv("GOLD_TP1_POINTS", "20.0"))
-        tp2_dist = float(os.getenv("GOLD_TP2_POINTS", "30.0"))
-
-    if direction == "LONG":
-        new_sl = round(entry_price - sl_dist, 4)
-        new_tp1 = round(entry_price + tp1_dist, 4)
-        new_tp2 = round(entry_price + tp2_dist, 4)
-    else:
-        new_sl = round(entry_price + sl_dist, 4)
-        new_tp1 = round(entry_price - tp1_dist, 4)
-        new_tp2 = round(entry_price - tp2_dist, 4)
-
-    new_levels = [
-        {"level": 1, "price": new_tp1, "close_pct": 0.50},
-        {"level": 2, "price": new_tp2, "close_pct": 0.50},
-    ]
-    return new_sl, new_tp1, new_tp2, new_levels
-
-
 def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 10, sl_pct: float = 0.02) -> tuple[int, str, dict]:
     """
     TÍNH TOÁN ĐÒN BẨY LINH ĐỘNG (10x - 20x; RIÊNG VÀNG/BẠC CỐ ĐỊNH 50x CHO 2 CHIỀU LONG/SHORT):
@@ -1160,15 +1103,6 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         new_tp2   = float(analysis["plan"].get("tp2", 0))
                         rev_tp_levels = analysis.get("plan", {}).get("tp_levels", [])
 
-                        if _is_precious_metal(sym, analysis.get("asset_type", "")):
-                            live_rev_px = bx.get_latest_price(sym)
-                            if live_rev_px and live_rev_px > 0:
-                                new_entry = float(live_rev_px)
-                            new_sl, new_tp1, new_tp2, rev_tp_levels = _apply_precious_metal_entry_sl_tp(
-                                sym, new_direction, new_entry, new_sl, new_tp1, new_tp2,
-                                tp_levels=rev_tp_levels, asset_type=analysis.get("asset_type", "")
-                            )
-
                         if new_tp2 <= 0:
                             if new_direction == "LONG":
                                 new_tp2 = round(new_tp1 + abs(new_tp1 - new_entry), 4)
@@ -1178,7 +1112,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         sl_pct = abs(new_entry - new_sl) / new_entry
                         if sl_pct >= 0.001:
                             new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
-                            new_rr    = round(abs(new_tp2 - new_entry) / max(abs(new_entry - new_sl), 1e-6), 2) if _is_precious_metal(sym, analysis.get("asset_type", "")) else analysis.get("rr_ratio", 1.5)
+                            new_rr    = analysis.get("rr_ratio", 1.5)
                             rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 10, sl_pct)
                             new_qty, rev_margin, _ = _calc_order_sizing(
                                 capital=user.capital,
@@ -1797,15 +1731,6 @@ def _execute_for_user(user: User, signal: dict):
         tp2   = float(signal["plan"].get("tp2", 0))
         tp_levels = signal.get("plan", {}).get("tp_levels", [])
 
-        if _is_precious_metal(sym, signal.get("asset_type", "")):
-            live_entry_px = bx_live.get_latest_price(sym)
-            if live_entry_px and live_entry_px > 0:
-                entry = float(live_entry_px)
-            sl, tp1, tp2, tp_levels = _apply_precious_metal_entry_sl_tp(
-                sym, direction, entry, sl, tp1, tp2,
-                tp_levels=tp_levels, asset_type=signal.get("asset_type", "")
-            )
-
         if tp2 <= 0:
             if direction == "LONG":
                 tp2 = round(tp1 + abs(tp1 - entry), 4)
@@ -1902,7 +1827,7 @@ def _execute_for_user(user: User, signal: dict):
         bx.set_leverage(sym, leverage=effective_leverage, side="ALL")
         bx.cancel_all_orders(sym)
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
-        sig_rr    = round(abs(tp2 - entry) / max(abs(entry - sl), 1e-6), 2) if _is_precious_metal(sym, signal.get("asset_type", "")) else signal.get("rr_ratio", 1.5)
+        sig_rr    = signal.get("rr_ratio", 1.5)
         if not tp_levels:
             tp_levels = [
                 {"level": 1, "price": tp1, "close_pct": 0.50},

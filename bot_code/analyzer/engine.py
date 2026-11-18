@@ -10,7 +10,6 @@
 # ═══════════════════════════════════════════════════════════
 
 import logging
-import os
 import threading
 import time
 from datetime import datetime
@@ -24,63 +23,6 @@ from analyzer.traderssz_framework import TradersszFramework
 
 log = logging.getLogger("analyzer.engine")
 cfg = Config()
-
-
-def apply_precious_metal_fixed_sl_tp(
-    symbol: str,
-    direction: str,
-    entry_price: float,
-    sl: float,
-    tp1: float,
-    tp2: float,
-    atype: str = "",
-) -> tuple[float, float, float, float, float, bool]:
-    """
-    Áp dụng SL/TP1/TP2 cố định khi vào lệnh cho Vàng/Bạc:
-      - Vàng (~$2,600-$4,200): SL = 15 giá, TP1 = 20 giá, TP2 = 30 giá
-      - Bạc (~$31-$50): quy đổi theo tỷ lệ 1/100 (SL = 0.15, TP1 = 0.20, TP2 = 0.30 USD)
-        để không bị cháy ngay lập tức ở đòn bẩy 50x (~1.8% thanh lý), giữ nguyên tỷ lệ 15:20:30 & R:R 1:2.0.
-    Có thể tùy chỉnh qua env: GOLD_SL_POINTS / GOLD_TP1_POINTS / GOLD_TP2_POINTS
-    và SILVER_SL_POINTS / SILVER_TP1_POINTS / SILVER_TP2_POINTS.
-    """
-    sym_up = str(symbol or "").upper()
-    atype_up = str(atype or "").upper()
-    is_precious_metal = atype_up in ("GOLD", "SILVER") or any(
-        k in sym_up for k in ("NCCOGOLD", "NCCOXAG", "XAU", "XAG", "GOLD", "SILVER")
-    )
-    if not is_precious_metal or direction not in ("LONG", "SHORT") or entry_price <= 0:
-        sl_pct = round(abs(entry_price - sl) / entry_price * 100, 2) if entry_price > 0 else 1.5
-        rr_ratio = round(abs(tp2 - entry_price) / max(abs(entry_price - sl), 1e-6), 2)
-        return sl, tp1, tp2, sl_pct, rr_ratio, False
-
-    is_silver = (
-        atype_up == "SILVER"
-        or "NCCOXAG" in sym_up
-        or "XAG" in sym_up
-        or "SILVER" in sym_up
-        or entry_price < 500.0
-    )
-    if is_silver:
-        sl_dist = float(os.getenv("SILVER_SL_POINTS", "0.15"))
-        tp1_dist = float(os.getenv("SILVER_TP1_POINTS", "0.20"))
-        tp2_dist = float(os.getenv("SILVER_TP2_POINTS", "0.30"))
-    else:
-        sl_dist = float(os.getenv("GOLD_SL_POINTS", "15.0"))
-        tp1_dist = float(os.getenv("GOLD_TP1_POINTS", "20.0"))
-        tp2_dist = float(os.getenv("GOLD_TP2_POINTS", "30.0"))
-
-    if direction == "LONG":
-        new_sl = round(entry_price - sl_dist, 4)
-        new_tp1 = round(entry_price + tp1_dist, 4)
-        new_tp2 = round(entry_price + tp2_dist, 4)
-    else:
-        new_sl = round(entry_price + sl_dist, 4)
-        new_tp1 = round(entry_price - tp1_dist, 4)
-        new_tp2 = round(entry_price - tp2_dist, 4)
-
-    sl_pct = round(abs(entry_price - new_sl) / entry_price * 100, 2)
-    rr_ratio = round(abs(new_tp2 - entry_price) / max(abs(entry_price - new_sl), 1e-6), 2)
-    return new_sl, new_tp1, new_tp2, sl_pct, rr_ratio, True
 
 
 class SignalEngine:
@@ -354,19 +296,6 @@ class SignalEngine:
             tp2 = float(setup["tp2"])
             sl_pct = float(setup["sl_pct"])
             rr_ratio = float(setup["rr_tp2"])
-            sl, tp1, tp2, sl_pct, rr_ratio, applied_metal = apply_precious_metal_fixed_sl_tp(
-                symbol, final, float(price), sl, tp1, tp2, atype=atype
-            )
-            if applied_metal:
-                setup["sl"] = sl
-                setup["tp1"] = tp1
-                setup["tp2"] = tp2
-                setup["sl_pct"] = sl_pct
-                setup["rr_tp2"] = rr_ratio
-                traderssz_res["safe_sl"] = sl
-                traderssz_res["tp1_target"] = tp1
-                traderssz_res["tp2_target"] = tp2
-                traderssz_res["rr_ratio"] = rr_ratio
         else:
             # Kế hoạch tham khảo khi WAIT (dựa trên biên Range hiện tại)
             rh = float(htf_data.get("range_high", price * 1.02))
