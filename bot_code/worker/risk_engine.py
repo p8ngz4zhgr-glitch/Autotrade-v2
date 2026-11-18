@@ -294,7 +294,7 @@ class RiskEngine:
     """
     Tương thích ngược với hệ thống cũ và tích hợp ScalpM5RiskManager
     """
-    def __init__(self, global_max_risk_pct: float = 1.5, max_positions_per_user: int = 2):
+    def __init__(self, global_max_risk_pct: float = 1.5, max_positions_per_user: int = 7):
         self.global_max_risk_pct = global_max_risk_pct
         self.max_positions_per_user = max_positions_per_user
         self.scalp_manager = ScalpM5RiskManager(
