@@ -185,9 +185,19 @@ class TelegramBot:
             stat_note = (f"\n  └ {icon} AI Stat: <b>{stat_conf:.1f}%</b> "
                          f"({sign}{delta}% vs raw)")
 
-        HEADER = {"LONG": "🟢 🚀 <b>TRADERSZ LONG (QUÉT ĐÁY RANGE)</b>",
-                  "SHORT": "🔴 📉 <b>TRADERSZ SHORT (QUÉT ĐỈNH RANGE)</b>",
-                  "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ QUÉT BIÊN RANGE</b>"}
+        is_breakout = setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION"
+        if is_breakout:
+            HEADER = {
+                "LONG": "🟢 🚀 <b>TRADERSZ LONG (PHÁ ĐỈNH RANGE · TIẾP DIỄN TĂNG)</b>",
+                "SHORT": "🔴 📉 <b>TRADERSZ SHORT (PHÁ ĐÁY RANGE · TIẾP DIỄN GIẢM)</b>",
+                "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ XÁC NHẬN RANGE</b>",
+            }
+        else:
+            HEADER = {
+                "LONG": "🟢 🚀 <b>TRADERSZ LONG (QUÉT ĐÁY RANGE)</b>",
+                "SHORT": "🔴 📉 <b>TRADERSZ SHORT (QUÉT ĐỈNH RANGE)</b>",
+                "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ QUÉT BIÊN RANGE</b>",
+            }
         AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇", "SILVER": "🥈"}
         ANAME  = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "BNBUSDT": "BNB Chain",
                   "SOLUSDT": "Solana", "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla", "NVDA": "NVIDIA",
@@ -195,7 +205,13 @@ class TelegramBot:
                   "NCCOGOLD2USD-USDT": "Vàng (XAU)",
                   "NCCOXAG2USD-USDT": "Bạc (XAG)", "NCCOXAG2USDUSDT": "Bạc (XAG)"}
         TF_IC  = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "⚪"}
-        ZONE_IC = {"PREMIUM": "🔴 PREMIUM (Canh SHORT)", "DISCOUNT": "🟢 DISCOUNT (Canh LONG)", "NO_TRADE_EQ_ZONE": "⛔ NO-TRADE ZONE (Giữa 50% EQ)"}
+        ZONE_IC = {
+            "BREAKOUT_ABOVE_RH": "🟢 PHÁ ĐỈNH RANGE (Breakout Tăng trên RH)",
+            "BREAKOUT_BELOW_RL": "🔴 PHÁ ĐÁY RANGE (Breakout Giảm dưới RL)",
+            "PREMIUM": "🔴 PREMIUM (Canh SHORT)",
+            "DISCOUNT": "🟢 DISCOUNT (Canh LONG)",
+            "NO_TRADE_EQ_ZONE": "⛔ NO-TRADE ZONE (Giữa 50% EQ)",
+        }
 
         conf_bar  = "█" * int(conf / 10) + "░" * (10 - int(conf / 10))
         tf_line   = "  ".join(
@@ -206,17 +222,32 @@ class TelegramBot:
         llm_clean   = self._to_safe_html(llm_text or "")
 
         price = float(data.get("price", 0))
-        zone_str = ZONE_IC.get(htf.get("market_zone", ""), htf.get("market_zone", "?"))
+        raw_zone = htf.get("market_zone", "")
+        pos_pct = float(htf.get("range_pos_pct", 50) or 50)
+        if pos_pct < 0 and raw_zone == "DISCOUNT":
+            raw_zone = "BREAKOUT_BELOW_RL"
+        elif pos_pct > 100 and raw_zone == "PREMIUM":
+            raw_zone = "BREAKOUT_ABOVE_RH"
+        zone_str = ZONE_IC.get(raw_zone, raw_zone or "?")
 
         setup_block = []
         if setup.get("detected"):
-            setup_block = [
-                "",
-                "🔥 <b>XÁC NHẬN DEVIATION / SFP (RETURN TO RANGE)</b>",
-                f"  ├ Khung & Range : <b>{str(setup.get('tf','?')).upper()}</b> · {setup.get('range_label','')}",
-                f"  ├ Mô hình       : <b>{setup.get('setup_type','SFP')}</b>" + (" (Retest biên ✅)" if setup.get("is_retest") else ""),
-                f"  ├ Mốc đã quét   : <code>${setup.get('swept_level', 0)}</code> (Đỉnh/Đáy râu: <code>${setup.get('sweep_extreme', 0)}</code>)",
-            ]
+            if is_breakout:
+                setup_block = [
+                    "",
+                    "🚀 <b>XÁC NHẬN PHÁ VỠ RANGE (BREAKOUT CONTINUATION)</b>",
+                    f"  ├ Khung & Range : <b>{str(setup.get('tf','?')).upper()}</b> · {setup.get('range_label','')}",
+                    f"  ├ Mô hình       : <b>{setup.get('setup_type','RANGE_BREAKOUT_CONTINUATION')}</b>" + (" (Retest biên ✅)" if setup.get("is_retest") else ""),
+                    f"  ├ Biên bị phá   : <code>${setup.get('swept_level', 0)}</code> (Điểm tựa SL: <code>${setup.get('sweep_extreme', 0)}</code>)",
+                ]
+            else:
+                setup_block = [
+                    "",
+                    "🔥 <b>XÁC NHẬN DEVIATION / SFP (RETURN TO RANGE)</b>",
+                    f"  ├ Khung & Range : <b>{str(setup.get('tf','?')).upper()}</b> · {setup.get('range_label','')}",
+                    f"  ├ Mô hình       : <b>{setup.get('setup_type','SFP')}</b>" + (" (Retest biên ✅)" if setup.get("is_retest") else ""),
+                    f"  ├ Mốc đã quét   : <code>${setup.get('swept_level', 0)}</code> (Đỉnh/Đáy râu: <code>${setup.get('sweep_extreme', 0)}</code>)",
+                ]
         else:
             setup_block = [
                 "",
@@ -277,13 +308,18 @@ class TelegramBot:
 
         lines.extend(ob_section)
 
+        plan_title = "📌 <b>KẾ HOẠCH LỆNH BREAKOUT TIẾP DIỄN</b>" if is_breakout else "📌 <b>KẾ HOẠCH LỆNH TRADERSZ (RANGE-TO-RANGE)</b>"
+        sl_label = "SL Biên" if is_breakout else "SL Râu"
+        tp1_label = "TP1 (50% · Mở rộng 0.5x)" if is_breakout else "TP1 (50% @ EQ)"
+        tp2_label = "TP2 (50% · Mở rộng 1.0x)" if is_breakout else "TP2 (50% @ Biên)"
+
         lines.extend([
             "",
-            "📌 <b>KẾ HOẠCH LỆNH TRADERSZ (RANGE-TO-RANGE)</b>",
+            plan_title,
             f"  ├ Entry     : <code>${plan['entry']}</code>",
-            f"  ├ 🛑 SL Râu : <code>${plan['sl']}</code> (-{data.get('sl_pct','1.5')}%)",
-            f"  ├ 🎯 TP1 (50% @ EQ): <code>${plan.get('tp1', 0)}</code> (+Dời SL Hòa Vốn)",
-            f"  ├ 🏆 TP2 (50% @ Biên): <code>${plan.get('tp2', 0)}</code>",
+            f"  ├ 🛑 {sl_label} : <code>${plan['sl']}</code> (-{data.get('sl_pct','1.5')}%)",
+            f"  ├ 🎯 {tp1_label}: <code>${plan.get('tp1', 0)}</code> (+Dời SL Hòa Vốn)",
+            f"  ├ 🏆 {tp2_label}: <code>${plan.get('tp2', 0)}</code>",
             f"  ├ ⚡ Đòn bẩy: <b>{data.get('dynamic_leverage', plan.get('recommended_leverage', 10))}x</b> ({data.get('leverage_note', 'Linh động 10x-20x | Vàng/Bạc 50x')})",
             f"  └ ⚖️ R:R    : <b>1:{data.get('rr_ratio','2.0')}</b>",
             "",

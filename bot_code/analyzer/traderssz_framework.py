@@ -298,10 +298,15 @@ class TradersszFramework:
         dist_to_eq_pct = (current_price - eq_50) / eq_50 * 100.0 if eq_50 > 0 else 0.0
 
         # Phân vùng TraderSZ:
-        # - Vùng giữa (35% - 65% quanh 50% EQ): No-Trade Zone
-        # - Vùng Premium (>= 65%): Canh SHORT khi quét RH
-        # - Vùng Discount (<= 35%): Canh LONG khi quét RL
-        if range_pos_pct >= 62.0:
+        # - Phá vỡ ngoài biên (> RH * 1.0020 / < RL * 0.9980): BREAKOUT_ABOVE_RH / BREAKOUT_BELOW_RL
+        # - Vùng giữa (38% - 62% quanh 50% EQ): No-Trade Zone
+        # - Vùng Premium (>= 62% trong Range): Canh SHORT khi quét RH
+        # - Vùng Discount (<= 38% trong Range): Canh LONG khi quét RL
+        if current_price > rh * 1.0020:
+            market_zone = "BREAKOUT_ABOVE_RH"
+        elif current_price < rl * 0.9980:
+            market_zone = "BREAKOUT_BELOW_RL"
+        elif range_pos_pct >= 62.0:
             market_zone = "PREMIUM"
         elif range_pos_pct <= 38.0:
             market_zone = "DISCOUNT"
