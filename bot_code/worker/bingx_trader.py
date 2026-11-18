@@ -667,6 +667,18 @@ class BingXExchange:
                 log.info(f"⚠️ Vốn tính toán nhỏ hơn mức tối thiểu, điều chỉnh vốn về {capital_to_use:.2f} để đáp ứng lệnh sàn.")
             safe_qty = (capital_to_use * leverage) / current_price
 
+        # Giữ mức ký quỹ (Margin) mỗi lệnh trong khoảng $20 - $30 USD (không vượt 30% số dư khả dụng)
+        required_margin = (safe_qty * current_price) / leverage if leverage > 0 else safe_qty * current_price
+        max_safe_cap = available_balance * 0.30
+        target_min_margin = min(20.0, max_safe_cap)
+        target_max_margin = min(30.0, max_safe_cap)
+        if required_margin < target_min_margin and current_price > 0 and leverage > 0:
+            safe_qty = (target_min_margin * leverage) / current_price
+            log.info(f"💰 Nâng ký quỹ lệnh lên tối thiểu ${target_min_margin:.2f} (tỉ lệ vốn $20-$30/lệnh).")
+        elif required_margin > target_max_margin and current_price > 0 and leverage > 0:
+            safe_qty = (target_max_margin * leverage) / current_price
+            log.info(f"🛡️ Giới hạn ký quỹ lệnh ở trần ${target_max_margin:.2f} (tỉ lệ vốn $20-$30/lệnh).")
+
         required_margin = (safe_qty * current_price) / leverage if leverage > 0 else safe_qty * current_price
         if required_margin > available_balance * 0.95:
             safe_qty = (available_balance * 0.95 * leverage) / current_price

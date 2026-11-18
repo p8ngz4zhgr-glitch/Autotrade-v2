@@ -548,7 +548,141 @@ def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 10, sl_pc
 
 log = logging.getLogger("ReversalEvaluator")
 
-def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, db: Session):
+ORDER_MARGIN_MIN_USD = float(os.getenv("ORDER_MARGIN_MIN_USD", "20.0"))
+ORDER_MARGIN_MAX_USD = float(os.getenv("ORDER_MARGIN_MAX_USD", "30.0"))
+
+
+def _calc_order_sizing(
+    capital: float,
+    max_risk_pct: float,
+    entry: float,
+    sl_pct: float,
+    leverage: int,
+    confidence: float = 75.0,
+    size_mult: float = 1.0,
+) -> tuple[float, float, float]:
+    """
+    Tính khối lượng lệnh sao cho:
+    - Tỉ lệ vốn ký quỹ (Margin) nằm trong vùng mục tiêu $20 - $30 USD / lệnh.
+    - Tự động co theo độ tin cậy tín hiệu & hệ số vĩ mô (news/Fed), nhưng không tụt dưới $20
+      (trừ khi 30% vốn tài khoản nhỏ hơn $20) và không vượt $30 hoặc 30% vốn.
+    Trả về: (qty, req_margin_usd, risk_amt_usd)
+    """
+    cap = max(0.0, float(capital or 0))
+    lev = max(1, int(leverage or 10))
+    if cap <= 0 or entry <= 0 or sl_pct <= 0:
+        return 0.0, 0.0, 0.0
+
+    risk_amt = cap * (float(max_risk_pct or 2.0) / 100.0)
+    base_qty = (risk_amt / (entry * sl_pct)) * max(0.5, float(size_mult or 1.0))
+    base_margin = (base_qty * entry) / lev
+
+    max_safe_cap = cap * 0.30
+    target_min = min(ORDER_MARGIN_MIN_USD, max_safe_cap)
+    target_max = min(ORDER_MARGIN_MAX_USD, max_safe_cap)
+
+    quality_ratio = max(0.0, min(1.0, (float(confidence or 75.0) - 65.0) / 30.0))
+    band_margin = target_min + (target_max - target_min) * quality_ratio
+    if size_mult < 1.0:
+        band_margin = max(target_min, band_margin * max(0.75, float(size_mult)))
+
+    req_margin = max(base_margin, band_margin)
+    if target_min > 0:
+        req_margin = max(req_margin, target_min)
+    if target_max > 0:
+        req_margin = min(req_margin, target_max)
+
+    qty = round((req_margin * lev) / entry, 4)
+    actual_margin = round((qty * entry) / lev, 2)
+    actual_risk = round(qty * entry * sl_pct, 2)
+    return qty, actual_margin, actual_risk
+
+
+def _clear_position_caches(cache, user_id: str, sym: str, direction: str):
+    if not cache:
+        return
+    keys = [
+        f"BREAKEVEN_{user_id}_{sym}_{direction}",
+        f"SCALE_OUT_{user_id}_{sym}_{direction}",
+        f"ENTRY_PLAN_{user_id}_{sym}_{direction}",
+        f"ORIGINAL_QTY_{user_id}_{sym}_{direction}",
+        f"PEAK_PRICE_{sym}_{direction}",
+        f"SL_COOLDOWN_{sym}_{direction}",
+        f"TRAILING_SL_{user_id}_{sym}_{direction}_1",
+        f"TRAILING_SL_{user_id}_{sym}_{direction}_2",
+        f"SL_HEAL_COOLDOWN:{user_id}:{sym}:{direction}",
+        f"TP1_DONE:{user_id}:{sym}:{direction}",
+    ]
+    for k in keys:
+        try:
+            cache.delete(k)
+        except Exception:
+            pass
+
+
+def _is_position_protected_runner(
+    bx,
+    user: User,
+    sym: str,
+    direction: str,
+    entry: float,
+    current_price: float,
+    net_pnl_usd: float = 0.0,
+    triggers: Optional[dict] = None,
+) -> tuple[bool, float, str]:
+    """
+    Chỉ giữ lại vị thế gồng tiếp khi ĐỒNG THỜI thỏa mãn 2 điều kiện:
+    1) Có entry đẹp / đang có lợi nhuận dương (giá vượt qua điểm hòa vốn có đệm phí & PnL >= 0).
+    2) Stop Loss thực tế trên sàn BingX ĐÃ được dời về vùng dương bảo vệ lãi
+       (LONG: SL > entry; SHORT: 0 < SL < entry).
+    """
+    if entry <= 0 or current_price <= 0:
+        return False, 0.0, "Thiếu dữ liệu giá entry/hiện tại"
+
+    be_p = bx.breakeven_price(direction, entry)
+    if direction == "LONG":
+        in_good_profit = current_price > max(entry, be_p) and net_pnl_usd >= 0
+    else:
+        in_good_profit = current_price < min(entry, be_p) and net_pnl_usd >= 0
+
+    if not in_good_profit:
+        return False, 0.0, f"Entry chưa có lãi đẹp (PnL ${net_pnl_usd:+.2f}, giá ${current_price:.4f} vs BE ${be_p:.4f})"
+
+    if triggers is None:
+        try:
+            triggers = bx.get_trigger_orders()
+        except Exception:
+            triggers = None
+
+    if triggers is None:
+        # Lỗi API tạm thời: kiểm tra cache breakeven để tránh đóng oan lệnh đang gồng lãi
+        cache = _get_active_redis()
+        be_cached = False
+        if cache:
+            try:
+                be_cached = bool(cache.get(f"BREAKEVEN_{user.telegram_id}_{sym}_{direction}"))
+            except Exception:
+                pass
+        if be_cached:
+            return True, be_p, f"Entry đẹp & cache xác nhận đã dời SL về dương (${be_p:.4f})"
+        return True, 0.0, "Tạm giữ do lỗi đọc trigger orders khi vị thế đang có lãi"
+
+    clean_sym = sym.replace("-", "").upper()
+    trig = triggers.get(sym) or triggers.get(clean_sym) or {}
+    current_sl = float(trig.get("sl", 0) or 0)
+
+    if direction == "LONG":
+        sl_in_profit = current_sl > 0 and current_sl > entry
+    else:
+        sl_in_profit = 0 < current_sl < entry
+
+    if sl_in_profit:
+        return True, current_sl, f"Entry đẹp (PnL ${net_pnl_usd:+.2f}) & SL đã dời về dương (${current_sl:.4f})"
+
+    return False, current_sl, f"SL chưa dời về vùng dương (SL=${current_sl:.4f} vs Entry=${entry:.4f})"
+
+
+def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, db: Session, triggers: Optional[dict] = None):
     sym = pos["symbol"]
     direction = pos["direction"]
     qty = float(pos.get("qty", 0))
@@ -629,6 +763,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         dynamic_status = bx.manage_position_dynamic(sym, pos_analysis, leverage=leverage, redis_client=cache)
 
         if dynamic_status.get("action") in ("BREAKEVEN", "TRAILING_SL"):
+            triggers = None  # Cần đọc lại SL mới vừa dời trên BingX nếu kiểm tra đảo chiều
             if dynamic_status.get("action") == "BREAKEVEN" and cache:
                 try:
                     cache.setex(be_key, 86400, "1")
@@ -751,27 +886,36 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 emoji = "🚨"
                 reason = f"Trạng thái âm {pnl_pct:.2f}% vượt ngưỡng lỗ tối đa ({DYNAMIC_SL_LIMIT}%) -> Cắt lỗ bảo toàn tài khoản."
             elif is_reversal:
-                # Nếu có tín hiệu đảo chiều PA và vị thế đang có lãi -> CHỈ dời SL về Hòa vốn (Breakeven), KHÔNG chốt lời non!
-                be_p = bx.breakeven_price(direction, entry)
-                can_set_be = (direction == "LONG" and current_price > be_p) or \
-                             (direction == "SHORT" and current_price < be_p)
+                is_protected, cur_sl, prot_reason = _is_position_protected_runner(
+                    bx, user, sym, direction, entry, current_price,
+                    net_pnl_usd=net_pnl_usd, triggers=triggers
+                )
+                min_conf = float(getattr(user, "min_confidence", 68) or 68)
+                rev_plan = analysis.get("plan", {}) or {}
+                has_valid_rev_plan = float(rev_plan.get("entry", 0) or 0) > 0 and float(rev_plan.get("sl", 0) or 0) > 0
 
-                if can_set_be and not is_breakeven:
-                    upd_res = bx.update_sl_and_keep_remaining_tps(sym, direction, qty, be_p, tp_levels_raw, current_price)
-                    if not isinstance(upd_res, dict) or upd_res.get("sl_ok", True):
-                        if cache:
-                            try:
-                                cache.setex(be_key, 86400, "1")
-                            except Exception:
-                                pass
-                        _tg_send(
-                            REGISTER_TOKEN, user.telegram_id,
-                            f"🛡️ <b>DỜI SL HÒA VỐN (PA NGƯỢC CHIỀU): {sym} ({direction})</b>\n\n"
-                            f"🔒 Đã dời Stop Loss về <b>HÒA VỐN</b> (<code>${be_p:.4f}</code>)!\n"
-                            f"🎯 Vẫn giữ vị thế chạy tới TP1/TP2 chuẩn TraderSZ, không chốt non."
-                        )
-                        log.info(f"🛡️ [PA BREAKEVEN] {user.telegram_id} {sym} ({direction}): Dời SL về Breakeven ${be_p:.4f}")
-                action = "HOLD"
+                if is_protected:
+                    action = "HOLD"
+                    log.info(
+                        "🛡️ [PROTECTED RUNNER] %s %s (%s): Có tín hiệu đảo chiều %s (%.1f%%) nhưng GIỮ GỒNG tiếp (%s).",
+                        user.telegram_id, sym, direction, new_direction, conf, prot_reason
+                    )
+                elif conf >= min_conf and has_valid_rev_plan:
+                    action = "CLOSE_ALL"
+                    should_reverse = True
+                    action_type = "ĐẢO CHIỀU THEO TÍN HIỆU MỚI"
+                    emoji = "🔄"
+                    reason = (
+                        f"Tín hiệu đảo chiều {direction} → {new_direction} (Conf {conf:.1f}% >= {min_conf:.0f}%). "
+                        f"Vị thế cũ chưa đủ điều kiện gồng ({prot_reason}) -> Đóng & đảo chiều theo tín hiệu."
+                    )
+                    log.info("🔄 [REVERSAL TRIGGERED] %s %s: %s", user.telegram_id, sym, reason)
+                else:
+                    action = "HOLD"
+                    log.info(
+                        "Giữ vị thế %s (%s): Tín hiệu ngược %s (%.1f%%) chưa đạt min_conf %.1f%% hoặc thiếu plan SL/TP.",
+                        sym, direction, new_direction, conf, min_conf
+                    )
             else:
                 # BỎ HOÀN TOÀN CHỐT LỜI ĐỘNG / CHỐT LỜI SIDEWAYS / CHỐT LỜI ĐẢO CHIỀU $1
                 action = "HOLD"
@@ -857,7 +1001,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user.telegram_id}</code>:\n" + msg_partial)
                         _save_journal(user.telegram_id, sym, direction, pnl_pct, res.get("closed_qty", 0))
             
-            # --- CƠ CHẾ NGẮT: ĐÓNG TOÀN BỘ VỊ THẾ KHẨN CẤP ---
+            # --- CƠ CHẾ NGẮT: ĐÓNG TOÀN BỘ VỊ THẾ / ĐẢO CHIỀU ---
             elif action == "CLOSE_ALL":
                 bx.cancel_all_orders(sym)
                 res = bx.close_position(sym, qty, direction)
@@ -866,8 +1010,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     if cache:
                         try:
                             cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{direction}", 120, "1")
-                            cache.delete(partial_key)
-                        except: pass
+                            _clear_position_caches(cache, user.telegram_id, sym, direction)
+                        except Exception:
+                            pass
                         
                     msg_rev_close = (
                         f"{emoji} <b>{action_type}: {sym}</b>\n\n"
@@ -881,7 +1026,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
                     time.sleep(1.5)
                     
-                    # --- VÀO LỆNH NGƯỢC LẠI NẾU CÓ TÍN HIỆU ĐẢO CHIỀU MẠNH ---
+                    # --- VÀO LỆNH NGƯỢC LẠI THEO TÍN HIỆU ĐẢO CHIỀU ---
                     if should_reverse:
                         new_entry = float(analysis["plan"]["entry"])
                         new_sl    = float(analysis["plan"]["sl"])
@@ -896,13 +1041,20 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         
                         sl_pct = abs(new_entry - new_sl) / new_entry
                         if sl_pct >= 0.001:
-                            risk_amt = user.capital * (user.max_risk_pct / 100)
-                            new_qty = round(risk_amt / (new_entry * sl_pct), 4)
+                            new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
+                            new_rr    = analysis.get("rr_ratio", 1.5)
+                            rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 10, sl_pct)
+                            new_qty, rev_margin, _ = _calc_order_sizing(
+                                capital=user.capital,
+                                max_risk_pct=user.max_risk_pct,
+                                entry=new_entry,
+                                sl_pct=sl_pct,
+                                leverage=rev_lev,
+                                confidence=conf,
+                                size_mult=1.0,
+                            )
                             
                             if new_qty > 0:
-                                new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
-                                new_rr    = analysis.get("rr_ratio", 1.5)
-                                rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 10, sl_pct)
                                 bx.set_leverage(sym, leverage=rev_lev, side="ALL")
                                 rev_res = bx.place_order(
                                     sym, "BUY" if new_direction == "LONG" else "SELL", new_qty, new_sl, new_tp2,
@@ -910,6 +1062,8 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                     leverage=rev_lev, p_win=new_p_win, rr_ratio=new_rr
                                 )
                                 if rev_res.get("ok"):
+                                    actual_rev_qty = float(rev_res.get("qty", new_qty))
+                                    actual_rev_margin = round((actual_rev_qty * new_entry) / max(1, rev_lev), 2)
                                     if cache:
                                         try:
                                             cache.setex(
@@ -922,7 +1076,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                             )
                                             cache.setex(
                                                 f"ORIGINAL_QTY_{user.telegram_id}_{sym}_{new_direction}",
-                                                7 * 86400, str(rev_res.get("qty", new_qty))
+                                                7 * 86400, str(actual_rev_qty)
                                             )
                                         except Exception:
                                             pass
@@ -930,10 +1084,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                     tp_tag = "✅" if rev_res.get("tp_ok", True) else "⚠️(đang tự đồng bộ)"
                                     _tg_send(
                                         REGISTER_TOKEN, user.telegram_id,
-                                        f"🚀 <b>VÀO LỆNH THEO XU HƯỚNG MỚI: {sym}</b>\n"
+                                        f"🔄 <b>ĐẢO CHIỀU VÀO LỆNH MỚI: {sym}</b>\n"
                                         f"📈 {new_direction} | Conf: {conf:.1f}%\n"
                                         f"⚡ Đòn bẩy: <b>{rev_lev}x</b> ({rev_reason})\n"
-                                        f"💰 Qty: {rev_res.get('qty', new_qty):.4f}\n"
+                                        f"💰 Qty: {actual_rev_qty:.4f} | Margin: ~${actual_rev_margin:.2f}\n"
                                         f"🛑 SL: <code>${(rev_res.get('sl_price') or new_sl):.4f}</code> {sl_tag}\n"
                                         f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${new_tp2:.4f}</code> {tp_tag}"
                                     )
@@ -1022,8 +1176,8 @@ def sync_bingx_positions():
                             continue
                         cur  = bx.get_latest_price(sym) or p.get("entry", 0)
                     
-                        # Evaluate for reversal / early close / lock profit
-                        evaluate_reversal_for_position(user, p, cur, db)
+                        # Evaluate for reversal / breakeven / trailing SL
+                        evaluate_reversal_for_position(user, p, cur, db, triggers=triggers)
                         trig = triggers.get(sym, {}) if isinstance(triggers, dict) else {}
                         if not isinstance(trig, dict):
                             trig = {}
@@ -1396,24 +1550,99 @@ def _execute_for_user(user: User, signal: dict):
             except Exception:
                 pass
 
-        with _POS_LOCK:
-            already = [p for p in LIVE_POSITIONS
-                       if str(p.get("user_id")) == user.telegram_id and p.get("symbol") == sym]
-        if already:
-            log.info("Da co vi the %s (user %s) - bo qua", sym, user.telegram_id)
+        bx_live = get_bx(user)
+        clean_sym = sym.replace("-", "").upper()
+        try:
+            live = bx_live.get_open_positions()
+        except Exception as e:
+            log.warning("BingX realtime check: %s", e)
+            live = None
+
+        if live is None:
+            with _POS_LOCK:
+                already_same = [
+                    p for p in LIVE_POSITIONS
+                    if str(p.get("user_id")) == user.telegram_id
+                    and p.get("symbol", "").replace("-", "").upper() == clean_sym
+                ]
+            if already_same:
+                log.info("Da co vi the %s (user %s, offline check) - bo qua", sym, user.telegram_id)
+                return
+            live = []
+
+        same_sym_positions = [
+            p for p in live
+            if isinstance(p, dict) and p.get("symbol", "").replace("-", "").upper() == clean_sym
+        ]
+
+        # Nếu đã có vị thế CÙNG CHIỀU -> bỏ qua, không nhồi thêm lệnh
+        if any(p.get("direction") == direction for p in same_sym_positions):
+            log.info("BingX xac nhan da co vi the cung chieu %s (%s) - bo qua", sym, direction)
             return
 
-        try:
-            bx_live = get_bx(user)
-            live    = bx_live.get_open_positions()
-            if any(p.get("symbol") == sym for p in live):
-                log.info("BingX xac nhan da co vi the %s - bo qua", sym)
-                return
-        except Exception as e:
-            log.warning("BingX realtime check: %s - tiep tuc", e)
+        # Nếu đang có vị thế NGƯỢC CHIỀU -> kiểm tra điều kiện giữ gồng (entry đẹp & SL đã dời dương)
+        reversed_closed_sym = False
+        if same_sym_positions:
+            triggers = bx_live.get_trigger_orders()
+            for old_pos in same_sym_positions:
+                old_dir = old_pos.get("direction", "LONG")
+                old_entry = float(old_pos.get("entry", 0) or 0)
+                old_qty = float(old_pos.get("qty", 0) or 0)
+                old_pnl = float(old_pos.get("pnl", 0) or 0)
+                cur_px = bx_live.get_latest_price(sym) or float(signal.get("plan", {}).get("entry", 0) or old_entry)
+                is_prot, _, prot_reason = _is_position_protected_runner(
+                    bx_live, user, sym, old_dir, old_entry, cur_px,
+                    net_pnl_usd=old_pnl, triggers=triggers
+                )
+                if is_prot:
+                    log.info(
+                        "🛡️ [PROTECTED RUNNER] User %s | Giữ vị thế %s %s (%s) — bỏ qua tín hiệu đảo chiều %s.",
+                        user.telegram_id, old_dir, sym, prot_reason, direction
+                    )
+                    return
+
+            # Chưa đủ điều kiện gồng (chưa dời SL về dương / chưa có entry đẹp) -> Đóng & Đảo chiều theo tín hiệu mới
+            bx_live.cancel_all_orders(sym)
+            for old_pos in same_sym_positions:
+                old_dir = old_pos.get("direction", "LONG")
+                old_entry = float(old_pos.get("entry", 0) or 0)
+                old_qty = float(old_pos.get("qty", 0) or 0)
+                old_pnl = float(old_pos.get("pnl", 0) or 0)
+                if old_qty <= 0:
+                    continue
+                close_res = bx_live.close_position(sym, old_qty, old_dir)
+                if not close_res.get("ok"):
+                    log.error("❌ Đóng vị thế %s %s để đảo chiều thất bại: %s", sym, old_dir, close_res.get("msg"))
+                    return
+                reversed_closed_sym = True
+                old_lev = 50 if _is_precious_metal(sym) else max(10, int(user.leverage or 10))
+                cur_px = bx_live.get_latest_price(sym) or float(signal.get("plan", {}).get("entry", 0) or old_entry)
+                if old_entry > 0:
+                    old_roe = ((cur_px - old_entry) / old_entry) * 100 * old_lev if old_dir == "LONG" else ((old_entry - cur_px) / old_entry) * 100 * old_lev
+                else:
+                    old_roe = 0.0
+                if cache:
+                    try:
+                        cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sym}:{old_dir}", 120, "1")
+                        _clear_position_caches(cache, user.telegram_id, sym, old_dir)
+                    except Exception:
+                        pass
+                _save_journal(user.telegram_id, sym, old_dir, old_roe, old_qty)
+                _tg_send(
+                    REGISTER_TOKEN, user.telegram_id,
+                    f"🔄 <b>ĐẢO CHIỀU THEO TÍN HIỆU MỚI: {sym}</b>\n\n"
+                    f"📊 Đóng vị thế cũ: {old_dir} @ ${old_entry:.4f} (PnL ~${old_pnl:+.2f})\n"
+                    f"➡️ Chuẩn bị vào lệnh mới hướng <b>{direction}</b> (Conf: {signal.get('confidence', 0):.1f}%)"
+                )
+            if reversed_closed_sym:
+                time.sleep(1.2)
 
         with _POS_LOCK:
-            total_pos = sum(1 for p in LIVE_POSITIONS if str(p.get("user_id")) == user.telegram_id)
+            total_pos = sum(
+                1 for p in LIVE_POSITIONS
+                if str(p.get("user_id")) == user.telegram_id
+                and (not reversed_closed_sym or p.get("symbol", "").replace("-", "").upper() != clean_sym)
+            )
         if total_pos >= (user.max_positions or 2):
             log.info("Max positions %d da dat (user %s)", user.max_positions, user.telegram_id)
             return
@@ -1433,32 +1662,24 @@ def _execute_for_user(user: User, signal: dict):
             log.warning("SL qua gan entry (%.4f%%) - bo qua", sl_pct * 100)
             return
 
-        risk_amt = user.capital * (user.max_risk_pct / 100)
-        qty      = round(risk_amt / (entry * sl_pct), 4)
-        if qty <= 0:
-            return
-
-        # [NEW v6.11] Giảm khối lượng khi đang trong vùng ảnh hưởng tin CPI/PPI/NFP
-        # (engine.py đã siết SL sẵn trong `sl`/`entry` truyền vào; đây là phần
-        # giảm KHỐI LƯỢNG theo đúng yêu cầu "giảm khối lượng gd xuống, SL chặt").
+        # [NEW v6.11] Tính hệ số co khối lượng theo tin tức vĩ mô / Fed Rate
+        size_mult_combined = 1.0
         news_risk = signal.get("news_risk", {}) or {}
         if news_risk.get("active"):
-            size_m = max(0.75, news_risk.get("size_mult", 1.0))
-            qty = round(qty * size_m, 4)
+            size_m = max(0.75, float(news_risk.get("size_mult", 1.0)))
+            size_mult_combined *= size_m
             log.warning("📰 %s: Đang trong vùng ảnh hưởng tin '%s' -> điều chỉnh khối lượng x%.2f (giữ tối thiểu 75%% size).",
                         sym, news_risk.get("event"), size_m)
-            if qty <= 0:
-                return
 
         # [NEW v6.15] ĐIỀU CHỈNH KHỐI LƯỢNG THEO KỲ VỌNG LÃI SUẤT FED (FED RATE POLICY)
         try:
             from analyzer.macro_analyzer import get_macro_market_context
             m_ctx = get_macro_market_context()
-            fed_size = m_ctx.get("fed_size_mult", 1.0)
+            fed_size = float(m_ctx.get("fed_size_mult", 1.0))
             if fed_size != 1.0:
-                qty = round(qty * fed_size, 4)
-                log.info("💵 [FED RATE SIZING] %s: Điều chỉnh vốn vĩ mô x%.2f (Fed: %s | Cut Prob: %.1f%%) -> Qty: %.4f",
-                         sym, fed_size, m_ctx.get("fed_stance"), m_ctx.get("fed_rate_cut_prob", 50), qty)
+                size_mult_combined *= fed_size
+                log.info("💵 [FED RATE SIZING] %s: Hệ số vĩ mô x%.2f (Fed: %s | Cut Prob: %.1f%%)",
+                         sym, fed_size, m_ctx.get("fed_stance"), m_ctx.get("fed_rate_cut_prob", 50))
         except Exception as ex_m_size:
             log.debug("Lỗi tính Fed size: %s", ex_m_size)
 
@@ -1501,14 +1722,18 @@ def _execute_for_user(user: User, signal: dict):
         log.info("⚡ [DYNAMIC LEVERAGE] User %s | %s %s: Lev=%dx (%s)",
                  user.telegram_id, direction, sym, effective_leverage, lev_reason)
 
-        # Khống chế ký quỹ tối đa không vượt 30% tài khoản
-        notional = entry * qty
-        req_margin = notional / effective_leverage
-        if req_margin > user.capital * 0.30:
-            req_margin = user.capital * 0.30
-            qty = round((req_margin * effective_leverage) / entry, 4)
-            log.info("🛡️ [ANTI-EXHAUSTION] Giảm Margin về $%.2f (30%% vốn) -> Qty mới: %.4f (Lev: %dx)",
-                     req_margin, qty, effective_leverage)
+        # 4. TỈ LỆ VỐN KÝ QUỸ MỖI LỆNH ($20 - $30 USD, tối đa 30% vốn)
+        qty, req_margin, risk_amt = _calc_order_sizing(
+            capital=user.capital,
+            max_risk_pct=user.max_risk_pct,
+            entry=entry,
+            sl_pct=sl_pct,
+            leverage=effective_leverage,
+            confidence=float(signal.get("confidence", 75.0)),
+            size_mult=size_mult_combined,
+        )
+        log.info("💰 [ORDER SIZING] User %s | %s %s: Margin=$%.2f ($20-$30) | Qty=%.4f | Lev=%dx",
+                 user.telegram_id, direction, sym, req_margin, qty, effective_leverage)
 
         if qty <= 0:
             return
@@ -1524,7 +1749,7 @@ def _execute_for_user(user: User, signal: dict):
         }
 
         # Vào lệnh trực tiếp theo Price Action TraderSZ — bỏ AI Meta-Filter phản biện/chặn lệnh
-        bx   = get_bx(user)
+        bx   = bx_live
         side = "BUY" if direction == "LONG" else "SELL"
         bx.set_leverage(sym, leverage=effective_leverage, side="ALL")
         bx.cancel_all_orders(sym)
@@ -1539,7 +1764,8 @@ def _execute_for_user(user: User, signal: dict):
         res = bx.place_order(sym, side, qty, sl, tp2, leverage=effective_leverage, p_win=sig_p_win, rr_ratio=sig_rr, tp_levels=tp_levels)
 
         if res.get("ok"):
-            actual_qty = res.get("qty", qty)
+            actual_qty = float(res.get("qty", qty))
+            actual_margin = round((actual_qty * entry) / max(1, effective_leverage), 2)
             actual_sl  = float(res.get("sl_price") or sl)
             actual_tp  = float(res.get("tp_price") or tp2)
             sl_ok      = res.get("sl_ok", False)
@@ -1565,8 +1791,8 @@ def _execute_for_user(user: User, signal: dict):
                 except Exception:
                     pass
 
-            log.info("OK %s: %s %s qty=%.4f lev=%dx sl_ok=%s tp_ok=%s (%s)",
-                     user.telegram_id, direction, sym, actual_qty, effective_leverage, sl_ok, tp_ok, lev_reason)
+            log.info("OK %s: %s %s qty=%.4f margin=$%.2f lev=%dx sl_ok=%s tp_ok=%s (%s)",
+                     user.telegram_id, direction, sym, actual_qty, actual_margin, effective_leverage, sl_ok, tp_ok, lev_reason)
             news_notice = ""
             if news_risk.get("active"):
                 news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - news_risk.get('size_mult', 0.5)) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
@@ -1589,7 +1815,7 @@ def _execute_for_user(user: User, signal: dict):
                 f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
                 f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
                 f"⚡ Đòn bẩy: <b>{lev_tag}</b>\n"
-                f"💰 Qty: {actual_qty:.4f} | Margin: ~${req_margin:.2f}{news_notice}\n"
+                f"💰 Qty: {actual_qty:.4f} | Margin: ~${actual_margin:.2f}{news_notice}\n"
                 f"🛑 SL: <code>${actual_sl:.4f}</code> ({sl_badge}) | Risk: ${risk_amt:.2f}\n"
                 f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
                 f"🏆 TP2: <code>${actual_tp:.4f}</code> ({tp_badge}) → đích 50% còn lại")

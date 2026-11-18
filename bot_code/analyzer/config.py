@@ -38,6 +38,8 @@ class Config:
         self.MAX_SAFE_LEVERAGE        = int(os.getenv("MAX_SAFE_LEVERAGE", "20"))
         self.MIN_SAFE_LEVERAGE        = int(os.getenv("MIN_SAFE_LEVERAGE", "10"))
         self.PRECIOUS_METALS_LEVERAGE = int(os.getenv("PRECIOUS_METALS_LEVERAGE", "50"))
+        self.ORDER_MARGIN_MIN_USD     = float(os.getenv("ORDER_MARGIN_MIN_USD", "20.0"))
+        self.ORDER_MARGIN_MAX_USD     = float(os.getenv("ORDER_MARGIN_MAX_USD", "30.0"))
         self.DYNAMIC_LEVERAGE_ENABLED = os.getenv("DYNAMIC_LEVERAGE_ENABLED", "true").lower() == "true"
         self.CONSECUTIVE_LOSS_LIMIT   = int(os.getenv("CONSECUTIVE_LOSS_LIMIT", "3"))
         self.AUTO_BREAKEVEN_ON_TP1    = os.getenv("AUTO_BREAKEVEN_ON_TP1", "true").lower() == "true"

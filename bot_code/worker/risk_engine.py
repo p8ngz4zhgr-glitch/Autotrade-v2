@@ -191,13 +191,19 @@ class ScalpM5RiskManager:
             safe_max_lev = min(self.max_leverage, target_lev, max(10, int(round(0.60 / sl_pct))))
             actual_leverage = max(10, min(20, safe_max_lev))
 
-        # Ký quỹ yêu cầu
+        # Ký quỹ yêu cầu (Mục tiêu $20 - $30 USD mỗi lệnh, không vượt 30% vốn)
         required_margin = notional_usd / actual_leverage
-
-        # Nếu ký quỹ vượt quá 30% tổng tài khoản -> Giảm Notional để không bị kẹt vốn
         max_allowed_margin = capital * self.max_margin_ratio
-        if required_margin > max_allowed_margin:
-            required_margin = max_allowed_margin
+        target_min_margin = min(20.0, max_allowed_margin)
+        target_max_margin = min(30.0, max_allowed_margin)
+
+        if required_margin < target_min_margin:
+            required_margin = target_min_margin
+            notional_usd = required_margin * actual_leverage
+            contract_qty = notional_usd / entry_price
+            risk_amount_usd = notional_usd * sl_pct
+        elif required_margin > target_max_margin:
+            required_margin = target_max_margin
             notional_usd = required_margin * actual_leverage
             contract_qty = notional_usd / entry_price
             risk_amount_usd = notional_usd * sl_pct
