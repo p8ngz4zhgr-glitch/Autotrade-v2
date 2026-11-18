@@ -141,16 +141,16 @@ class SignalEngine:
             if active_tf == tf and active_dir in ("LONG", "SHORT"):
                 tf_dir = active_dir
                 tf_score = int(traderssz_res.get("confidence", 80))
-                note = f"SFP {active_setup.get('setup_type')}"
+                note = "Breakout Tiếp Diễn" if active_setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION" else f"SFP {active_setup.get('setup_type')}"
             elif eq > 0:
                 if c >= rh:
-                    tf_dir = "WAIT"
-                    tf_score = 45
-                    note = "Vượt RH — chờ Return to Range"
+                    tf_dir = "LONG" if active_dir == "LONG" else "WAIT"
+                    tf_score = 65 if active_dir == "LONG" else 45
+                    note = "Phá vỡ trên RH" if active_dir == "LONG" else "Vượt RH — chờ Breakout hoặc Return"
                 elif c <= rl:
-                    tf_dir = "WAIT"
-                    tf_score = 45
-                    note = "Thủng RL — chờ Return to Range"
+                    tf_dir = "SHORT" if active_dir == "SHORT" else "WAIT"
+                    tf_score = 65 if active_dir == "SHORT" else 45
+                    note = "Phá vỡ dưới RL" if active_dir == "SHORT" else "Thủng RL — chờ Breakout hoặc Return"
                 elif c > eq and rej["is_bearish_pin"]:
                     tf_dir = "SHORT"
                     tf_score = 65
@@ -326,6 +326,8 @@ class SignalEngine:
 
         if final == "WAIT":
             trade_regime = "NO_TRADE_RANGE"
+        elif setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION":
+            trade_regime = "TREND_FOLLOWING"
         elif is_htf_aligned and setup.get("tf") in ("1d", "4h", "1h") and rr_ratio >= 2.5 and conf >= 84.0:
             trade_regime = "TREND_FOLLOWING"
         else:
@@ -366,7 +368,10 @@ class SignalEngine:
 
         sweep_type = "NONE"
         if setup.get("detected"):
-            sweep_type = "BULLISH_SWEEP" if final == "LONG" else "BEARISH_SWEEP"
+            if setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION":
+                sweep_type = "BULLISH_BREAKOUT" if final == "LONG" else "BEARISH_BREAKOUT"
+            else:
+                sweep_type = "BULLISH_SWEEP" if final == "LONG" else "BEARISH_SWEEP"
         liquidity_sweep = {
             "detected": bool(setup.get("detected", False)),
             "type": sweep_type,

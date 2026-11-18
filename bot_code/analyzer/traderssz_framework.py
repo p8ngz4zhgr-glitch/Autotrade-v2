@@ -544,6 +544,191 @@ class TradersszFramework:
         return max(candidates, key=lambda x: x["score"])
 
     @staticmethod
+    def _scan_tf_breakout(
+        tf_name: str,
+        klines: Optional[Dict[str, List[float]]],
+        range_obj: Dict[str, Any],
+        current_price: float,
+        sl_buffer_pct: float = 0.0020,
+        min_rr: float = 1.5,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Bắt tín hiệu PHÁ VỠ RANGE TIẾP DIỄN XU HƯỚNG (Range Breakout Continuation):
+        - Phá vỡ thật (Acceptance / Nến đóng dứt khoát ngoài biên + Break & Retest), KHÔNG bắt râu giả.
+        - Chỉ kích hoạt khi giá thực sự nằm ngoài biên Range (trên RH để BUY hoặc dưới RL để SELL).
+        """
+        if not klines or len(klines.get("close", [])) < 10:
+            return None
+
+        opens  = klines["open"]
+        highs  = klines["high"]
+        lows   = klines["low"]
+        closes = klines["close"]
+        vols   = klines.get("volume", [1.0] * len(closes))
+
+        rh = float(range_obj["range_high"])
+        rl = float(range_obj["range_low"])
+        r_name = range_obj["name"]
+        r_label = range_obj["label"]
+        r_weight = int(range_obj.get("weight", 2))
+        range_height = rh - rl
+
+        if rh <= rl or range_height <= 0 or current_price <= 0:
+            return None
+        if r_name not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE"):
+            return None
+
+        tf_weight = {"1d": 4, "4h": 4, "1h": 3, "15m": 2}.get(tf_name, 1)
+        avg_vol = sum(vols[-20:-1]) / max(1, len(vols[-20:-1])) if len(vols) >= 6 else 1.0
+        candidates: List[Dict[str, Any]] = []
+
+        # ── A. BULLISH BREAKOUT CONTINUATION (PHÁ ĐỈNH RH -> BUY TIẾP DIỄN) ──
+        if current_price > rh * 1.0010:
+            c2_o, c2_h, c2_l, c2_c = opens[-2], highs[-2], lows[-2], closes[-2]
+            c1_o, c1_h, c1_l, c1_c = opens[-1], highs[-1], lows[-1], closes[-1]
+            c3_c = closes[-3]
+
+            # 1) Acceptance: 2 cây nến liên tiếp đóng trên RH và giữ giá trên RH
+            is_acceptance = (
+                (c2_c > rh * 1.0005 and c1_c > rh * 1.0005 and c1_c >= c1_o)
+                or (c3_c > rh * 1.0005 and c2_c > rh * 1.0005 and current_price > rh * 1.0010)
+            )
+            # 2) Strong expansion close: nến vừa đóng vượt dứt khoát RH >= 0.25%, thân >= 45% biên độ nến
+            c2_span = max(c2_h - c2_l, 1e-9)
+            c2_body = c2_c - c2_o
+            is_strong_break = (
+                c2_body > 0
+                and (c2_body / c2_span) >= 0.45
+                and c2_c > rh * 1.0025
+                and any(pl <= rh * 1.002 for pl in lows[-6:-1])
+            )
+            # 3) Break & Retest: đã có nến đóng trên RH, nhịp test lại sát RH không gãy và bật tăng tiếp
+            had_break = any(pc > rh * 1.001 for pc in closes[-5:-1])
+            is_retest = (
+                had_break
+                and ((c2_l <= rh * 1.0045 and c2_c > rh) or (c1_l <= rh * 1.0045 and current_price > rh * 1.001))
+            )
+
+            if is_acceptance or is_strong_break or is_retest:
+                recent_low = min(lows[-2:])
+                support_anchor = min(rh, recent_low)
+                if (current_price - support_anchor) / current_price > 0.038:
+                    support_anchor = recent_low if recent_low < current_price else rh
+                sl_price = round(support_anchor * (1.0 - sl_buffer_pct), 4)
+                if (current_price - sl_price) / current_price < 0.0040:
+                    sl_price = round(current_price * 0.9960, 4)
+
+                risk = current_price - sl_price
+                sl_pct = risk / current_price
+                if risk > 0 and 0.0035 <= sl_pct <= 0.045:
+                    tp1 = round(max(current_price + risk * 1.25, rh + range_height * 0.50), 4)
+                    tp2 = round(max(current_price + risk * max(min_rr, 2.2), rh + range_height * 1.00), 4)
+                    rr_tp1 = (tp1 - current_price) / risk
+                    rr_tp2 = (tp2 - current_price) / risk
+                    if rr_tp2 >= min_rr and tp2 > tp1 > current_price:
+                        vol_ratio = vols[-2] / avg_vol if avg_vol > 0 else 1.0
+                        sub_mode = "Break & Retest" if is_retest else ("2-Candle Acceptance" if is_acceptance else "Expansion Break")
+                        candidates.append({
+                            "detected": True,
+                            "direction": "LONG",
+                            "tf": tf_name,
+                            "range_name": r_name,
+                            "range_label": r_label,
+                            "setup_type": "RANGE_BREAKOUT_CONTINUATION",
+                            "is_retest": bool(is_retest),
+                            "swept_level": round(rh, 4),
+                            "sweep_extreme": round(support_anchor, 4),
+                            "entry": round(current_price, 4),
+                            "sl": sl_price,
+                            "sl_pct": round(sl_pct * 100, 2),
+                            "tp1": tp1,
+                            "tp2": tp2,
+                            "rr_tp1": round(rr_tp1, 2),
+                            "rr_tp2": round(rr_tp2, 2),
+                            "vol_ratio": round(vol_ratio, 2),
+                            "score": tf_weight * 10 + r_weight * 5 + (6 if is_retest else 2) + (4 if rr_tp2 >= 2.5 else 0),
+                            "reason": (
+                                f"TraderSZ {tf_name.upper()} Bullish Breakout ({sub_mode}): "
+                                f"Phá vỡ dứt khoát đỉnh {r_label} (${rh:.4f}) & giữ vững trên biên -> "
+                                f"BUY tiếp diễn xu hướng tăng (SL ${sl_price:.4f}, TP1 ${tp1:.4f}, TP2 ${tp2:.4f})."
+                            ),
+                        })
+
+        # ── B. BEARISH BREAKOUT CONTINUATION (PHÁ ĐÁY RL -> SELL TIẾP DIỄN) ──
+        if current_price < rl * 0.9990:
+            c2_o, c2_h, c2_l, c2_c = opens[-2], highs[-2], lows[-2], closes[-2]
+            c1_o, c1_h, c1_l, c1_c = opens[-1], highs[-1], lows[-1], closes[-1]
+            c3_c = closes[-3]
+
+            is_acceptance = (
+                (c2_c < rl * 0.9995 and c1_c < rl * 0.9995 and c1_c <= c1_o)
+                or (c3_c < rl * 0.9995 and c2_c < rl * 0.9995 and current_price < rl * 0.9990)
+            )
+            c2_span = max(c2_h - c2_l, 1e-9)
+            c2_body = c2_o - c2_c
+            is_strong_break = (
+                c2_body > 0
+                and (c2_body / c2_span) >= 0.45
+                and c2_c < rl * 0.9975
+                and any(ph >= rl * 0.998 for ph in highs[-6:-1])
+            )
+            had_break = any(pc < rl * 0.999 for pc in closes[-5:-1])
+            is_retest = (
+                had_break
+                and ((c2_h >= rl * 0.9955 and c2_c < rl) or (c1_h >= rl * 0.9955 and current_price < rl * 0.999))
+            )
+
+            if is_acceptance or is_strong_break or is_retest:
+                recent_high = max(highs[-2:])
+                resist_anchor = max(rl, recent_high)
+                if (resist_anchor - current_price) / current_price > 0.038:
+                    resist_anchor = recent_high if recent_high > current_price else rl
+                sl_price = round(resist_anchor * (1.0 + sl_buffer_pct), 4)
+                if (sl_price - current_price) / current_price < 0.0040:
+                    sl_price = round(current_price * 1.0040, 4)
+
+                risk = sl_price - current_price
+                sl_pct = risk / current_price
+                if risk > 0 and 0.0035 <= sl_pct <= 0.045:
+                    tp1 = round(min(current_price - risk * 1.25, rl - range_height * 0.50), 4)
+                    tp2 = round(min(current_price - risk * max(min_rr, 2.2), rl - range_height * 1.00), 4)
+                    if tp2 > 0 and tp2 < tp1 < current_price:
+                        rr_tp1 = (current_price - tp1) / risk
+                        rr_tp2 = (current_price - tp2) / risk
+                        if rr_tp2 >= min_rr:
+                            vol_ratio = vols[-2] / avg_vol if avg_vol > 0 else 1.0
+                            sub_mode = "Break & Retest" if is_retest else ("2-Candle Acceptance" if is_acceptance else "Expansion Break")
+                            candidates.append({
+                                "detected": True,
+                                "direction": "SHORT",
+                                "tf": tf_name,
+                                "range_name": r_name,
+                                "range_label": r_label,
+                                "setup_type": "RANGE_BREAKOUT_CONTINUATION",
+                                "is_retest": bool(is_retest),
+                                "swept_level": round(rl, 4),
+                                "sweep_extreme": round(resist_anchor, 4),
+                                "entry": round(current_price, 4),
+                                "sl": sl_price,
+                                "sl_pct": round(sl_pct * 100, 2),
+                                "tp1": tp1,
+                                "tp2": tp2,
+                                "rr_tp1": round(rr_tp1, 2),
+                                "rr_tp2": round(rr_tp2, 2),
+                                "vol_ratio": round(vol_ratio, 2),
+                                "score": tf_weight * 10 + r_weight * 5 + (6 if is_retest else 2) + (4 if rr_tp2 >= 2.5 else 0),
+                                "reason": (
+                                    f"TraderSZ {tf_name.upper()} Bearish Breakout ({sub_mode}): "
+                                    f"Phá vỡ dứt khoát đáy {r_label} (${rl:.4f}) & giữ dưới biên -> "
+                                    f"SELL tiếp diễn xu hướng giảm (SL ${sl_price:.4f}, TP1 ${tp1:.4f}, TP2 ${tp2:.4f})."
+                                ),
+                            })
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda x: x["score"])
+
+    @staticmethod
     def evaluate_htf_bias(
         htf_data: Dict[str, Any],
         d1_klines: Optional[Dict[str, List[float]]],
@@ -755,14 +940,37 @@ class TradersszFramework:
                 if hit:
                     setups.append(hit)
 
-        # Bảo vệ chuẩn TraderSZ: không đánh SHORT khi Dealing Range chính đang ở DISCOUNT,
-        # và không đánh LONG khi Dealing Range chính đang ở PREMIUM.
+        # Bảo vệ chuẩn TraderSZ:
+        # - Với SFP/Deviation (đánh đảo chiều trong Range): không SHORT ở DISCOUNT, không LONG ở PREMIUM.
+        # - Với Breakout Continuation (phá vỡ dứt khoát ngoài biên Range chính): cho phép BUY trên RH và SELL dưới RL.
         primary_zone = str(htf_data.get("market_zone", "NO_TRADE_EQ_ZONE")).upper()
+        primary_rh = float(htf_data.get("range_high", current_price) or current_price)
+        primary_rl = float(htf_data.get("range_low", current_price) or current_price)
+
         if setups:
             if primary_zone == "DISCOUNT":
                 setups = [s for s in setups if s["direction"] == "LONG"]
             elif primary_zone == "PREMIUM":
                 setups = [s for s in setups if s["direction"] == "SHORT"]
+
+        # Nếu giá đã thoát hẳn ra ngoài Range chính (vượt RH hoặc thủng RL) -> quét Breakout Tiếp Diễn Xu Hướng
+        if (current_price > primary_rh * 1.0010) or (current_price < primary_rl * 0.9990):
+            breakout_tfs = [("4h", h4_klines), ("1h", h1_klines), ("15m", m15_klines), ("1d", d1_klines)]
+            for range_obj in htf_data.get("all_ranges", []):
+                for tf_name, tf_klines in breakout_tfs:
+                    bo_hit = TradersszFramework._scan_tf_breakout(
+                        tf_name=tf_name,
+                        klines=tf_klines,
+                        range_obj=range_obj,
+                        current_price=current_price,
+                        sl_buffer_pct=sl_buffer_pct,
+                        min_rr=min_rr,
+                    )
+                    if bo_hit:
+                        if bo_hit["direction"] == "LONG" and current_price > primary_rh * 1.0010:
+                            setups.append(bo_hit)
+                        elif bo_hit["direction"] == "SHORT" and current_price < primary_rl * 0.9990:
+                            setups.append(bo_hit)
 
         btc_dir_bias = str((btc_bias or {}).get("bias", "NEUTRAL")).upper()
 
@@ -919,13 +1127,13 @@ class TradersszFramework:
         elif zone == "PREMIUM":
             wait_reason = (
                 f"⏳ Vùng PREMIUM ({htf_data.get('range_pos_pct', 70)}% Range): "
-                f"Tuyệt đối không FOMO Long. Đang rình giá quét vượt Range High (${rh:.4f}) rồi đóng nến quay lại vào trong Range để SHORT."
+                f"Đang theo dõi RH (${rh:.4f}): nếu quét râu đóng lại trong Range -> SHORT; nếu phá vỡ dứt khoát & giữ trên RH -> BUY Breakout tiếp diễn."
             )
             wait_conf = 55.0
         else:
             wait_reason = (
                 f"⏳ Vùng DISCOUNT ({htf_data.get('range_pos_pct', 30)}% Range): "
-                f"Tuyệt đối không FOMO Short. Đang rình giá quét thủng Range Low (${rl:.4f}) rồi đóng nến quay lại vào trong Range để LONG."
+                f"Đang theo dõi RL (${rl:.4f}): nếu quét râu đóng lại trong Range -> LONG; nếu phá vỡ dứt khoát & giữ dưới RL -> SELL Breakout tiếp diễn."
             )
             wait_conf = 55.0
 

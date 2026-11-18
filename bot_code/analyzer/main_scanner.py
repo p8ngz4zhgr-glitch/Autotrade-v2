@@ -50,6 +50,13 @@ def _build_traderssz_summary(data: dict) -> str:
         btc_line = f"\n🧭 Đồng pha BTC: {btc_ctx.get('bias', 'NEUTRAL')} ({btc_ctx.get('reason', '')})."
 
     if final_sig in ("LONG", "SHORT") and setup.get("detected"):
+        if setup.get("setup_type") == "RANGE_BREAKOUT_CONTINUATION":
+            return (
+                f"📌 Khung {str(setup.get('tf', '?')).upper()} xác nhận PHÁ VỠ RANGE (Breakout Continuation) "
+                f"tại {setup.get('range_label', htf.get('range_label', '?'))}.\n"
+                f"🚀 Giá phá dứt khoát mốc ${setup.get('swept_level', 0)} và giữ ngoài biên -> Tiếp diễn {final_sig} thuần TraderSZ PA.{btc_line}\n"
+                f"🎯 Kế hoạch: SL ${plan.get('sl', 0)} | TP1 ${plan.get('tp1', 0)} (+Hòa vốn) | TP2 (Mở rộng Range) ${plan.get('tp2', 0)}."
+            )
         return (
             f"📌 Khung {str(setup.get('tf', '?')).upper()} xác nhận {setup.get('setup_type', 'SFP')} "
             f"tại {setup.get('range_label', htf.get('range_label', '?'))}.\n"
@@ -61,13 +68,14 @@ def _build_traderssz_summary(data: dict) -> str:
         f"⏳ Range: {htf.get('range_label', htf.get('range_name', '?'))} "
         f"[${htf.get('range_low', 0)} – EQ ${htf.get('eq_50', 0)} – ${htf.get('range_high', 0)}].\n"
         f"🧭 Phân vùng: {htf.get('market_zone', '?')} | HTF Bias: {htf_bias.get('bias', 'RANGE_NEUTRAL')}.{btc_line}\n"
-        f"💬 {tsz.get('reason', 'Chờ giá quét biên RH/RL rồi đóng ngược lại Range mới vào lệnh.')}"
+        f"💬 {tsz.get('reason', 'Chờ giá quét biên RH/RL quay lại Range hoặc phá vỡ dứt khoát tiếp diễn xu hướng.')}"
     )
 
 
 class SignalBot:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
-    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
+    METALS_SYMBOLS = ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
+    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ"]
 
     def __init__(self):
         self.log = logging.getLogger("SignalBot")
@@ -97,7 +105,7 @@ class SignalBot:
             self.log.info("ℹ️ Scanner sử dụng LocalStore Queue (In-Memory)")
 
     def _cleanup(self):
-        keys = self.CRYPTO_SYMBOLS + self.STOCK_SYMBOLS
+        keys = self.CRYPTO_SYMBOLS + self.METALS_SYMBOLS + self.STOCK_SYMBOLS
         self.last_signals    = {k: v for k, v in self.last_signals.items() if k in keys}
         self._pushed_signals = {k: v for k, v in self._pushed_signals.items() if k in keys}
         gc.collect()
@@ -232,11 +240,19 @@ class SignalBot:
         if self._scan_count % 8 == 0:
             self._cleanup()
 
+    def run_metals(self):
+        try:
+            self.log.info("═" * 45)
+            self.log.info("🥇 Gold & Silver — %s", self.dt.now().strftime("%H:%M:%S"))
+            self._scan(self.METALS_SYMBOLS, "GOLD · SILVER (3m)")
+        except Exception as e:
+            self.log.error("❌ run_metals: %s", e)
+
     def run_stocks(self):
         try:
             self.log.info("═" * 45)
-            self.log.info("📈 Stock+Gold+Silver — %s", self.dt.now().strftime("%H:%M:%S"))
-            self._scan(self.STOCK_SYMBOLS, "STOCK+GOLD+SILVER")
+            self.log.info("📈 Stock — %s", self.dt.now().strftime("%H:%M:%S"))
+            self._scan(self.STOCK_SYMBOLS, "US STOCKS")
         except Exception as e:
             self.log.error("❌ run_stocks: %s", e)
 
@@ -258,8 +274,8 @@ class SignalBot:
                 rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym[:4] + "</b> <code>$" +
                              str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
                              str(d["confidence"]) + "% [" + bar + "] " + ZONE_IC.get(zn, "⚪") + f"{zn} (EQ:${eq})")
-            rows.append("\n📈 <b>CỔ PHIẾU · VÀNG · BẠC</b>")
-            for sym in self.STOCK_SYMBOLS:
+            rows.append("\n📈 <b>VÀNG · BẠC · CỔ PHIẾU</b>")
+            for sym in self.METALS_SYMBOLS + self.STOCK_SYMBOLS:
                 d = self.last_signals.get(sym)
                 if not d or not d.get("final"): continue
                 htf = d.get("traderssz", {}).get("htf_opens_and_ranges", {})
@@ -290,13 +306,14 @@ class SignalBot:
 
     def _build_schedule(self):
         schedule.clear()
-        # Chế độ Scalping M5: Quét crypto mỗi 3 phút để bắt kịp nhịp nến 5m
+        # Quét Crypto & Vàng/Bạc mỗi 3 phút; Cổ phiếu Mỹ giữ 30 phút
         crypto_interval = 3 if getattr(cfg, "M5_SCALP_MODE", True) else 15
         schedule.every(crypto_interval).minutes.do(self.run_crypto)
+        schedule.every(3).minutes.do(self.run_metals)
         schedule.every(30).minutes.do(self.run_stocks)
         schedule.every().hour.at(":30").do(self._hourly_report)
         schedule.every(4).minutes.do(self._self_ping)
-        self.log.info("📅 Đã cài đặt lịch quét: Crypto/%dp (M5 Scalp Mode: %s)", crypto_interval, getattr(cfg, "M5_SCALP_MODE", True))
+        self.log.info("📅 Đã cài đặt lịch quét: Crypto/%dp | Vàng-Bạc/3p | Stock/30p", crypto_interval)
 
     def start(self):
         self.log.info("━" * 45)
@@ -305,6 +322,7 @@ class SignalBot:
 
         self._self_ping()
         self.run_crypto()
+        self.run_metals()
         self.run_stocks()
 
         self._build_schedule()
