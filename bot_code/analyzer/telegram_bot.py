@@ -190,7 +190,7 @@ class TelegramBot:
                   "WAIT": "🟡 ⏳ <b>TRADERSZ CHỜ QUÉT BIÊN RANGE</b>"}
         AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇", "SILVER": "🥈"}
         ANAME  = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "BNBUSDT": "BNB Chain",
-                  "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla", "NVDA": "NVIDIA",
+                  "SOLUSDT": "Solana", "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla", "NVDA": "NVIDIA",
                   "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF",
                   "NCCOGOLD2USD-USDT": "Vàng (XAU)",
                   "NCCOXAG2USD-USDT": "Bạc (XAG)", "NCCOXAG2USDUSDT": "Bạc (XAG)"}

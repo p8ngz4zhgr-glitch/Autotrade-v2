@@ -11,6 +11,7 @@ const SYMBOLS = [
   { name: "BTCUSDT", price: 92850.5, defaultLev: 15, step: 0.5, decimal: 1, type: "CRYPTO", atrM5: 185.0 },
   { name: "ETHUSDT", price: 3452.2, defaultLev: 15, step: 0.1, decimal: 2, type: "CRYPTO", atrM5: 12.5 },
   { name: "BNBUSDT", price: 612.4, defaultLev: 12, step: 0.05, decimal: 2, type: "CRYPTO", atrM5: 2.8 },
+  { name: "SOLUSDT", price: 185.4, defaultLev: 12, step: 0.05, decimal: 2, type: "CRYPTO", atrM5: 1.4 },
   { name: "HYPEUSDT", price: 18.25, defaultLev: 12, step: 0.01, decimal: 3, type: "CRYPTO", atrM5: 0.15 },
   { name: "XAUUSD", price: 2364.8, defaultLev: 50, step: 0.1, decimal: 2, type: "GOLD", atrM5: 4.2 },
   { name: "NCCOXAG2USDUSDT", price: 31.5, defaultLev: 50, step: 0.01, decimal: 3, type: "SILVER", atrM5: 0.12 },
@@ -1523,7 +1524,7 @@ log = logging.getLogger("QuantMath")
 class QuantRiskManager:
     def __init__(self):
         self.correlation_matrix = {
-            "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"],
+            "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"],
             "TECH_STOCKS": ["QQQ", "NVDA", "TSLA"],
             "BROAD_MARKET": ["SPY"],
             "SAFE_HAVEN": ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
@@ -1687,7 +1688,7 @@ from analyzer.config import Config
 cfg = Config()
 
 class SignalBot:
-    CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"]
+    CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"]
     STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ", "NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
 
     def __init__(self):

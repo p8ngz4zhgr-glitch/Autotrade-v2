@@ -8,7 +8,7 @@ class QuantRiskManager:
         # Ma trận hệ số tương quan đơn giản hóa (Mô phỏng Markowitz)
         # Giúp giảm rủi ro danh mục: Tránh nhồi lệnh vào các mã đi chung xu hướng
         self.correlation_matrix = {
-            "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "HYPEUSDT"],
+            "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"],
             "TECH_STOCKS": ["QQQ", "NVDA", "TSLA"],
             "BROAD_MARKET": ["SPY"],
             "SAFE_HAVEN": ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT", "NCCOXAG2USDUSDT"]
