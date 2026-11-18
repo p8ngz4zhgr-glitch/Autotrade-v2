@@ -101,9 +101,6 @@ class ScalpM5RiskManager:
         self.check_and_reset_day()
         now = time.time()
 
-        if self.is_daily_stopped:
-            return False, f"🛑 Đã chạm ngưỡng cắt lỗ tối đa trong ngày (-${self.daily_max_loss_usd:.2f}). Bảo toàn vốn!"
-
         if self.is_daily_target_reached:
             return False, f"🎉 Đã đạt mục tiêu lợi nhuận trong ngày (${self.daily_pnl_usd:.2f} >= ${self.daily_target_usd:.2f}). Khóa lãi thành công!"
 
@@ -286,14 +283,8 @@ class ScalpM5RiskManager:
             log.warning("🛑 Lỗ lệnh! PnL -$%.2f. Tổng ngày: $%.2f / $%.2f (Thua liên tiếp: %d)",
                         abs(pnl_usd), self.daily_pnl_usd, self.daily_target_usd, self.consecutive_losses)
 
-            # Kiểm tra chạm lỗ tối đa trong ngày (Daily Loss Circuit Breaker)
-            if self.daily_pnl_usd <= -self.daily_max_loss_usd:
-                self.is_daily_stopped = True
-                log.error("🚨 EMERGENCY: Đã chạm ngưỡng cắt lỗ ngày (-$%.2f)! Kích hoạt Circuit Breaker dừng bot ngay.",
-                          self.daily_max_loss_usd)
-
             # Kiểm tra chuỗi thua liên tiếp
-            elif self.consecutive_losses >= self.consecutive_loss_limit:
+            if self.consecutive_losses >= self.consecutive_loss_limit:
                 self.cooldown_until = time.time() + self.cooldown_seconds
                 log.warning("⚠️ Thua %d lệnh liên tiếp. Kích hoạt Cooldown nghỉ %d phút tránh whipsaw thị trường.",
                             self.consecutive_losses, self.cooldown_seconds // 60)

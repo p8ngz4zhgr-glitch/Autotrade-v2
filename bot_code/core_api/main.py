@@ -1699,14 +1699,7 @@ def _execute_for_user(user: User, signal: dict):
         except Exception as ex_pnl:
             log.debug("Lỗi tính PnL 24h: %s", ex_pnl)
 
-        # 1. Chặn lỗ tối đa trong ngày (Daily Loss Circuit Breaker)
-        max_daily_loss = float(os.getenv("DAILY_MAX_LOSS_USD", "15.0"))
-        if today_pnl <= -max_daily_loss:
-            log.error("🚨 [CIRCUIT BREAKER] User %s: Đã chạm ngưỡng cắt lỗ tối đa ngày (-$%.2f)! Dừng vào lệnh để bảo toàn vốn 100%%.",
-                      user.telegram_id, max_daily_loss)
-            return
-
-        # 2. Khóa lợi nhuận khi đạt mục tiêu ngày ($20 - $50 USD)
+        # 1. Khóa lợi nhuận khi đạt mục tiêu ngày ($20 - $50 USD)
         target_daily = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
         if today_pnl >= target_daily:
             log.info("🏆 [TARGET LOCK] User %s đã đạt mục tiêu ngày (+%.2f USD >= $%.2f). Tự động KHÓA LỢI NHUẬN để bảo toàn thành quả!",
