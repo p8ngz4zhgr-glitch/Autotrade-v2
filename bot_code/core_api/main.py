@@ -102,12 +102,12 @@ def _get_user_sym_lock(user_id: str, sym: str) -> threading.Lock:
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 68.0, "max_risk_pct": 2.0,
+        "min_confidence": 68.0, "max_risk_pct": 1.25,
         "max_positions": 7, "leverage": 10, "target_monthly": "8-12%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
-        "min_confidence": 70.0, "max_risk_pct": 1.5,
+        "min_confidence": 70.0, "max_risk_pct": 1.25,
         "max_positions": 7, "leverage": 10, "target_monthly": "6-10%",
     },
     "TIER3": {
@@ -116,7 +116,7 @@ TIER_CONFIG = {
         "max_positions": 7, "leverage": 10, "target_monthly": "5-8%",
     },
 }
-MIN_CAPITAL_TO_TRADE = 20.0
+MIN_CAPITAL_TO_TRADE = 10.0
 
 def get_tier(capital: float) -> Optional[str]:
     if capital < MIN_CAPITAL_TO_TRADE:
@@ -586,8 +586,9 @@ def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 10, sl_pc
 
 log = logging.getLogger("ReversalEvaluator")
 
-ORDER_MARGIN_MIN_USD = float(os.getenv("ORDER_MARGIN_MIN_USD", "20.0"))
-ORDER_MARGIN_MAX_USD = float(os.getenv("ORDER_MARGIN_MAX_USD", "30.0"))
+MAX_SINGLE_MARGIN_RATIO = float(os.getenv("MAX_SINGLE_MARGIN_RATIO", "0.14"))
+MAX_SINGLE_RISK_CAP_PCT = float(os.getenv("MAX_SINGLE_RISK_CAP_PCT", "1.80"))
+MIN_EXCHANGE_NOTIONAL_USD = float(os.getenv("MIN_EXCHANGE_NOTIONAL_USD", "5.5"))
 
 
 def _calc_order_sizing(
@@ -598,12 +599,21 @@ def _calc_order_sizing(
     leverage: int,
     confidence: float = 75.0,
     size_mult: float = 1.0,
+    setup_type: str = "",
+    rr_ratio: float = 1.5,
+    is_htf_aligned: bool = False,
+    open_positions_count: int = 0,
 ) -> tuple[float, float, float]:
     """
-    Tính khối lượng lệnh sao cho:
-    - Tỉ lệ vốn ký quỹ (Margin) nằm trong vùng mục tiêu $20 - $30 USD / lệnh.
-    - Tự động co theo độ tin cậy tín hiệu & hệ số vĩ mô (news/Fed), nhưng không tụt dưới $20
-      (trừ khi 30% vốn tài khoản nhỏ hơn $20) và không vượt $30 hoặc 30% vốn.
+    Tính khối lượng linh động theo chuẩn Risk-Based Sizing của TraderSZ:
+    - KHÔNG ép cứng margin $20-$30/lệnh (tránh cháy nặng trên Vàng/Bạc x50 hoặc vốn nhỏ $20-$30).
+    - Khối lượng được tính trực tiếp từ Rủi ro tối đa cho phép khi dính SL:
+        Risk_USD = Capital * Effective_Risk_Pct
+        Notional_USD = Risk_USD / sl_pct
+        Margin_USD = Notional_USD / Leverage
+    - Linh động co giãn Risk % theo chất lượng Setup TraderSZ (A+ / A / Breakout B),
+      số vị thế đang mở (Portfolio Heat trên tổng 7 lệnh), và hệ số vĩ mô/tin tức/Monday.
+    - Chặn trần ký quỹ <= 14% vốn mỗi lệnh để đủ sức chứa an toàn tối đa 7 vị thế đồng thời.
     Trả về: (qty, req_margin_usd, risk_amt_usd)
     """
     cap = max(0.0, float(capital or 0))
@@ -611,26 +621,60 @@ def _calc_order_sizing(
     if cap <= 0 or entry <= 0 or sl_pct <= 0:
         return 0.0, 0.0, 0.0
 
-    risk_amt = cap * (float(max_risk_pct or 2.0) / 100.0)
-    base_qty = (risk_amt / (entry * sl_pct)) * max(0.5, float(size_mult or 1.0))
-    base_margin = (base_qty * entry) / lev
+    # 1. Risk % nền được giữ an toàn trong [0.5%, 1.5%] bất kể tier cũ đặt 2.0%
+    base_risk_pct = max(0.50, min(1.50, float(max_risk_pct or 1.25)))
 
-    max_safe_cap = cap * 0.30
-    target_min = min(ORDER_MARGIN_MIN_USD, max_safe_cap)
-    target_max = min(ORDER_MARGIN_MAX_USD, max_safe_cap)
+    # 2. Hệ số chất lượng Setup TraderSZ (A+ Sweep/Deviation vs A vs Breakout B)
+    conf_val = float(confidence or 75.0)
+    rr_val = float(rr_ratio or 1.5)
+    stype = str(setup_type or "").upper()
+    if stype == "RANGE_BREAKOUT_CONTINUATION" or conf_val < 76.0 or (stype == "LEVEL_RECLAIM_SR_FLIP" and conf_val < 82.0):
+        quality_mult = 0.75
+    elif conf_val >= 86.0 and rr_val >= 2.5 and (is_htf_aligned or rr_val >= 3.0) and stype in (
+        "SFP_WICK_REJECTION", "DEVIATION_RETURN_TO_RANGE", ""
+    ):
+        quality_mult = 1.20
+    else:
+        quality_mult = 1.00
 
-    quality_ratio = max(0.0, min(1.0, (float(confidence or 75.0) - 65.0) / 30.0))
-    band_margin = target_min + (target_max - target_min) * quality_ratio
-    if size_mult < 1.0:
-        band_margin = max(target_min, band_margin * max(0.75, float(size_mult)))
+    # 3. Hệ số giảm nhiệt danh mục (Portfolio Heat) khi đã giữ nhiều vị thế trong tổng 7 slot
+    open_cnt = max(0, int(open_positions_count or 0))
+    if open_cnt >= 5:
+        heat_mult = 0.75
+    elif open_cnt >= 3:
+        heat_mult = 0.88
+    else:
+        heat_mult = 1.00
 
-    req_margin = max(base_margin, band_margin)
-    if target_min > 0:
-        req_margin = max(req_margin, target_min)
-    if target_max > 0:
-        req_margin = min(req_margin, target_max)
+    # 4. Hệ số vĩ mô (News / Monday Forming / Fed Policy)
+    macro_mult = max(0.45, min(1.15, float(size_mult or 1.0)))
 
-    qty = round((req_margin * lev) / entry, 4)
+    eff_risk_pct = max(0.40, min(MAX_SINGLE_RISK_CAP_PCT, base_risk_pct * quality_mult * heat_mult * macro_mult))
+    risk_amt = cap * (eff_risk_pct / 100.0)
+
+    # 5. Tính Notional & Margin nghịch đảo theo độ rộng SL (SL rộng -> Margin tự nhỏ lại)
+    notional_usd = risk_amt / sl_pct
+    req_margin = notional_usd / lev
+
+    # Trần ký quỹ tối đa 14% vốn mỗi lệnh (7 lệnh * 14% = 98% tổng vốn an toàn)
+    max_margin_cap = cap * MAX_SINGLE_MARGIN_RATIO
+    if max_margin_cap > 0 and req_margin > max_margin_cap:
+        req_margin = max_margin_cap
+        notional_usd = req_margin * lev
+
+    # Bảo đảm đủ min notional tối thiểu của sàn (~$5.5 notional = ~$0.11-$0.55 margin) cho tài khoản $20-$30
+    if notional_usd < MIN_EXCHANGE_NOTIONAL_USD:
+        min_notional_risk = MIN_EXCHANGE_NOTIONAL_USD * sl_pct
+        min_notional_margin = MIN_EXCHANGE_NOTIONAL_USD / lev
+        if min_notional_risk <= cap * 0.035 and min_notional_margin <= cap * 0.35:
+            notional_usd = MIN_EXCHANGE_NOTIONAL_USD
+            req_margin = min_notional_margin
+        else:
+            return 0.0, 0.0, 0.0
+
+    qty = round(notional_usd / entry, 5)
+    if qty <= 0:
+        return 0.0, 0.0, 0.0
     actual_margin = round((qty * entry) / lev, 2)
     actual_risk = round(qty * entry * sl_pct, 2)
     return qty, actual_margin, actual_risk
@@ -942,7 +986,15 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         emoji = "🛡️"
         action_type = ""
 
-        DYNAMIC_SL_LIMIT = -35.0
+        DYNAMIC_SL_LIMIT = -82.0
+        planned_sl = float(plan.get("sl", 0) or 0)
+        breached_planned_sl = (
+            planned_sl > 0
+            and (
+                (direction == "LONG" and current_price <= planned_sl * 0.9985)
+                or (direction == "SHORT" and current_price >= planned_sl * 1.0015)
+            )
+        )
 
         # 🚨 [TẦNG ƯU TIÊN 0]: PHẢN XẠ CHỐT TỪNG MỐC TP TRADERSZ (TP1 = 50% EQ -> DỜI HÒA VỐN, TP2 = BIÊN ĐỐI DIỆN)
         next_tp = tp_levels[tp_progress] if tp_progress < len(tp_levels) else None
@@ -957,25 +1009,24 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                           f"Xử lý TP{next_tp['level']} & dời SL về Hòa vốn bảo vệ phần còn lại.")
 
         if action != "SCALE_OUT":
-            # Bảo vệ cắt lỗ an toàn tối đa (-35% ROE) khi SL sàn bị trượt
-            if pnl_pct <= DYNAMIC_SL_LIMIT:
+            # Bảo vệ cắt lỗ dự phòng khi giá vượt qua SL kế hoạch (hoặc ROE sập <= -82% khẩn cấp), không cắt sớm bên trong SL râu
+            if breached_planned_sl or pnl_pct <= DYNAMIC_SL_LIMIT:
                 action = "CLOSE_ALL"
-                action_type = "CẮT LỖ BẢO VỆ VỐN (VIRTUAL SL TOÀN DIỆN)"
+                action_type = "CẮT LỖ BẢO VỆ VỐN (VƯỢT SL KẾ HOẠCH)"
                 emoji = "🚨"
-                reason = f"Trạng thái âm {pnl_pct:.2f}% vượt ngưỡng lỗ tối đa ({DYNAMIC_SL_LIMIT}%) -> Cắt lỗ bảo toàn tài khoản."
+                reason = f"Giá ${current_price:.4f} vượt SL kế hoạch (${planned_sl:.4f}, ROE {pnl_pct:.2f}%) -> Cắt lỗ bảo toàn tài khoản."
             else:
                 # 🛡️ FAILED BREAKOUT KILL-SWITCH (TraderSZ):
-                # Nếu vị thế đang giữ là BREAKOUT CONTINUATION mà giá đóng quay ngược lại vào trong Range
-                # hoặc xuất hiện tín hiệu ngược dạng Return-to-Range/SFP -> Cắt nhanh Breakout giả & đảo chiều!
+                # Chỉ đóng không đảo khi giá gãy sâu > 0.85% quay lại vào trong Range (tránh cắt nhầm nhịp retest biên 0.25%)
                 held_setup_type = str((ep_data or {}).get("setup_type", "") or "")
                 held_swept_lvl = float((ep_data or {}).get("swept_level", 0) or 0)
                 new_setup_obj = (analysis.get("traderssz", {}) or {}).get("setup", {}) or {}
                 new_setup_type = str(new_setup_obj.get("setup_type", "") or "")
                 is_failed_bo_close = False
                 if held_setup_type == "RANGE_BREAKOUT_CONTINUATION" and held_swept_lvl > 0:
-                    if direction == "LONG" and current_price < held_swept_lvl * 0.9975:
+                    if direction == "LONG" and current_price < held_swept_lvl * 0.9915:
                         is_failed_bo_close = True
-                    elif direction == "SHORT" and current_price > held_swept_lvl * 1.0025:
+                    elif direction == "SHORT" and current_price > held_swept_lvl * 1.0085:
                         is_failed_bo_close = True
 
                 min_conf = float(getattr(user, "min_confidence", 68) or 68)
@@ -1155,8 +1206,12 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         if sl_pct >= 0.001:
                             new_p_win = analysis.get("bayes_ev", {}).get("p_win", 50) / 100
                             new_rr    = analysis.get("rr_ratio", 1.5)
+                            rev_tsz = analysis.get("traderssz", {}) or {}
+                            rev_setup_obj = rev_tsz.get("setup", {}) or {}
                             rev_lev, rev_reason, _ = calculate_dynamic_leverage(analysis, user.leverage or 10, sl_pct)
-                            new_qty, rev_margin, _ = _calc_order_sizing(
+                            with _POS_LOCK:
+                                rev_open_cnt = sum(1 for lp in LIVE_POSITIONS if str(lp.get("user_id")) == str(user.telegram_id))
+                            new_qty, rev_margin, rev_risk_amt = _calc_order_sizing(
                                 capital=user.capital,
                                 max_risk_pct=user.max_risk_pct,
                                 entry=new_entry,
@@ -1164,6 +1219,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                 leverage=rev_lev,
                                 confidence=conf,
                                 size_mult=1.0,
+                                setup_type=str(rev_setup_obj.get("setup_type", "")),
+                                rr_ratio=float(new_rr or 1.5),
+                                is_htf_aligned=bool(rev_tsz.get("is_htf_aligned", False)),
+                                open_positions_count=max(0, rev_open_cnt - 1),
                             )
 
                             if new_qty > 0:
@@ -1178,6 +1237,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                     actual_rev_margin = round((actual_rev_qty * new_entry) / max(1, rev_lev), 2)
                                     actual_rev_sl = float(rev_res.get("sl_price") or new_sl)
                                     actual_rev_tp = float(rev_res.get("tp_price") or new_tp2)
+                                    actual_rev_risk = round(actual_rev_qty * abs(new_entry - actual_rev_sl), 2)
                                     if cache:
                                         try:
                                             for sv in _sym_variants(sym):
@@ -1201,12 +1261,13 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                                             pass
                                     sl_tag = "✅" if rev_res.get("sl_ok", True) else "⚠️(đang tự đồng bộ)"
                                     tp_tag = "✅" if rev_res.get("tp_ok", True) else "⚠️(đang tự đồng bộ)"
+                                    rev_risk_pct = (actual_rev_risk / user.capital * 100.0) if user.capital > 0 else 0.0
                                     _tg_send(
                                         REGISTER_TOKEN, user.telegram_id,
                                         f"🔄 <b>ĐẢO CHIỀU VÀO LỆNH MỚI: {sym}</b>\n"
                                         f"📈 {new_direction} | Conf: {conf:.1f}%\n"
                                         f"⚡ Đòn bẩy: <b>{rev_lev}x</b> ({rev_reason})\n"
-                                        f"💰 Qty: {actual_rev_qty:.4f} | Margin: ~${actual_rev_margin:.2f}\n"
+                                        f"💰 Qty: {actual_rev_qty:.4f} | Margin: ~${actual_rev_margin:.2f} | Risk: ~${actual_rev_risk:.2f} ({rev_risk_pct:.2f}% vốn)\n"
                                         f"🛑 SL: <code>${actual_rev_sl:.4f}</code> {sl_tag}\n"
                                         f"🎯 TP1: <code>${new_tp1:.4f}</code> | TP2: <code>${actual_rev_tp:.4f}</code> {tp_tag}"
                                     )
@@ -1371,16 +1432,18 @@ def sync_bingx_positions():
                         sl   = trig.get("sl", ep_sl)
                         tp2  = trig.get("tp2", ep_tp2)
                         tp1  = ep_tp1
-                        pnl  = p.get("pnl", 0)
-                        margin = user.capital * (user.max_risk_pct / 100)
-                        pct  = round(pnl / margin * 100, 2) if margin > 0 else 0
+                        pnl  = float(p.get("pnl", 0) or 0)
+                        pos_lev = 50 if _is_precious_metal(sym) else max(10, int(user.leverage or 10))
+                        pos_margin = ((pos_qty * pos_entry) / pos_lev) if (pos_qty > 0 and pos_entry > 0 and pos_lev > 0) else (user.capital * (user.max_risk_pct / 100))
+                        pct  = round(pnl / pos_margin * 100, 2) if pos_margin > 0 else 0
 
                         pos_key = f"{tid}_{sym}_{p.get('direction', 'LONG')}"
                         current_map[pos_key] = {
                             "direction": p.get("direction", "LONG"), "pct": pct,
                             "qty": p.get("qty", 0), "user_id": tid,
                             "entry": p.get("entry", 0), "sl": sl, "tp2": tp2,
-                            "leverage": 50 if _is_precious_metal(sym) else max(10, int(user.leverage or 10))
+                            "margin": pos_margin, "pnl_usd": pnl,
+                            "leverage": pos_lev
                         }
                         current_all.append({
                             "user_id": tid, "tier": user.tier, "capital": user.capital,
@@ -1475,13 +1538,17 @@ def sync_bingx_positions():
                                 outcome_emoji = "🛡️"
                                 outcome_text = "HOÀ VỐN / ĐÓNG THỦ CÔNG"
 
-                            pnl_usd = 0
+                            pnl_usd = 0.0
                             try:
-                                user_db = db.query(User).filter(User.telegram_id == user_id).first()
-                                if user_db:
-                                    pnl_usd = user_db.capital * (user_db.max_risk_pct / 100) * pnl_pct / 100
+                                pos_margin_prev = float(v.get("margin", 0) or 0)
+                                if pos_margin_prev > 0:
+                                    pnl_usd = pos_margin_prev * pnl_pct / 100.0
+                                else:
+                                    user_db = db.query(User).filter(User.telegram_id == user_id).first()
+                                    if user_db:
+                                        pnl_usd = user_db.capital * (user_db.max_risk_pct / 100) * pnl_pct / 100
                             except Exception as e:
-                                log.error("Error getting user_db for closing notification: %s", e)
+                                log.error("Error computing closed pnl_usd: %s", e)
 
                             close_msg = (
                                 f"{outcome_emoji} <b>VỊ THẾ ĐÃ ĐÓNG: {symbol}</b>\n\n"
@@ -1495,7 +1562,7 @@ def sync_bingx_positions():
                             if ADMIN_CHAT_ID and str(user_id) != str(ADMIN_CHAT_ID):
                                 _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user_id}</code>:\n" + close_msg)
 
-                        _save_journal(user_id, symbol, direction, pnl_pct, qty)
+                        _save_journal(user_id, symbol, direction, pnl_pct, qty, pnl_usd=pnl_usd if not was_reversal else None)
 
             sync_bingx_positions._prev = current_map
 
@@ -1515,13 +1582,14 @@ def sync_bingx_positions():
         time.sleep(30)
 
 
-def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty: float):
+def _save_journal(user_id: str, symbol: str, direction: str, pnl_pct: float, qty: float, pnl_usd: float = None):
     db = SessionLocal()
     try:
             user    = db.query(User).filter(User.telegram_id == user_id).first()
             tier    = user.tier if user else "TIER1"
             capital = user.capital if user else 0
-            pnl_usd = capital * (user.max_risk_pct / 100) * pnl_pct / 100 if user else 0
+            if pnl_usd is None:
+                pnl_usd = capital * (user.max_risk_pct / 100) * pnl_pct / 100 if user else 0
 
             result = "WIN" if pnl_pct > 0 else "LOSS"
             lesson = (f"Lệnh {direction} {result} {round(abs(pnl_pct),2)}%. "
@@ -1846,7 +1914,11 @@ def _execute_for_user(user: User, signal: dict):
         log.info("⚡ [DYNAMIC LEVERAGE] User %s | %s %s: Lev=%dx (%s)",
                  user.telegram_id, direction, sym, effective_leverage, lev_reason)
 
-        # 4. TỈ LỆ VỐN KÝ QUỸ MỖI LỆNH ($20 - $30 USD, tối đa 30% vốn)
+        # 4. TỈ LỆ VỐN LINH ĐỘNG THEO RỦI RO SL & CHẤT LƯỢNG SETUP TRADERSZ
+        sig_tsz = signal.get("traderssz", {}) or {}
+        sig_setup_obj = sig_tsz.get("setup", {}) or {}
+        sig_setup_type = str(sig_setup_obj.get("setup_type", ""))
+        sig_rr_val = float(signal.get("rr_ratio", 1.5) or 1.5)
         qty, req_margin, risk_amt = _calc_order_sizing(
             capital=user.capital,
             max_risk_pct=user.max_risk_pct,
@@ -1855,9 +1927,16 @@ def _execute_for_user(user: User, signal: dict):
             leverage=effective_leverage,
             confidence=float(signal.get("confidence", 75.0)),
             size_mult=size_mult_combined,
+            setup_type=sig_setup_type,
+            rr_ratio=sig_rr_val,
+            is_htf_aligned=bool(sig_tsz.get("is_htf_aligned", False)),
+            open_positions_count=total_pos,
         )
-        log.info("💰 [ORDER SIZING] User %s | %s %s: Margin=$%.2f ($20-$30) | Qty=%.4f | Lev=%dx",
-                 user.telegram_id, direction, sym, req_margin, qty, effective_leverage)
+        risk_pct_cap = (risk_amt / user.capital * 100.0) if user.capital > 0 else 0.0
+        log.info(
+            "💰 [ORDER SIZING] User %s | %s %s: Margin=$%.2f | Risk=$%.2f (%.2f%% vốn) | Qty=%.4f | Lev=%dx | Setup=%s | Open=%d/7",
+            user.telegram_id, direction, sym, req_margin, risk_amt, risk_pct_cap, qty, effective_leverage, sig_setup_type or "PA", total_pos
+        )
 
         if qty <= 0:
             return
@@ -1891,6 +1970,8 @@ def _execute_for_user(user: User, signal: dict):
             actual_margin = round((actual_qty * entry) / max(1, effective_leverage), 2)
             actual_sl  = float(res.get("sl_price") or sl)
             actual_tp  = float(res.get("tp_price") or tp2)
+            actual_risk = round(actual_qty * abs(entry - actual_sl), 2) if actual_sl > 0 else risk_amt
+            actual_risk_pct = (actual_risk / user.capital * 100.0) if user.capital > 0 else 0.0
             sl_ok      = res.get("sl_ok", False)
             tp_ok      = res.get("tp_ok", False)
 
@@ -1921,8 +2002,8 @@ def _execute_for_user(user: User, signal: dict):
                 except Exception:
                     pass
 
-            log.info("OK %s: %s %s qty=%.4f margin=$%.2f lev=%dx sl_ok=%s tp_ok=%s (%s)",
-                     user.telegram_id, direction, sym, actual_qty, actual_margin, effective_leverage, sl_ok, tp_ok, lev_reason)
+            log.info("OK %s: %s %s qty=%.4f margin=$%.2f risk=$%.2f(%.2f%%) lev=%dx sl_ok=%s tp_ok=%s (%s)",
+                     user.telegram_id, direction, sym, actual_qty, actual_margin, actual_risk, actual_risk_pct, effective_leverage, sl_ok, tp_ok, lev_reason)
             news_notice = ""
             if news_risk.get("active"):
                 news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - news_risk.get('size_mult', 0.5)) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
@@ -1946,7 +2027,7 @@ def _execute_for_user(user: User, signal: dict):
                 f"📈 {direction} | Conf: {signal.get('confidence',0):.1f}%\n"
                 f"⚡ Đòn bẩy: <b>{lev_tag}</b>\n"
                 f"💰 Qty: {actual_qty:.4f} | Margin: ~${actual_margin:.2f}{news_notice}\n"
-                f"🛑 SL: <code>${actual_sl:.4f}</code> ({sl_badge}) | Risk: ${risk_amt:.2f}\n"
+                f"🛑 SL: <code>${actual_sl:.4f}</code> ({sl_badge}) | Risk: ~${actual_risk:.2f} ({actual_risk_pct:.2f}% vốn)\n"
                 f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
                 f"🏆 TP2: <code>${actual_tp:.4f}</code> ({tp_badge}) → đích 50% còn lại")
         else:

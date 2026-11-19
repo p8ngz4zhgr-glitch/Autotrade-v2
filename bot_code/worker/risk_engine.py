@@ -27,9 +27,9 @@ class ScalpM5RiskManager:
         self,
         daily_target_usd: float = 30.0,       # Mục tiêu lợi nhuận $20 - $50/ngày (mặc định $30)
         daily_max_loss_usd: float = 15.0,     # Chặn lỗ tối đa trong ngày (15$ hoặc 3% vốn)
-        risk_per_trade_pct: float = 1.0,      # Rủi ro tối đa mỗi lệnh: 1% vốn
+        risk_per_trade_pct: float = 1.25,     # Rủi ro tối đa mỗi lệnh: 1.25% vốn
         max_leverage: int = 20,               # Đòn bẩy tối đa cho Crypto/Stock (10x - 20x; Vàng/Bạc x50)
-        max_margin_ratio: float = 0.30,       # Ký quỹ mỗi lệnh không vượt quá 30% tổng tài khoản
+        max_margin_ratio: float = 0.15,       # Ký quỹ mỗi lệnh không vượt quá 15% tổng tài khoản (an toàn cho 7 lệnh)
         consecutive_loss_limit: int = 3,      # Tạm dừng nếu thua liên tiếp 3 lệnh
         cooldown_seconds: int = 3600          # Thời gian nghỉ sau khi chạm giới hạn (60 phút)
     ):
@@ -188,19 +188,12 @@ class ScalpM5RiskManager:
             safe_max_lev = min(self.max_leverage, target_lev, max(10, int(round(0.60 / sl_pct))))
             actual_leverage = max(10, min(20, safe_max_lev))
 
-        # Ký quỹ yêu cầu (Mục tiêu $20 - $30 USD mỗi lệnh, không vượt 30% vốn)
+        # Ký quỹ linh động theo Risk/SL: KHÔNG ép sàn cứng $20-$30, chỉ chặn trần <= 15% vốn mỗi lệnh
         required_margin = notional_usd / actual_leverage
         max_allowed_margin = capital * self.max_margin_ratio
-        target_min_margin = min(20.0, max_allowed_margin)
-        target_max_margin = min(30.0, max_allowed_margin)
 
-        if required_margin < target_min_margin:
-            required_margin = target_min_margin
-            notional_usd = required_margin * actual_leverage
-            contract_qty = notional_usd / entry_price
-            risk_amount_usd = notional_usd * sl_pct
-        elif required_margin > target_max_margin:
-            required_margin = target_max_margin
+        if required_margin > max_allowed_margin and max_allowed_margin > 0:
+            required_margin = max_allowed_margin
             notional_usd = required_margin * actual_leverage
             contract_qty = notional_usd / entry_price
             risk_amount_usd = notional_usd * sl_pct

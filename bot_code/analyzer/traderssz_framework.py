@@ -440,16 +440,30 @@ class TradersszFramework:
                 all_ranges.append(swing_rng)
 
         # Chọn Dealing Range chính làm bối cảnh tổng quan:
-        # Ưu tiên PDH/PDL -> Monday Range -> Weekly Range -> Active Swing Range.
+        # Ưu tiên Range mà giá hiện tại đang nằm bên trong hoặc sát biên (±35% chiều cao Range & <= 2.5%),
+        # tránh bám vào Daily Range đã quá xa (ví dụ -179% ngoài biên) khi Weekly/Swing Range vẫn đang bao bọc giá.
         primary = None
         for cand_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"):
             for r in all_ranges:
                 if r["name"] == cand_name:
-                    if r["range_low"] * 0.97 <= current_price <= r["range_high"] * 1.03:
+                    r_span = max(r["range_high"] - r["range_low"], 1e-6)
+                    in_tight_band = (
+                        (r["range_low"] - r_span * 0.35 <= current_price <= r["range_high"] + r_span * 0.35)
+                        and (r["range_low"] * 0.975 <= current_price <= r["range_high"] * 1.025)
+                    )
+                    if in_tight_band:
                         primary = r
                         break
             if primary:
                 break
+        if primary is None:
+            for cand_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"):
+                for r in all_ranges:
+                    if r["name"] == cand_name and (r["range_low"] * 0.97 <= current_price <= r["range_high"] * 1.03):
+                        primary = r
+                        break
+                if primary:
+                    break
         if primary is None:
             primary = all_ranges[0] if all_ranges else {
                 "name": "DAILY_RANGE",
@@ -539,7 +553,7 @@ class TradersszFramework:
         klines: Optional[Dict[str, List[float]]],
         range_obj: Dict[str, Any],
         current_price: float,
-        sl_buffer_pct: float = 0.0020,
+        sl_buffer_pct: float = 0.0028,
         min_rr: float = 1.5,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -612,8 +626,8 @@ class TradersszFramework:
                     # Đỉnh râu Deviation cao nhất trong cụm quét kết thúc tại nến đóng idx
                     sweep_extreme = max(highs[max(0, abs_idx - 4): abs_idx + 1])
                     sl_price = round(sweep_extreme * (1.0 + sl_buffer_pct), 4)
-                    if (sl_price - current_price) / current_price < 0.0035:
-                        sl_price = round(current_price * 1.0035, 4)
+                    if (sl_price - current_price) / current_price < 0.0055:
+                        sl_price = round(current_price * 1.0055, 4)
                     if current_price >= sl_price:
                         continue
 
@@ -696,8 +710,8 @@ class TradersszFramework:
                 if is_single_sfp or is_return_to_range:
                     sweep_extreme = min(lows[max(0, abs_idx - 4): abs_idx + 1])
                     sl_price = round(sweep_extreme * (1.0 - sl_buffer_pct), 4)
-                    if (current_price - sl_price) / current_price < 0.0035:
-                        sl_price = round(current_price * 0.9965, 4)
+                    if (current_price - sl_price) / current_price < 0.0055:
+                        sl_price = round(current_price * 0.9945, 4)
                     if current_price <= sl_price:
                         continue
 
@@ -764,7 +778,7 @@ class TradersszFramework:
         htf_data: Dict[str, Any],
         allowed_dir: str,
         current_price: float,
-        sl_buffer_pct: float = 0.0020,
+        sl_buffer_pct: float = 0.0028,
         min_rr: float = 1.5,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -804,8 +818,8 @@ class TradersszFramework:
                 if was_below and reclaimed:
                     sweep_low = float(min(lows[-6:-1]))
                     sl_p = round(min(sweep_low, lvl_p * 0.995) * (1.0 - sl_buffer_pct), 4)
-                    if (current_price - sl_p) / current_price < 0.0035:
-                        sl_p = round(current_price * 0.9965, 4)
+                    if (current_price - sl_p) / current_price < 0.0055:
+                        sl_p = round(current_price * 0.9945, 4)
                     risk = current_price - sl_p
                     tp1, tp2 = round(eq, 4), round(rh, 4)
                     if risk > 0 and (risk / current_price) <= 0.04 and tp1 > current_price and tp2 > tp1:
@@ -846,8 +860,8 @@ class TradersszFramework:
                 if was_above and lost_level:
                     sweep_high = float(max(highs[-6:-1]))
                     sl_p = round(max(sweep_high, lvl_p * 1.005) * (1.0 + sl_buffer_pct), 4)
-                    if (sl_p - current_price) / current_price < 0.0035:
-                        sl_p = round(current_price * 1.0035, 4)
+                    if (sl_p - current_price) / current_price < 0.0055:
+                        sl_p = round(current_price * 1.0055, 4)
                     risk = sl_p - current_price
                     tp1, tp2 = round(eq, 4), round(rl, 4)
                     if risk > 0 and (risk / current_price) <= 0.04 and tp1 < current_price and tp2 < tp1:
@@ -890,13 +904,13 @@ class TradersszFramework:
         klines: Optional[Dict[str, List[float]]],
         range_obj: Dict[str, Any],
         current_price: float,
-        sl_buffer_pct: float = 0.0020,
+        sl_buffer_pct: float = 0.0028,
         min_rr: float = 1.5,
     ) -> Optional[Dict[str, Any]]:
         """
         Bắt tín hiệu PHÁ VỠ RANGE TIẾP DIỄN XU HƯỚNG (Range Breakout Continuation):
         - Phá vỡ thật (Acceptance / Nến đóng dứt khoát ngoài biên + Break & Retest), KHÔNG bắt râu giả.
-        - Chỉ kích hoạt khi giá thực sự nằm ngoài biên Range (trên RH để BUY hoặc dưới RL để SELL).
+        - Chống FOMO đuổi đỉnh/đáy: Chỉ kích hoạt khi giá còn trong vùng Breakout tươi/Retest (<= 1.8% & <= 35% chiều cao Range ngoài biên).
         """
         if not klines or len(klines.get("close", [])) < 10:
             return None
@@ -925,6 +939,8 @@ class TradersszFramework:
 
         # ── A. BULLISH BREAKOUT CONTINUATION (PHÁ ĐỈNH RH >= 0.20% -> BUY TIẾP DIỄN) ──
         if current_price > rh * 1.0020:
+            ext_pct = (current_price - rh) / rh
+            ext_span = (current_price - rh) / range_height
             c2_o, c2_h, c2_l, c2_c = opens[-2], highs[-2], lows[-2], closes[-2]
             c3_c = closes[-3]
 
@@ -945,18 +961,21 @@ class TradersszFramework:
             had_break = any(pc > rh * 1.0015 for pc in closes[-6:-2])
             is_retest = had_break and (c2_l <= rh * 1.0050 and c2_c > rh * 1.0010)
 
-            if is_acceptance or is_strong_break or is_retest:
+            # Chống đuổi FOMO quá xa ngoài biên Range (>1.8% hoặc >35% chiều cao Range)
+            not_overextended = (ext_pct <= 0.018 and ext_span <= 0.35) or (is_retest and ext_pct <= 0.008)
+
+            if not_overextended and (is_acceptance or is_strong_break or is_retest):
                 recent_low = min(lows[-3:-1])
                 support_anchor = min(rh, recent_low)
-                if (current_price - support_anchor) / current_price > 0.038:
+                if (current_price - support_anchor) / current_price > 0.025:
                     support_anchor = recent_low if recent_low < current_price else rh
                 sl_price = round(support_anchor * (1.0 - sl_buffer_pct), 4)
-                if (current_price - sl_price) / current_price < 0.0040:
-                    sl_price = round(current_price * 0.9960, 4)
+                if (current_price - sl_price) / current_price < 0.0055:
+                    sl_price = round(current_price * 0.9945, 4)
 
                 risk = current_price - sl_price
                 sl_pct = risk / current_price
-                if risk > 0 and 0.0035 <= sl_pct <= 0.045:
+                if risk > 0 and 0.0050 <= sl_pct <= 0.028:
                     tp1 = round(max(current_price + risk * 1.25, rh + range_height * 0.50), 4)
                     tp2 = round(max(current_price + risk * max(min_rr, 2.2), rh + range_height * 1.00), 4)
                     rr_tp1 = (tp1 - current_price) / risk
@@ -992,6 +1011,8 @@ class TradersszFramework:
 
         # ── B. BEARISH BREAKOUT CONTINUATION (PHÁ ĐÁY RL >= 0.20% -> SELL TIẾP DIỄN) ──
         if current_price < rl * 0.9980:
+            ext_pct = (rl - current_price) / rl
+            ext_span = (rl - current_price) / range_height
             c2_o, c2_h, c2_l, c2_c = opens[-2], highs[-2], lows[-2], closes[-2]
             c3_c = closes[-3]
 
@@ -1009,18 +1030,20 @@ class TradersszFramework:
             had_break = any(pc < rl * 0.9985 for pc in closes[-6:-2])
             is_retest = had_break and (c2_h >= rl * 0.9950 and c2_c < rl * 0.9990)
 
-            if is_acceptance or is_strong_break or is_retest:
+            not_overextended = (ext_pct <= 0.018 and ext_span <= 0.35) or (is_retest and ext_pct <= 0.008)
+
+            if not_overextended and (is_acceptance or is_strong_break or is_retest):
                 recent_high = max(highs[-3:-1])
                 resist_anchor = max(rl, recent_high)
-                if (resist_anchor - current_price) / current_price > 0.038:
+                if (resist_anchor - current_price) / current_price > 0.025:
                     resist_anchor = recent_high if recent_high > current_price else rl
                 sl_price = round(resist_anchor * (1.0 + sl_buffer_pct), 4)
-                if (sl_price - current_price) / current_price < 0.0040:
-                    sl_price = round(current_price * 1.0040, 4)
+                if (sl_price - current_price) / current_price < 0.0055:
+                    sl_price = round(current_price * 1.0055, 4)
 
                 risk = sl_price - current_price
                 sl_pct = risk / current_price
-                if risk > 0 and 0.0035 <= sl_pct <= 0.045:
+                if risk > 0 and 0.0050 <= sl_pct <= 0.028:
                     tp1 = round(min(current_price - risk * 1.25, rl - range_height * 0.50), 4)
                     tp2 = round(min(current_price - risk * max(min_rr, 2.2), rl - range_height * 1.00), 4)
                     if tp2 > 0 and tp2 < tp1 < current_price:
@@ -1225,7 +1248,7 @@ class TradersszFramework:
     def evaluate_traderssz_complete(
         klines_by_tf: Dict[str, Optional[Dict[str, List[float]]]],
         current_price: float,
-        sl_buffer_pct: float = 0.0020,
+        sl_buffer_pct: float = 0.0028,
         min_rr: float = 1.5,
         btc_bias: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:

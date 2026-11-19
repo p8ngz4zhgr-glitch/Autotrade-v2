@@ -652,7 +652,8 @@ class BingXExchange:
                 kelly_percent = quant.calculate_kelly_fraction(p_win, rr_ratio, fraction=0.5)
                 KELLY_NEUTRAL = 0.0833
                 raw_mult = (kelly_percent / KELLY_NEUTRAL) if KELLY_NEUTRAL > 0 else 1.0
-                quality_mult = max(0.5, min(1.3, raw_mult)) * markowitz_multiplier
+                # Không phóng đại rủi ro quá 1.05x khi caller đã tính theo Risk %, chỉ cho phép co giảm khi Markowitz/Kelly thấp
+                quality_mult = max(0.50, min(1.05, raw_mult)) * markowitz_multiplier
                 log.info(
                     f"🧠 [QUANT] p_win={p_win:.2f} rr={rr_ratio:.2f} Kelly={kelly_percent:.3f} "
                     f"Markowitz={markowitz_multiplier:.2f} -> Quality x{quality_mult:.2f}"
@@ -663,29 +664,31 @@ class BingXExchange:
         if qty and qty > 0:
             safe_qty = qty * quality_mult
         else:
-            risk_percent = min(0.1, (kelly_percent if kelly_percent is not None else 0.05) * markowitz_multiplier)
-            capital_to_use = available_balance * risk_percent
-            if (capital_to_use * leverage) < 5.0:
-                capital_to_use = 5.0 / leverage
-                log.info(f"⚠️ Vốn tính toán nhỏ hơn mức tối thiểu, điều chỉnh vốn về {capital_to_use:.2f} để đáp ứng lệnh sàn.")
-            safe_qty = (capital_to_use * leverage) / current_price
+            # Fallback tính theo Risk USD = 1.25% vốn * Markowitz, chia cho khoảng cách SL %
+            fallback_risk_usd = available_balance * 0.0125 * markowitz_multiplier
+            est_sl_pct = (abs(current_price - sl_price) / current_price) if (sl_price and sl_price > 0 and current_price > 0) else 0.015
+            est_sl_pct = max(0.004, min(0.05, est_sl_pct))
+            notional_target = fallback_risk_usd / est_sl_pct
+            safe_qty = notional_target / current_price
 
-        # Giữ mức ký quỹ (Margin) mỗi lệnh trong khoảng $20 - $30 USD (không vượt 30% số dư khả dụng)
+        # Không ép margin cố định $20-$30: chỉ chặn trần ký quỹ tối đa 15% vốn mỗi lệnh (an toàn cho tối đa 7 vị thế)
         required_margin = (safe_qty * current_price) / leverage if leverage > 0 else safe_qty * current_price
-        max_safe_cap = available_balance * 0.30
-        target_min_margin = min(20.0, max_safe_cap)
-        target_max_margin = min(30.0, max_safe_cap)
-        if required_margin < target_min_margin and current_price > 0 and leverage > 0:
-            safe_qty = (target_min_margin * leverage) / current_price
-            log.info(f"💰 Nâng ký quỹ lệnh lên tối thiểu ${target_min_margin:.2f} (tỉ lệ vốn $20-$30/lệnh).")
-        elif required_margin > target_max_margin and current_price > 0 and leverage > 0:
-            safe_qty = (target_max_margin * leverage) / current_price
-            log.info(f"🛡️ Giới hạn ký quỹ lệnh ở trần ${target_max_margin:.2f} (tỉ lệ vốn $20-$30/lệnh).")
+        max_safe_margin = available_balance * 0.15
+        if required_margin > max_safe_margin and current_price > 0 and leverage > 0:
+            safe_qty = (max_safe_margin * leverage) / current_price
+            log.info(f"🛡️ Giới hạn ký quỹ lệnh ở trần 15% vốn (${max_safe_margin:.2f}) để chừa sức chịu cho 7 vị thế.")
 
-        required_margin = (safe_qty * current_price) / leverage if leverage > 0 else safe_qty * current_price
-        if required_margin > available_balance * 0.95:
-            safe_qty = (available_balance * 0.95 * leverage) / current_price
-            log.warning(f"⚠️ Qty vượt quá margin khả dụng ({required_margin:.2f} > {available_balance*0.95:.2f}), giảm về an toàn.")
+        # Lớp bảo vệ Rủi ro SL tối đa: không để 1 lệnh SL mất quá 2.2% tổng vốn tài khoản
+        est_sl_pct_guard = (abs(current_price - sl_price) / current_price) if (sl_price and sl_price > 0 and current_price > 0) else 0.0
+        if est_sl_pct_guard > 0.001 and current_price > 0:
+            est_sl_loss = safe_qty * current_price * est_sl_pct_guard
+            max_single_sl_loss = available_balance * 0.022
+            if est_sl_loss > max_single_sl_loss:
+                target_risk_loss = available_balance * 0.018
+                safe_qty = target_risk_loss / (current_price * est_sl_pct_guard)
+                log.info(
+                    f"🛡️ [RISK CAP] Giảm Qty do SL {est_sl_pct_guard*100:.2f}% (lỗ dự kiến ${est_sl_loss:.2f} > trần 2.2% vốn ${max_single_sl_loss:.2f}) -> chốt rủi ro ~${target_risk_loss:.2f}"
+                )
 
         spec = self.get_contract_spec(symbol)
         MIN_QTY_MAP = {
@@ -698,16 +701,41 @@ class BingXExchange:
         }
         base_asset = symbol.replace("USDT", "").replace("-", "").upper()
         min_qty = max(float(spec.get("tradeMinQuantity", 0) or 0), MIN_QTY_MAP.get(base_asset, 0.0001))
+        min_notional_ex = max(5.2, float(spec.get("tradeMinUSDT", 0) or 0))
 
         safe_qty = self._format_qty(symbol, safe_qty)
-        if safe_qty < min_qty:
-            safe_qty = self._format_qty(symbol, min_qty) or min_qty
-            log.info(f"⚠️ Qty tính toán nhỏ hơn quy định của sàn đối với {base_asset}. Tự động nâng Qty lên {safe_qty}")
+        if safe_qty < min_qty or (safe_qty * current_price) < min_notional_ex:
+            qty_for_notional = min_notional_ex / current_price if current_price > 0 else min_qty
+            needed_qty = max(min_qty, qty_for_notional)
+            bumped_qty = self._format_qty(symbol, needed_qty)
+            if not bumped_qty or bumped_qty < needed_qty:
+                qp = max(0, min(8, int(spec.get("quantityPrecision", 4))))
+                step = 10 ** (-qp)
+                bumped_qty = round((bumped_qty or 0.0) + step, qp)
+            bumped_qty = max(min_qty, bumped_qty)
+
+            # Nếu tài khoản siêu nhỏ (<$50) mà khối lượng tối thiểu sàn ép rủi ro SL > 6% vốn -> bỏ qua để tránh cháy
+            bumped_risk = (bumped_qty * current_price * est_sl_pct_guard) if est_sl_pct_guard > 0.001 else 0.0
+            bumped_margin = (bumped_qty * current_price) / leverage if leverage > 0 else bumped_qty * current_price
+            if bumped_margin > available_balance * 0.45 or (bumped_risk > 0 and bumped_risk > available_balance * 0.06):
+                msg = (
+                    f"Khối lượng tối thiểu sàn của {symbol} ({bumped_qty} ≈ ${bumped_qty*current_price:.1f} notional, "
+                    f"rủi ro SL ${bumped_risk:.2f}) vượt ngưỡng an toàn cho vốn ${available_balance:.2f}"
+                )
+                log.warning(f"🛡️ [MICRO CAPITAL GUARD] {msg} -> Bỏ qua lệnh để bảo vệ vốn.")
+                return {"ok": False, "msg": msg}
+
+            safe_qty = bumped_qty
+            log.info(f"⚠️ Qty tính toán nhỏ hơn mức tối thiểu sàn của {base_asset} (min_qty={min_qty}, min_notional=${min_notional_ex:.1f}). Tự điều chỉnh lên {safe_qty}")
 
         capital_to_use = (safe_qty * current_price) / leverage if leverage > 0 else safe_qty * current_price
+        margin_pct = (capital_to_use / available_balance * 100.0) if available_balance > 0 else 0.0
+        est_risk_usd = (safe_qty * current_price * est_sl_pct_guard) if est_sl_pct_guard > 0 else 0.0
+        risk_pct_bal = (est_risk_usd / available_balance * 100.0) if available_balance > 0 else 0.0
         log.info(
             f"💰 Balance: {available_balance:.2f} USDT | Qty gốc(caller): {qty} -> Qty cuối: {safe_qty} "
-            f"| Margin ~{capital_to_use:.2f} USDT (Lev {leverage}x)"
+            f"| Margin ~{capital_to_use:.2f} USDT ({margin_pct:.1f}% vốn, Lev {leverage}x) "
+            f"| Risk SL ~{est_risk_usd:.2f} USDT ({risk_pct_bal:.2f}% vốn)"
         )
 
         # Chuẩn hoá SL/TP theo pricePrecision của sàn TRƯỚC khi gắn vào lệnh MARKET
@@ -1472,12 +1500,12 @@ class BingXExchange:
             news_risk = news_risk_adjustment()
             if news_risk.get("pause_trading"):
                 pnl_pct = ((current_price - entry_price) / entry_price * 100) if direction == "LONG" else ((entry_price - current_price) / entry_price * 100)
-                if pnl_pct >= 0.8:
+                if pnl_pct >= 1.2:
                     be_p = self.breakeven_price(direction, entry_price)
                     sl_at_be = (direction == "LONG" and current_sl >= be_p - (entry_price * 0.0002)) or \
                                (direction == "SHORT" and current_sl > 0 and current_sl <= be_p + (entry_price * 0.0002))
                     if not sl_at_be:
-                        log.info(f"📰 [MACRO BREAKEVEN PROTECTION] {symbol} {direction}: Đang trong cửa sổ ra tin vĩ mô lớn ({news_risk.get('event')}) & Vị thế đạt lãi +{pnl_pct:.2f}% >= +0.8% -> Dời SL về Hòa Vốn (${be_p:.4f}) bảo vệ vốn!")
+                        log.info(f"📰 [MACRO BREAKEVEN PROTECTION] {symbol} {direction}: Đang trong cửa sổ ra tin vĩ mô lớn ({news_risk.get('event')}) & Vị thế đạt lãi +{pnl_pct:.2f}% >= +1.2% -> Dời SL về Hòa Vốn (${be_p:.4f}) bảo vệ vốn!")
                         self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, be_p, plan.get("tp_levels", []), current_price)
                         return {
                             "action": "NEWS_BREAKEVEN",
@@ -1520,25 +1548,26 @@ class BingXExchange:
             be_price = self._format_price(symbol, self.breakeven_price(direction, entry_price)) or self.breakeven_price(direction, entry_price)
             tolerance = entry_price * 0.0002  # 0.02% đệm sai số giá
 
-            # Duyệt từ mốc xa nhất xuống mốc gần nhất để tìm milestone 50% đã đạt
+            # Chỉ dời SL về Hòa vốn KHI GIÁ CHẠM TP1 (tránh dời quá sớm ở 50% TP1 làm quét hòa vốn liên tục),
+            # và dời SL lên TP1 khi giá đi được 75% chặng từ TP1 -> TP2.
             for i in range(len(tp_list) - 1, -1, -1):
                 prev_p = tp_list[i - 1] if i > 0 else entry_price
                 curr_p = tp_list[i]
 
                 if direction == "LONG":
-                    milestone_50 = prev_p + 0.5 * (curr_p - prev_p)
-                    reached_50 = (current_price >= milestone_50)
+                    trigger_p = curr_p if i == 0 else (prev_p + 0.75 * (curr_p - prev_p))
+                    reached_milestone = (current_price >= trigger_p)
                     target_sl = be_price if i == 0 else (self._format_price(symbol, prev_p) or prev_p)
                     sl_already_set = (current_sl > 0) and (current_sl >= target_sl - tolerance)
                 else:  # SHORT
-                    milestone_50 = prev_p - 0.5 * (prev_p - curr_p)
-                    reached_50 = (current_price <= milestone_50)
+                    trigger_p = curr_p if i == 0 else (prev_p - 0.75 * (prev_p - curr_p))
+                    reached_milestone = (current_price <= trigger_p)
                     target_sl = be_price if i == 0 else (self._format_price(symbol, prev_p) or prev_p)
                     sl_already_set = (current_sl > 0) and (current_sl <= target_sl + tolerance)
 
-                if reached_50:
+                if reached_milestone:
                     if sl_already_set:
-                        log.debug(f"🛡️ {symbol}: Giá đạt 50% chặng TP{i+1}, nhưng SL trên sàn ({current_sl}) đã ở/vượt mốc {target_sl}.")
+                        log.debug(f"🛡️ {symbol}: Giá đạt mốc TP{i+1}, SL trên sàn ({current_sl}) đã ở/vượt {target_sl}.")
                         break
 
                     cooldown_key = f"SL_COOLDOWN_{symbol}_{direction}"
@@ -1550,7 +1579,7 @@ class BingXExchange:
                         except Exception as e:
                             log.warning("Lỗi cooldown Redis: %s", e)
 
-                    log.info(f"🛡️ [TRADERSZ BREAKEVEN] {symbol}: Đạt 50% chặng đường tới TP{i+1} (${curr_p}). Dời SL về {target_sl} (cũ: {current_sl})!")
+                    log.info(f"🛡️ [TRADERSZ BREAKEVEN] {symbol}: Đạt mốc {'TP1' if i == 0 else f'75% chặng TP{i+1}'} (${curr_p}). Dời SL về {target_sl} (cũ: {current_sl})!")
                     upd = self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, target_sl, raw_tp_levels, current_price)
                     if not upd.get("sl_ok"):
                         log.warning(f"⚠️ {symbol}: Dời SL về {target_sl} thất bại -> thử lại chu kỳ sau.")
@@ -1567,12 +1596,20 @@ class BingXExchange:
                         "action": action_name,
                         "level": i + 1,
                         "new_sl": self._format_price(symbol, target_sl) or target_sl,
-                        "msg": f"Đã dời SL về {target_sl} khi đi được 50% chặng TP{i+1}."
+                        "msg": f"Đã dời SL về {target_sl} khi chạm {'TP1' if i == 0 else f'75% chặng TP{i+1}'}."
                     }
 
-        # 2. BẢO VỆ CẮT LỖ AN TOÀN TỐI ĐA (-35% ROE FAILSAFE) — BỎ HOÀN TOÀN CHỐT LỜI NHANH & CHANDELIER
-        if roe <= -35.0:
-            log.info(f"🛑 [MAX LOSS PROTECTION] {symbol} {direction}: Lỗ ROE {roe:.2f}% <= -35.0% -> CẮT LỖ BẢO VỆ TÀI KHOẢN!")
+        # 2. BẢO VỆ CẮT LỖ KHẨN CẤP (CHỈ KHI VƯỢT QUA SL KẾ HOẠCH HOẶC ROE <= -82%, KHÔNG CẮT SỚM BÊN TRONG SL RÂU!)
+        planned_sl = float(plan.get("sl", 0) or 0)
+        breached_planned_sl = (
+            planned_sl > 0
+            and (
+                (direction == "LONG" and current_price <= planned_sl * 0.9985)
+                or (direction == "SHORT" and current_price >= planned_sl * 1.0015)
+            )
+        )
+        if breached_planned_sl or roe <= -82.0:
+            log.info(f"🛑 [FAILSAFE SL] {symbol} {direction}: Giá ${current_price:.4f} (SL kế hoạch ${planned_sl:.4f}, ROE {roe:.2f}%) -> CẮT LỖ BẢO VỆ TÀI KHOẢN!")
             self.close_position(symbol, current_qty, direction)
             self.cancel_all_orders(symbol)
             if redis_client:
@@ -1581,7 +1618,7 @@ class BingXExchange:
                     redis_client.delete(f"SL_COOLDOWN_{symbol}_{direction}")
                 except Exception:
                     pass
-            return {"action": "CLOSE", "type": "CẮT LỖ BẢO VỆ TÀI KHOẢN (ROE <= -35.0%)", "roe": roe}
+            return {"action": "CLOSE", "type": "CẮT LỖ BẢO VỆ (VƯỢT SL KẾ HOẠCH / KHẨN CẤP)", "roe": roe}
 
         # Giữ vị thế chạy tự do tới TP1 (50% EQ -> Hòa vốn) & TP2 (Biên đối diện) hoặc SL râu nến
         return {"action": "HOLD", "msg": "Giữ lệnh chạy theo kế hoạch TP/SL TraderSZ."}
