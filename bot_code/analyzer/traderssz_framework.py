@@ -705,7 +705,7 @@ class TradersszFramework:
         klines: Optional[Dict[str, List[float]]],
         range_obj: Dict[str, Any],
         current_price: float,
-        sl_buffer_pct: float = 0.0028,
+        sl_buffer_pct: float = 0.0040,
         min_rr: float = 1.5,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -745,13 +745,21 @@ class TradersszFramework:
         # CHỈ dùng các nến ĐÃ ĐÓNG CỬA (idx = -2 là nến vừa đóng gần nhất, idx = -3 là nến trước đó nếu -2 giữ vững trong Range)
         # Tuyệt đối KHÔNG dùng nến [-1] đang chạy dở để tránh tín hiệu nhảy/đảo chiều giữa nến.
         avg_vol = sum(vols[-21:-1]) / max(1, len(vols[-21:-1])) if len(vols) >= 6 else 1.0
+        # Tính ATR% gần nhất trên chính khung thời gian này để không đặt SL mỏng hơn nhiễu nến bình thường
+        recent_bars = [
+            (highs[j] - lows[j]) / max(closes[j], 1e-9)
+            for j in range(max(0, len(closes) - 11), len(closes) - 1)
+            if closes[j] > 0
+        ]
+        bar_atr_pct = (sum(recent_bars) / len(recent_bars)) if recent_bars else 0.0085
+        min_sl_floor = max(0.0085, min(0.0140, bar_atr_pct * 0.55))
 
         candidates: List[Dict[str, Any]] = []
 
         # ── A. KIỂM TRA BEARISH DEVIATION / SFP TẠI RANGE HIGH -> SHORT ──
-        # Điều kiện chuẩn TraderSZ: Giá hiện tại phải nằm BÊN DƯỚI RH tối thiểu 0.05% (Return to Range)
-        # và thuộc nửa PREMIUM phía trên (>= 62% Range; riêng 15m yêu cầu sát biên >= 67% để giữ R:R đẹp).
-        min_premium_pct = 67.0 if tf_name == "15m" else 62.0
+        # Điều kiện chuẩn TraderSZ: Giá nằm BÊN DƯỚI RH tối thiểu 0.05% và ở sát vùng biên trên
+        # (>= 74% Range; riêng 15m >= 78%) để không Short sớm ở vùng lửng 62–73% dưới PDH.
+        min_premium_pct = 78.0 if tf_name == "15m" else 74.0
         if current_price < rh * 0.9995 and pos_in_range_pct >= min_premium_pct:
             for idx in (-2, -3):
                 abs_idx = len(closes) + idx
@@ -781,16 +789,16 @@ class TradersszFramework:
                     sl_price = round(sweep_extreme * (1.0 + sl_buffer_pct), 4)
                     is_retest = abs(current_price - rh) / rh <= 0.0050
 
-                    # Nếu nến SFP rút râu quá sâu vào trong Range (>0.75% cách RH & >22% chiều cao Range):
+                    # Nếu nến SFP rút râu quá sâu vào trong Range (>0.55% cách RH & >18% chiều cao Range):
                     # Đề xuất LIMIT_RETEST sát biên RH thay vì đuổi Market làm SL bị xa.
                     retrace_dist_pct = abs(current_price - rh) / rh
                     depth_in_range = (rh - current_price) / max(rh - rl, 1e-9)
-                    use_limit_retest = bool((not is_retest) and retrace_dist_pct > 0.0075 and depth_in_range > 0.22 and current_price > eq * 1.002)
+                    use_limit_retest = bool((not is_retest) and retrace_dist_pct > 0.0055 and depth_in_range > 0.18 and current_price > eq * 1.002)
                     eval_entry = round(rh * 0.9985, 4) if use_limit_retest else round(current_price, 4)
                     entry_mode = "LIMIT_RETEST" if use_limit_retest else "MARKET"
 
-                    if (sl_price - eval_entry) / eval_entry < 0.0055:
-                        sl_price = round(eval_entry * 1.0055, 4)
+                    if (sl_price - eval_entry) / eval_entry < min_sl_floor:
+                        sl_price = round(eval_entry * (1.0 + min_sl_floor), 4)
                     if eval_entry >= sl_price:
                         continue
 
@@ -849,8 +857,8 @@ class TradersszFramework:
                     break
 
         # ── B. KIỂM TRA BULLISH DEVIATION / SFP TẠI RANGE LOW -> LONG ──
-        # Giá hiện tại phải nằm BÊN TRÊN RL tối thiểu 0.05% và thuộc nửa DISCOUNT (<= 38%; riêng 15m <= 33%).
-        max_discount_pct = 33.0 if tf_name == "15m" else 38.0
+        # Giá hiện tại phải nằm BÊN TRÊN RL tối thiểu 0.05% và ở sát biên dưới (<= 26%; riêng 15m <= 22%).
+        max_discount_pct = 22.0 if tf_name == "15m" else 26.0
         if current_price > rl * 1.0005 and pos_in_range_pct <= max_discount_pct:
             for idx in (-2, -3):
                 abs_idx = len(closes) + idx
@@ -879,12 +887,12 @@ class TradersszFramework:
 
                     retrace_dist_pct = abs(current_price - rl) / rl
                     depth_in_range = (current_price - rl) / max(rh - rl, 1e-9)
-                    use_limit_retest = bool((not is_retest) and retrace_dist_pct > 0.0075 and depth_in_range > 0.22 and current_price < eq * 0.998)
+                    use_limit_retest = bool((not is_retest) and retrace_dist_pct > 0.0055 and depth_in_range > 0.18 and current_price < eq * 0.998)
                     eval_entry = round(rl * 1.0015, 4) if use_limit_retest else round(current_price, 4)
                     entry_mode = "LIMIT_RETEST" if use_limit_retest else "MARKET"
 
-                    if (eval_entry - sl_price) / eval_entry < 0.0055:
-                        sl_price = round(eval_entry * 0.9945, 4)
+                    if (eval_entry - sl_price) / eval_entry < min_sl_floor:
+                        sl_price = round(eval_entry * (1.0 - min_sl_floor), 4)
                     if eval_entry <= sl_price:
                         continue
 
@@ -952,7 +960,7 @@ class TradersszFramework:
         htf_data: Dict[str, Any],
         allowed_dir: str,
         current_price: float,
-        sl_buffer_pct: float = 0.0028,
+        sl_buffer_pct: float = 0.0040,
         min_rr: float = 1.5,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -984,21 +992,22 @@ class TradersszFramework:
         ]
         c2_c = float(closes[-2])
         c2_o = float(opens[-2])
+        span_r = max(rh - rl, 1e-9)
 
         best_reclaim = None
         for lvl_key, lvl_label, lvl_p in levels:
             if lvl_p <= 0 or not (rl * 1.001 <= lvl_p <= rh * 0.999):
                 continue
 
-            if allowed_dir == "LONG" and rl < lvl_p < eq * 0.995:
+            if allowed_dir == "LONG" and rl < lvl_p <= rl + 0.35 * span_r:
                 # Quét dưới level trong 4 nến đóng trước [-6:-2], nến [-2] đóng tái chiếm lên trên level
                 was_below = any(closes[i] < lvl_p * 0.9995 or lows[i] < lvl_p * 0.9985 for i in range(-6, -2))
                 reclaimed = (c2_c > lvl_p * 1.0005) and (c2_c >= c2_o) and (current_price > lvl_p * 1.0003)
                 if was_below and reclaimed:
                     sweep_low = float(min(lows[-6:-1]))
-                    sl_p = round(min(sweep_low, lvl_p * 0.995) * (1.0 - sl_buffer_pct), 4)
-                    if (current_price - sl_p) / current_price < 0.0055:
-                        sl_p = round(current_price * 0.9945, 4)
+                    sl_p = round(min(sweep_low, lvl_p * 0.994) * (1.0 - sl_buffer_pct), 4)
+                    if (current_price - sl_p) / current_price < 0.0090:
+                        sl_p = round(current_price * 0.9910, 4)
                     risk = current_price - sl_p
                     tp1, tp2 = round(eq, 4), round(rh, 4)
                     if risk > 0 and (risk / current_price) <= 0.04 and tp1 > current_price and tp2 > tp1:
@@ -1033,14 +1042,14 @@ class TradersszFramework:
                             if not best_reclaim or cand["score"] > best_reclaim["score"]:
                                 best_reclaim = cand
 
-            elif allowed_dir == "SHORT" and eq * 1.005 < lvl_p < rh:
+            elif allowed_dir == "SHORT" and rl + 0.65 * span_r <= lvl_p < rh:
                 was_above = any(closes[i] > lvl_p * 1.0005 or highs[i] > lvl_p * 1.0015 for i in range(-6, -2))
                 lost_level = (c2_c < lvl_p * 0.9995) and (c2_c <= c2_o) and (current_price < lvl_p * 0.9997)
                 if was_above and lost_level:
                     sweep_high = float(max(highs[-6:-1]))
-                    sl_p = round(max(sweep_high, lvl_p * 1.005) * (1.0 + sl_buffer_pct), 4)
-                    if (sl_p - current_price) / current_price < 0.0055:
-                        sl_p = round(current_price * 1.0055, 4)
+                    sl_p = round(max(sweep_high, lvl_p * 1.006) * (1.0 + sl_buffer_pct), 4)
+                    if (sl_p - current_price) / current_price < 0.0090:
+                        sl_p = round(current_price * 1.0090, 4)
                     risk = sl_p - current_price
                     tp1, tp2 = round(eq, 4), round(rl, 4)
                     if risk > 0 and (risk / current_price) <= 0.04 and tp1 < current_price and tp2 < tp1:
@@ -1383,16 +1392,24 @@ class TradersszFramework:
         do = float(htf_data.get("daily_open", btc_price) or btc_price)
         do_dist_pct = ((btc_price - do) / do * 100.0) if do > 0 else 0.0
 
-        # Kiểm tra thêm lực nến 1H thuần PA của BTC để bắt sớm nhịp pump/dump từ Open
+        # Kiểm tra thêm lực nến 1H thuần PA của BTC để bắt sớm nhịp pump/dump từ Open & tránh Altcoin Short ngược sóng hồi BTC
         h1_kl = (btc_klines_by_tf or {}).get("1h")
         h1_push = "FLAT"
-        if h1_kl and len(h1_kl.get("close", [])) >= 2:
+        intraday_push = "FLAT"
+        if h1_kl and len(h1_kl.get("close", [])) >= 3:
             h1_o = float(h1_kl["open"][-1])
             h1_c = float(h1_kl["close"][-1])
+            h1_prev_o = float(h1_kl["open"][-2])
+            h1_prev_c = float(h1_kl["close"][-2])
+            push_2h_pct = ((h1_c - h1_prev_o) / max(h1_prev_o, 1e-9)) * 100.0
             if h1_c > h1_o and btc_price > do:
                 h1_push = "UP"
             elif h1_c < h1_o and btc_price < do:
                 h1_push = "DOWN"
+            if h1_c > h1_o and h1_prev_c >= h1_prev_o and push_2h_pct >= 0.35:
+                intraday_push = "UP"
+            elif h1_c < h1_o and h1_prev_c <= h1_prev_o and push_2h_pct <= -0.35:
+                intraday_push = "DOWN"
 
         if btc_signal == "LONG":
             bias = "BULLISH"
@@ -1447,6 +1464,7 @@ class TradersszFramework:
             "above_do": above_do,
             "above_wo": above_wo,
             "bull_opens_count": bull_opens,
+            "intraday_push": intraday_push,
             "reason": reason,
         }
 
@@ -1454,7 +1472,7 @@ class TradersszFramework:
     def evaluate_traderssz_complete(
         klines_by_tf: Dict[str, Optional[Dict[str, List[float]]]],
         current_price: float,
-        sl_buffer_pct: float = 0.0028,
+        sl_buffer_pct: float = 0.0040,
         min_rr: float = 1.5,
         btc_bias: Optional[Dict[str, Any]] = None,
         utcnow: Optional[datetime] = None,
@@ -1564,9 +1582,45 @@ class TradersszFramework:
                 asia_ready = bool(htf_data.get("asia_ready", False))
                 asia_h = float(htf_data.get("asia_high", 0) or 0)
                 asia_l = float(htf_data.get("asia_low", 0) or 0)
+                primary_pos_pct = float(htf_data.get("range_pos_pct", 50.0) or 50.0)
+                far_from_daily = bool(htf_data.get("far_from_daily", False))
+                is_macro_primary = primary_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE")
+                btc_push = str((btc_bias or {}).get("intraday_push", "FLAT")).upper()
+
+                # LTF Momentum Veto: Chặn vào SHORT/LONG ngược đầu cây nến 1H lực mạnh hoặc 15m đang ủi sát SL
+                ltf_veto = False
+                if h1_klines and len(h1_klines.get("close", [])) >= 3:
+                    h1_2o, h1_2h, h1_2l, h1_2c = float(h1_klines["open"][-2]), float(h1_klines["high"][-2]), float(h1_klines["low"][-2]), float(h1_klines["close"][-2])
+                    h1_2body = abs(h1_2c - h1_2o) / max(h1_2h - h1_2l, 1e-9)
+                    h1_3h, h1_3l = float(h1_klines["high"][-3]), float(h1_klines["low"][-3])
+                    if allowed_dir == "SHORT" and h1_2c > h1_2o and h1_2body >= 0.48 and h1_2c > h1_3h:
+                        ltf_veto = True
+                    elif allowed_dir == "LONG" and h1_2c < h1_2o and h1_2body >= 0.48 and h1_2c < h1_3l:
+                        ltf_veto = True
+                if not ltf_veto and m15_klines and len(m15_klines.get("close", [])) >= 3:
+                    m_1o, m_1c = float(m15_klines["open"][-1]), float(m15_klines["close"][-1])
+                    m_2o, m_2c = float(m15_klines["open"][-2]), float(m15_klines["close"][-2])
+                    if allowed_dir == "SHORT" and m_2c > m_2o and m_1c > m_1o and ((m_1c - m_2o) / max(m_2o, 1e-9) >= 0.0050) and not m15_msb["confirmed"]:
+                        ltf_veto = True
+                    elif allowed_dir == "LONG" and m_2c < m_2o and m_1c < m_1o and ((m_2o - m_1c) / max(m_2o, 1e-9) >= 0.0050) and not m15_msb["confirmed"]:
+                        ltf_veto = True
 
                 scan_tfs = [("1d", d1_klines), ("4h", h4_klines), ("1h", h1_klines), ("15m", m15_klines)]
-                for range_obj in htf_data.get("all_ranges", []):
+                if not ltf_veto:
+                  for range_obj in htf_data.get("all_ranges", []):
+                    r_sub_name = range_obj.get("name", "")
+                    is_sub_range = r_sub_name not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE")
+                    # Nested Range Guard: Khi giá vẫn còn trong DAILY_RANGE, cấm Short/Long sub-range ở vùng lửng 21-79% trước khi giá test PDH/PDL!
+                    if is_macro_primary and not far_from_daily and is_sub_range:
+                        if allowed_dir == "SHORT" and primary_pos_pct < 80.0:
+                            sub_near_macro = abs(float(range_obj.get("range_high", 0)) - primary_rh) / max(primary_rh, 1e-9) <= 0.006
+                            if not sub_near_macro and not (is_london and r_sub_name == "ASIA_RANGE" and m15_msb["confirmed"]):
+                                continue
+                        elif allowed_dir == "LONG" and primary_pos_pct > 20.0:
+                            sub_near_macro = abs(float(range_obj.get("range_low", 0)) - primary_rl) / max(primary_rl, 1e-9) <= 0.006
+                            if not sub_near_macro and not (is_london and r_sub_name == "ASIA_RANGE" and m15_msb["confirmed"]):
+                                continue
+
                     for tf_name, tf_klines in scan_tfs:
                         hit = TradersszFramework._scan_tf_deviation(
                             tf_name=tf_name,
@@ -1577,10 +1631,44 @@ class TradersszFramework:
                             min_rr=min_rr,
                         )
                         if hit and hit["direction"] == allowed_dir:
-                            # Lọc 15m MSB: với nến 1H SFP đơn lẻ, yêu cầu 15m đồng pha hoặc đã MSB
+                            # Lọc 15m MSB: 1H SFP & 4H stale SFP cần 15m đồng pha (hoặc Retest/Limit) tránh vào khi LTF đã quay đầu
                             if tf_name == "1h" and hit["setup_type"] == "SFP_WICK_REJECTION" and m15_msb["available"] and not m15_msb["m15_aligned"]:
                                 continue
+                            if tf_name == "4h" and m15_msb["available"] and not m15_msb["m15_aligned"] and not hit.get("is_retest") and hit.get("entry_mode") != "LIMIT_RETEST":
+                                continue
+                            # Chặn Altcoin đánh ngược sóng đẩy ngắn hạn của BTC nếu chưa có 15m MSB xác nhận đảo chiều
+                            if ((btc_push == "UP" and allowed_dir == "SHORT") or (btc_push == "DOWN" and allowed_dir == "LONG")) and not m15_msb["confirmed"]:
+                                continue
+
                             msb_ok = bool(m15_msb["confirmed"]) and tf_name in ("1d", "4h", "1h", "15m")
+
+                            # Nếu SL của sub-range nằm ngay dưới PDH/trên PDL trong khoảng nam châm 1.3%, nới SL ra ngoài PDH/PDL nếu vẫn giữ được R:R
+                            if is_macro_primary and not far_from_daily and is_sub_range and hit.get("entry_mode", "MARKET") == "MARKET":
+                                cur_sl = float(hit["sl"])
+                                if allowed_dir == "SHORT" and cur_sl <= primary_rh * 1.001 and (primary_rh - current_price) / current_price <= 0.013:
+                                    safe_macro_sl = round(primary_rh * (1.0 + sl_buffer_pct), 4)
+                                    new_risk = safe_macro_sl - current_price
+                                    if new_risk / current_price > 0.042:
+                                        continue
+                                    new_rr2 = (current_price - float(hit["tp2"])) / max(new_risk, 1e-9)
+                                    if new_rr2 < min_rr:
+                                        continue
+                                    hit["sl"] = safe_macro_sl
+                                    hit["sl_pct"] = round(new_risk / current_price * 100.0, 2)
+                                    hit["rr_tp1"] = round((current_price - float(hit["tp1"])) / max(new_risk, 1e-9), 2)
+                                    hit["rr_tp2"] = round(new_rr2, 2)
+                                elif allowed_dir == "LONG" and cur_sl >= primary_rl * 0.999 and (current_price - primary_rl) / current_price <= 0.013:
+                                    safe_macro_sl = round(primary_rl * (1.0 - sl_buffer_pct), 4)
+                                    new_risk = current_price - safe_macro_sl
+                                    if new_risk / current_price > 0.042:
+                                        continue
+                                    new_rr2 = (float(hit["tp2"]) - current_price) / max(new_risk, 1e-9)
+                                    if new_rr2 < min_rr:
+                                        continue
+                                    hit["sl"] = safe_macro_sl
+                                    hit["sl_pct"] = round(new_risk / current_price * 100.0, 2)
+                                    hit["rr_tp1"] = round((float(hit["tp1"]) - current_price) / max(new_risk, 1e-9), 2)
+                                    hit["rr_tp2"] = round(new_rr2, 2)
 
                             # Bộ lọc cuối tuần (T7/CN): khung nhỏ 15m/1h phải có 15m MSB hoặc Retest sạch
                             if is_weekend and tf_name in ("15m", "1h") and not msb_ok and not hit.get("is_retest"):
@@ -1600,7 +1688,7 @@ class TradersszFramework:
                                     or (allowed_dir == "LONG" and asia_l > 0 and abs(swept_lvl - asia_l) / asia_l <= 0.0045)
                                 )
                             )
-                            london_asia_sweep = bool(is_london and (range_obj.get("name") == "ASIA_RANGE" or swept_asia_edge))
+                            london_asia_sweep = bool(is_london and (r_sub_name == "ASIA_RANGE" or swept_asia_edge))
                             hit["is_london_asia_sweep"] = london_asia_sweep
                             if london_asia_sweep:
                                 hit["score"] += 10
@@ -1614,12 +1702,12 @@ class TradersszFramework:
                                 pool_tag = "EQH" if allowed_dir == "SHORT" else "EQL"
                                 hit["reason"] = f"{hit['reason']} [Quét cụm thanh khoản {pool_tag}]"
 
-                            if range_obj.get("name") == primary_name:
+                            if r_sub_name == primary_name:
                                 hit["score"] += 12
                             setups.append(hit)
 
                 # Quét thêm kèo Reclaim & S/R Flip tại Weekly/Monthly/Daily Open & PDH/PDL/Monday trong vùng hợp lệ
-                reclaim_hit = TradersszFramework._scan_level_reclaim(
+                reclaim_hit = None if ltf_veto else TradersszFramework._scan_level_reclaim(
                     h1_klines=h1_klines,
                     htf_data=htf_data,
                     allowed_dir=allowed_dir,
@@ -1629,6 +1717,8 @@ class TradersszFramework:
                 )
                 if reclaim_hit:
                     if is_weekend and not m15_msb["confirmed"] and not reclaim_hit.get("is_retest"):
+                        reclaim_hit = None
+                    elif ((btc_push == "UP" and allowed_dir == "SHORT") or (btc_push == "DOWN" and allowed_dir == "LONG")) and not m15_msb["confirmed"]:
                         reclaim_hit = None
                 if reclaim_hit:
                     if m15_msb["confirmed"]:
@@ -1720,38 +1810,42 @@ class TradersszFramework:
             best = max(candidate_setups, key=lambda s: (s["score"], s["rr_tp2"]))
             direction = best["direction"]
 
-            conf = 74.0
+            conf = 72.0
             if best["tf"] in ("1d", "4h"):
-                conf += 8.0
+                conf += 6.0
             elif best["tf"] == "1h":
-                conf += 5.0
-
-            if best["range_name"] in ("MONDAY_RANGE", "DAILY_RANGE", "WEEKLY_RANGE", "SWING_RANGE", "INTRADAY_RANGE"):
                 conf += 4.0
+
+            if best["range_name"] in ("MONDAY_RANGE", "DAILY_RANGE", "WEEKLY_RANGE"):
+                conf += 4.0
+            elif best["range_name"] in ("SWING_RANGE", "INTRADAY_RANGE"):
+                conf += 2.0
 
             if best["range_name"] == "INTRADAY_RANGE" and best["tf"] == "15m" and (best.get("is_retest") or best.get("msb_confirmed")):
-                conf += 3.0
+                conf += 2.0
 
             if best.get("is_retest"):
-                conf += 4.0
+                conf += 3.0
 
             if best.get("rr_tp2", 0) >= 2.5:
-                conf += 4.0
+                conf += 3.0
 
             if best.get("msb_confirmed"):
-                conf += 4.0
+                conf += 5.0
+            else:
+                conf -= 2.0
 
             if best.get("liquidity_pool_swept"):
                 conf += 3.0
 
             if best.get("is_failed_breakout"):
-                conf += 3.0
+                conf += 2.0
 
             if best.get("is_london_asia_sweep"):
                 conf += 3.0
 
             if monday_rule_state == "MONDAY_HUNT_WINDOW" and best["range_name"] == "MONDAY_RANGE":
-                conf += 3.0
+                conf += 2.0
             elif monday_rule_state == "MONDAY_FORMING":
                 conf -= 4.0
 
@@ -1761,19 +1855,20 @@ class TradersszFramework:
                 (direction == "SHORT" and (current_price <= wo * 1.002 or htf_bias["bias"] == "BEARISH"))
             )
             if open_aligned:
-                conf += 4.0
+                conf += 3.0
 
             btc_aligned = (
                 (btc_dir_bias == "BULLISH" and direction == "LONG") or
                 (btc_dir_bias == "BEARISH" and direction == "SHORT")
             )
             if btc_aligned:
-                conf += 3.0
+                conf += 2.0
 
             if session_ctx.get("is_killzone"):
-                conf += 3.0
+                conf += 2.0
 
-            conf = round(min(96.0, max(70.0, conf)), 1)
+            max_conf_cap = 96.0 if best.get("msb_confirmed") else 84.0
+            conf = round(min(max_conf_cap, max(70.0, conf)), 1)
             reason_txt = best["reason"]
             if best.get("is_failed_breakout"):
                 reason_txt = f"⚡ [FAILED BREAKOUT REVERSAL] {reason_txt}"

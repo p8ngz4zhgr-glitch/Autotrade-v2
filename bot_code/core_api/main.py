@@ -1395,6 +1395,11 @@ def sync_bingx_positions():
                             w_px = 0.0
                         if w_px <= 0:
                             continue
+                        open_syms = {_clean_sym(p.get("symbol", "")) for p in positions if isinstance(p, dict)}
+                        if _clean_sym(w_sym) in open_syms:
+                            with _RETEST_WATCH_LOCK:
+                                _RETEST_WATCHES.pop(w_key, None)
+                            continue
                         hit_tp1_first = (w_dir == "SHORT" and w_px <= w_tp1) or (w_dir == "LONG" and w_px >= w_tp1)
                         hit_sl_first = (w_dir == "SHORT" and w_px >= w_sl) or (w_dir == "LONG" and w_px <= w_sl)
                         if hit_tp1_first or hit_sl_first:

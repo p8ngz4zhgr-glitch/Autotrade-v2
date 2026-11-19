@@ -207,7 +207,7 @@ class SignalEngine:
         traderssz_res = TradersszFramework.evaluate_traderssz_complete(
             klines_by_tf=klines_by_tf,
             current_price=price,
-            sl_buffer_pct=getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0020),
+            sl_buffer_pct=getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0040),
             min_rr=getattr(cfg, "TRADERSSZ_MIN_RR", 1.5),
             btc_bias=btc_ctx,
         )
