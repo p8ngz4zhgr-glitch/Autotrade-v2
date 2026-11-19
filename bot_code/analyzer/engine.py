@@ -267,7 +267,7 @@ class SignalEngine:
             except Exception as e:
                 log.debug("Derivatives context %s: %s", symbol, e)
 
-        # 4. Kiểm tra tin tức vĩ mô (CPI/PPI/FOMC) để giảm size an toàn khi thị trường ra tin mạnh
+        # 4. Theo dõi lịch vĩ mô tham khảo (TraderSZ: giá thể hiện trước tin tức — không chặn kèo Price Action thuần)
         news_risk = {"active": False, "event": "", "size_mult": 1.0, "pause_trading": False}
         try:
             from worker.economic_calendar import news_risk_adjustment
@@ -283,7 +283,7 @@ class SignalEngine:
             final = "WAIT"
             conf = 45.0
             traderssz_res["signal"] = "WAIT"
-            traderssz_res["reason"] = f"⏸️ Tạm đứng ngoài trong cửa sổ tin lớn ({news_risk.get('event')}) theo quản trị rủi ro."
+            traderssz_res["reason"] = f"⏸️ Tạm đứng ngoài trong cửa sổ tin lớn ({news_risk.get('event')}) theo cấu hình."
 
         # 5. Tính Kế hoạch Lệnh chuẩn TraderSZ:
         #    - Entry: Giá hiện tại khi nến Return to Range xác nhận
@@ -418,9 +418,13 @@ class SignalEngine:
             "timeframes": tf_summary,
             "plan": {
                 "entry": price,
+                "entry_mode": setup.get("entry_mode", "MARKET") if setup.get("detected") else "MARKET",
+                "limit_entry": float(setup.get("limit_entry", price) or price) if setup.get("detected") else price,
                 "sl": sl,
                 "tp1": tp1,
                 "tp2": tp2,
+                "q25": float(htf_data.get("q25", 0) or 0),
+                "q75": float(htf_data.get("q75", 0) or 0),
                 "tp_levels": tp_levels,
                 "recommended_leverage": rec_leverage,
             },

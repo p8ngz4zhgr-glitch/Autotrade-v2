@@ -502,6 +502,22 @@ def _is_precious_metal(symbol: str = "", asset_type: str = "") -> bool:
     return any(k in s for k in ("NCCOGOLD", "NCCOXAG", "XAU", "XAG", "GOLD", "SILVER"))
 
 
+def _is_crypto_sym(symbol: str = "", asset_type: str = "") -> bool:
+    atype = str(asset_type or "").upper()
+    if atype == "CRYPTO":
+        return True
+    if atype in ("GOLD", "SILVER", "STOCK") or _is_precious_metal(symbol, asset_type):
+        return False
+    s = str(symbol or "").upper()
+    if any(k in s for k in ("TSLA", "NVDA", "SPY", "QQQ", "NCSK")):
+        return False
+    return True
+
+
+_RETEST_WATCH_LOCK = threading.Lock()
+_RETEST_WATCHES: dict = {}
+
+
 def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 10, sl_pct: float = 0.02) -> tuple[int, str, dict]:
     """
     TÍNH TOÁN ĐÒN BẨY LINH ĐỘNG (10x - 20x; RIÊNG VÀNG/BẠC CỐ ĐỊNH 50x CHO 2 CHIỀU LONG/SHORT):
@@ -861,6 +877,10 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 plan["tp1"] = float(ep_data["tp1"])
             if float(ep_data.get("tp2") or 0) > 0:
                 plan["tp2"] = float(ep_data["tp2"])
+            if float(ep_data.get("q25") or 0) > 0:
+                plan["q25"] = float(ep_data["q25"])
+            if float(ep_data.get("q75") or 0) > 0:
+                plan["q75"] = float(ep_data["q75"])
             if ep_data.get("tp_levels"):
                 tp_levels_raw = ep_data["tp_levels"]
                 plan["tp_levels"] = tp_levels_raw
@@ -898,11 +918,16 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                 is_sl_notified = _SENT_NOTIFICATIONS.get(sl_notif_key, False)
 
             if not is_sl_notified:
-                lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)" if target_lvl == 1 else f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
+                if target_lvl == 1:
+                    lvl_str = f"Entry (Hòa vốn <code>${new_sl_val:.4f}</code>)"
+                    milestone_txt = "chạm mốc TP1"
+                else:
+                    lvl_str = f"mốc TP{target_lvl-1} (<code>${new_sl_val:.4f}</code>)"
+                    milestone_txt = f"vượt mốc Quarter (50% chặng TP{target_lvl-1}→TP{target_lvl})"
                 _tg_send(
                     REGISTER_TOKEN, user.telegram_id,
                     f"🛡️ <b>DỜI SL HÒA VỐN / BẢO VỆ: {sym}</b>\n"
-                    f"Giá đã đi được 50% chặng đường tới TP{target_lvl}. Tự động dời Stoploss về {lvl_str} để bảo vệ vốn!"
+                    f"Giá đã {milestone_txt}. Tự động dời Stoploss về {lvl_str} để bảo vệ lợi nhuận!"
                 )
                 _SENT_NOTIFICATIONS[sl_notif_key] = True
                 try:
@@ -1347,6 +1372,52 @@ def sync_bingx_positions():
                         positions = []
                     if not isinstance(triggers, dict):
                         triggers = {}
+
+                    # Kiểm tra các kèo LIMIT_RETEST đang chờ giá hồi test sát biên RH/RL
+                    with _RETEST_WATCH_LOCK:
+                        user_watches = [
+                            (k, dict(v)) for k, v in _RETEST_WATCHES.items()
+                            if k[0] == str(tid)
+                        ]
+                    for w_key, w in user_watches:
+                        w_sym = w["symbol"]
+                        w_dir = w["direction"]
+                        w_lim = float(w["limit_entry"])
+                        w_sl = float(w["sl"])
+                        w_tp1 = float(w["tp1"])
+                        if time.time() > float(w.get("expires_at", 0)):
+                            with _RETEST_WATCH_LOCK:
+                                _RETEST_WATCHES.pop(w_key, None)
+                            continue
+                        try:
+                            w_px = bx.get_latest_price(w_sym)
+                        except Exception:
+                            w_px = 0.0
+                        if w_px <= 0:
+                            continue
+                        hit_tp1_first = (w_dir == "SHORT" and w_px <= w_tp1) or (w_dir == "LONG" and w_px >= w_tp1)
+                        hit_sl_first = (w_dir == "SHORT" and w_px >= w_sl) or (w_dir == "LONG" and w_px <= w_sl)
+                        if hit_tp1_first or hit_sl_first:
+                            log.info("🗑️ [LIMIT RETEST HỦY] %s %s: Giá $%.4f đã chạy trước (TP1=$%.4f, SL=$%.4f) -> Xoá chờ.",
+                                     w_sym, w_dir, w_px, w_tp1, w_sl)
+                            with _RETEST_WATCH_LOCK:
+                                _RETEST_WATCHES.pop(w_key, None)
+                            continue
+                        retested = (
+                            (w_dir == "SHORT" and w_px >= w_lim * 0.999)
+                            or (w_dir == "LONG" and w_px <= w_lim * 1.001)
+                        )
+                        if retested:
+                            with _RETEST_WATCH_LOCK:
+                                _RETEST_WATCHES.pop(w_key, None)
+                            trig_sig = json.loads(json.dumps(w["signal"]))
+                            trig_sig["_retest_triggered"] = True
+                            trig_sig.setdefault("plan", {})
+                            trig_sig["plan"]["entry"] = w_px
+                            trig_sig["plan"]["entry_mode"] = "MARKET"
+                            log.info("🎯 [LIMIT RETEST KHỚP] %s %s @ $%.4f (Mục tiêu kê $%.4f) -> Vào lệnh ngay!",
+                                     w_sym, w_dir, w_px, w_lim)
+                            threading.Thread(target=_execute_for_user, args=(user, trig_sig), daemon=True).start()
 
                     for p in positions:
                         if not isinstance(p, dict):
@@ -1834,6 +1905,21 @@ def _execute_for_user(user: User, signal: dict):
             log.info("Max positions %d da dat (user %s)", user.max_positions or 7, user.telegram_id)
             return
 
+        if _is_crypto_sym(sym, signal.get("asset_type", "")):
+            max_crypto_dir = int(os.getenv("MAX_SAME_DIR_CRYPTO", "3"))
+            with _POS_LOCK:
+                same_dir_crypto = sum(
+                    1 for p in LIVE_POSITIONS
+                    if str(p.get("user_id")) == user.telegram_id
+                    and p.get("direction") == direction
+                    and _is_crypto_sym(p.get("symbol", ""))
+                    and (not reversed_closed_sym or p.get("symbol", "").replace("-", "").upper() != clean_sym)
+                )
+            if same_dir_crypto >= max_crypto_dir:
+                log.info("🛡️ [CRYPTO CAP] User %s đã có %d/%d lệnh Crypto cùng chiều %s -> bỏ qua %s tránh dính SL chùm.",
+                         user.telegram_id, same_dir_crypto, max_crypto_dir, direction, sym)
+                return
+
         entry = float(signal["plan"]["entry"])
         sl    = float(signal["plan"]["sl"])
         tp1   = float(signal["plan"]["tp1"])
@@ -1845,6 +1931,31 @@ def _execute_for_user(user: User, signal: dict):
                 tp2 = round(tp1 + abs(tp1 - entry), 4)
             else:
                 tp2 = round(tp1 - abs(tp1 - entry), 4)
+
+        entry_mode = str(signal.get("plan", {}).get("entry_mode", "MARKET") or "MARKET").upper()
+        limit_entry = float(signal.get("plan", {}).get("limit_entry", entry) or entry)
+        if entry_mode == "LIMIT_RETEST" and not signal.get("_retest_triggered"):
+            is_valid_wait = (
+                (direction == "SHORT" and limit_entry > entry * 1.0015 and limit_entry < sl)
+                or (direction == "LONG" and limit_entry < entry * 0.9985 and limit_entry > sl)
+            )
+            if is_valid_wait:
+                with _RETEST_WATCH_LOCK:
+                    _RETEST_WATCHES[(str(user.telegram_id), clean_sym)] = {
+                        "signal": json.loads(json.dumps(signal)),
+                        "symbol": sym,
+                        "clean_sym": clean_sym,
+                        "direction": direction,
+                        "limit_entry": limit_entry,
+                        "sl": sl,
+                        "tp1": tp1,
+                        "expires_at": time.time() + 5400.0,
+                    }
+                log.info(
+                    "⏳ [LIMIT RETEST] %s %s (%s): Nến SFP đóng sâu ($%.4f) -> Chờ hồi test sát biên $%.4f (SL $%.4f | TP1 $%.4f).",
+                    sym, direction, user.telegram_id, entry, limit_entry, sl, tp1,
+                )
+                return
 
         sl_pct = abs(entry - sl) / entry
         if sl_pct < 0.001:
@@ -1862,9 +1973,10 @@ def _execute_for_user(user: User, signal: dict):
         news_risk = signal.get("news_risk", {}) or {}
         if news_risk.get("active"):
             size_m = max(0.75, float(news_risk.get("size_mult", 1.0)))
-            size_mult_combined *= size_m
-            log.warning("📰 %s: Đang trong vùng ảnh hưởng tin '%s' -> điều chỉnh khối lượng x%.2f (giữ tối thiểu 75%% size).",
-                        sym, news_risk.get("event"), size_m)
+            if size_m < 0.99:
+                size_mult_combined *= size_m
+                log.warning("📰 %s: Đang trong vùng ảnh hưởng tin '%s' -> điều chỉnh khối lượng x%.2f.",
+                            sym, news_risk.get("event"), size_m)
 
         # [NEW v6.15] ĐIỀU CHỈNH KHỐI LƯỢNG THEO KỲ VỌNG LÃI SUẤT FED (FED RATE POLICY)
         try:
@@ -1991,11 +2103,14 @@ def _execute_for_user(user: User, signal: dict):
                             7 * 86400, json.dumps(entry_features)
                         )
                         sig_setup = (signal.get("traderssz", {}) or {}).get("setup", {}) or {}
+                        sig_htf = (signal.get("traderssz", {}) or {}).get("htf_opens_and_ranges", {}) or {}
                         cache.setex(
                             f"ENTRY_PLAN_{user.telegram_id}_{sv}_{direction}",
                             7 * 86400,
                             json.dumps({
                                 "sl": actual_sl, "tp1": tp1, "tp2": actual_tp,
+                                "q25": float(signal.get("plan", {}).get("q25", sig_htf.get("q25", 0)) or 0),
+                                "q75": float(signal.get("plan", {}).get("q75", sig_htf.get("q75", 0)) or 0),
                                 "tp_levels": tp_levels,
                                 "setup_type": sig_setup.get("setup_type", ""),
                                 "swept_level": float(sig_setup.get("swept_level", 0) or 0),
@@ -2012,7 +2127,11 @@ def _execute_for_user(user: User, signal: dict):
                      user.telegram_id, direction, sym, actual_qty, actual_margin, actual_risk, actual_risk_pct, effective_leverage, sl_ok, tp_ok, lev_reason)
             news_notice = ""
             if news_risk.get("active"):
-                news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - news_risk.get('size_mult', 0.5)) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
+                nm = float(news_risk.get("size_mult", 1.0) or 1.0)
+                if nm < 0.99:
+                    news_notice = f"\n⚠️ <i>(Đã giảm {int((1 - nm) * 100)}% vốn do tin tức: {news_risk.get('event')})</i>"
+                elif news_risk.get("event"):
+                    news_notice = f"\n📰 <i>(Tin vĩ mô: {news_risk.get('event')} — PA thuần TraderSZ)</i>"
 
             lev_tag = f"{effective_leverage}x"
             if effective_leverage >= 50:

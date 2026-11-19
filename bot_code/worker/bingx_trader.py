@@ -1548,19 +1548,29 @@ class BingXExchange:
             be_price = self._format_price(symbol, self.breakeven_price(direction, entry_price)) or self.breakeven_price(direction, entry_price)
             tolerance = entry_price * 0.0002  # 0.02% đệm sai số giá
 
-            # Chỉ dời SL về Hòa vốn KHI GIÁ CHẠM TP1 (tránh dời quá sớm ở 50% TP1 làm quét hòa vốn liên tục),
-            # và dời SL lên TP1 khi giá đi được 75% chặng từ TP1 -> TP2.
+            # Chỉ dời SL về Hòa vốn KHI GIÁ CHẠM TP1 (tránh dời quá sớm trước TP1 gây quét hòa vốn),
+            # và dời SL lên khóa tại TP1 ngay khi giá chạm mốc Quarter (50% chặng TP1 -> TP2 hoặc q75/q25).
+            q25_plan = float(plan.get("q25", 0) or 0)
+            q75_plan = float(plan.get("q75", 0) or 0)
             for i in range(len(tp_list) - 1, -1, -1):
                 prev_p = tp_list[i - 1] if i > 0 else entry_price
                 curr_p = tp_list[i]
 
                 if direction == "LONG":
-                    trigger_p = curr_p if i == 0 else (prev_p + 0.75 * (curr_p - prev_p))
+                    mid_quarter = prev_p + 0.50 * (curr_p - prev_p)
+                    if i >= 1 and prev_p < q75_plan < curr_p:
+                        trigger_p = min(mid_quarter, q75_plan)
+                    else:
+                        trigger_p = curr_p if i == 0 else mid_quarter
                     reached_milestone = (current_price >= trigger_p)
                     target_sl = be_price if i == 0 else (self._format_price(symbol, prev_p) or prev_p)
                     sl_already_set = (current_sl > 0) and (current_sl >= target_sl - tolerance)
                 else:  # SHORT
-                    trigger_p = curr_p if i == 0 else (prev_p - 0.75 * (prev_p - curr_p))
+                    mid_quarter = prev_p - 0.50 * (prev_p - curr_p)
+                    if i >= 1 and curr_p < q25_plan < prev_p:
+                        trigger_p = max(mid_quarter, q25_plan)
+                    else:
+                        trigger_p = curr_p if i == 0 else mid_quarter
                     reached_milestone = (current_price <= trigger_p)
                     target_sl = be_price if i == 0 else (self._format_price(symbol, prev_p) or prev_p)
                     sl_already_set = (current_sl > 0) and (current_sl <= target_sl + tolerance)
@@ -1579,7 +1589,8 @@ class BingXExchange:
                         except Exception as e:
                             log.warning("Lỗi cooldown Redis: %s", e)
 
-                    log.info(f"🛡️ [TRADERSZ BREAKEVEN] {symbol}: Đạt mốc {'TP1' if i == 0 else f'75% chặng TP{i+1}'} (${curr_p}). Dời SL về {target_sl} (cũ: {current_sl})!")
+                    milestone_lbl = "TP1" if i == 0 else f"Quarter (50% chặng TP{i}->TP{i+1})"
+                    log.info(f"🛡️ [TRADERSZ BREAKEVEN] {symbol}: Đạt mốc {milestone_lbl} (${curr_p}). Dời SL về {target_sl} (cũ: {current_sl})!")
                     upd = self.update_sl_and_keep_remaining_tps(symbol, direction, current_qty, target_sl, raw_tp_levels, current_price)
                     if not upd.get("sl_ok"):
                         log.warning(f"⚠️ {symbol}: Dời SL về {target_sl} thất bại -> thử lại chu kỳ sau.")
@@ -1596,7 +1607,7 @@ class BingXExchange:
                         "action": action_name,
                         "level": i + 1,
                         "new_sl": self._format_price(symbol, target_sl) or target_sl,
-                        "msg": f"Đã dời SL về {target_sl} khi chạm {'TP1' if i == 0 else f'75% chặng TP{i+1}'}."
+                        "msg": f"Đã dời SL về {target_sl} khi chạm {milestone_lbl}."
                     }
 
         # 2. BẢO VỆ CẮT LỖ KHẨN CẤP (CHỈ KHI VƯỢT QUA SL KẾ HOẠCH HOẶC ROE <= -82%, KHÔNG CẮT SỚM BÊN TRONG SL RÂU!)

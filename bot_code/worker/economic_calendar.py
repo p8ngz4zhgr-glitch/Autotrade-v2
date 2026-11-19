@@ -199,13 +199,15 @@ def _log_news_throttled(key: str, msg: str, *args, interval: int = 600):
 
 def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
     """
-    Kết quả dùng trực tiếp cho engine.py/bingx_trader.py/main.py/main_scanner.py:
-    {"active": bool, "event": str|None, "pause_trading": bool, "size_mult": float, "sl_tighten_mult": float}
+    Theo triết lý TraderSZ ("Giá thể hiện trước tin tức" — Price Action đi trước):
+    Mặc định KHÔNG chặn/ngắt lệnh hay ép giảm size trước tin (pause_trading=False, size_mult=1.0),
+    chỉ đính kèm tên sự kiện vĩ mô để theo dõi nếu đang trong cửa sổ tin lớn.
+    (Chỉ bật ngắt lệnh cứng nếu cấu hình ENABLE_NEWS_BLACKOUT=true).
     """
     try:
+        enable_blackout = str(os.getenv("ENABLE_NEWS_BLACKOUT", "false")).strip().lower() in ("1", "true", "yes")
         blackout_mins = int(os.getenv("MACRO_BLACKOUT_MINUTES", "90"))
 
-        # Kiểm tra lịch tin vĩ mô (CPI/PPI/NFP/FOMC...) — đã bỏ AI LLM News Scanner phản biện
         events = get_high_impact_events(days_ahead=3)
         now = datetime.utcnow()
         for e in events:
@@ -213,24 +215,24 @@ def news_risk_adjustment(hours_before: int = 12, hours_after: int = 6) -> dict:
                 et = datetime.fromisoformat(e["time"])
             except Exception:
                 continue
-            
-            # Cửa sổ ngắt lệnh cứng (mặc định 90 phút trước/sau giờ ra tin lớn)
-            if (et - timedelta(minutes=blackout_mins)) <= now <= (et + timedelta(minutes=blackout_mins)):
-                _log_news_throttled(
-                    f"blackout:{e['name']}",
-                    "🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ %d phút ra tin lớn: %s (%s) -> TẠM DỪNG MỞ VỊ THẾ BẢO VỆ VỐN!",
-                    blackout_mins, e["name"], e["time"],
-                )
-                return {"active": True, "event": e["name"], "pause_trading": True, "size_mult": 0.0, "sl_tighten_mult": 1.0}
 
-            # Cửa sổ ảnh hưởng rộng (12h trước -> 6h sau) -> giảm 50% vốn
-            if (et - timedelta(hours=hours_before)) <= now <= (et + timedelta(hours=hours_after)):
+            if (et - timedelta(minutes=blackout_mins)) <= now <= (et + timedelta(minutes=blackout_mins)):
+                if enable_blackout:
+                    _log_news_throttled(
+                        f"blackout:{e['name']}",
+                        "🛑 [MACRO BLACKOUT WINDOW] Đang trong cửa sổ %d phút ra tin lớn: %s (%s) -> TẠM DỪNG MỞ VỊ THẾ BẢO VỆ VỐN!",
+                        blackout_mins, e["name"], e["time"],
+                    )
+                    return {"active": True, "event": e["name"], "pause_trading": True, "size_mult": 0.0, "sl_tighten_mult": 1.0}
                 _log_news_throttled(
-                    f"window:{e['name']}",
-                    "📰 [NEWS WINDOW - CALENDAR] Đang trong vùng ảnh hưởng tin: %s (%s) -> giảm 50%% vốn vào lệnh, quản trị rủi ro.",
+                    f"info:{e['name']}",
+                    "📰 [TRADERSZ NEWS CONTEXT] Đang sát giờ tin %s (%s) — Giá đã phản ánh qua Range/SFP, vẫn giữ kỷ luật vào lệnh thuần PA.",
                     e["name"], e["time"],
                 )
-                return {"active": True, "event": e["name"], "pause_trading": False, "size_mult": 0.5, "sl_tighten_mult": 0.9}
+                return {"active": True, "event": e["name"], "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
+
+            if (et - timedelta(hours=hours_before)) <= now <= (et + timedelta(hours=hours_after)):
+                return {"active": True, "event": e["name"], "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
         return {"active": False, "event": None, "pause_trading": False, "size_mult": 1.0, "sl_tighten_mult": 1.0}
     except Exception as ex:
         log.warning("⚠️ news_risk_adjustment lỗi (%s) -> fail-open, không điều chỉnh gì.", ex)
