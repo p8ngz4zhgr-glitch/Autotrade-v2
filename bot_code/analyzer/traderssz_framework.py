@@ -1307,24 +1307,32 @@ class TradersszFramework:
         if is_outside_above or is_outside_below:
             breakout_tfs = [("4h", h4_klines), ("1h", h1_klines), ("15m", m15_klines), ("1d", d1_klines)]
             expected_dir = "LONG" if is_outside_above else "SHORT"
-            for range_obj in htf_data.get("all_ranges", []):
-                if range_obj.get("name") not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"):
-                    continue
-                for tf_name, tf_klines in breakout_tfs:
-                    bo_hit = TradersszFramework._scan_tf_breakout(
-                        tf_name=tf_name,
-                        klines=tf_klines,
-                        range_obj=range_obj,
-                        current_price=current_price,
-                        sl_buffer_pct=sl_buffer_pct,
-                        min_rr=min_rr,
-                    )
-                    if bo_hit and bo_hit["direction"] == expected_dir:
-                        bo_hit["msb_confirmed"] = False
-                        bo_hit["liquidity_pool_swept"] = False
-                        if range_obj.get("name") == primary_name:
-                            bo_hit["score"] += 12
-                        setups.append(bo_hit)
+            htf_dir = str(htf_bias.get("bias", "RANGE_NEUTRAL")).upper()
+            htf_opposes_bo = (expected_dir == "LONG" and htf_dir == "BEARISH") or (expected_dir == "SHORT" and htf_dir == "BULLISH")
+            in_killzone = bool(session_ctx.get("is_killzone", False))
+            if not htf_opposes_bo:
+                for range_obj in htf_data.get("all_ranges", []):
+                    if range_obj.get("name") not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"):
+                        continue
+                    for tf_name, tf_klines in breakout_tfs:
+                        bo_hit = TradersszFramework._scan_tf_breakout(
+                            tf_name=tf_name,
+                            klines=tf_klines,
+                            range_obj=range_obj,
+                            current_price=current_price,
+                            sl_buffer_pct=sl_buffer_pct,
+                            min_rr=min_rr,
+                        )
+                        if bo_hit and bo_hit["direction"] == expected_dir:
+                            # Ngoài Killzone (Asia/Dead Zone): chỉ nhận Breakout có Retest biên hoặc 4H/1D kèm volume >= 1.15x
+                            if not in_killzone and not bo_hit.get("is_retest"):
+                                if not (tf_name in ("4h", "1d") and float(bo_hit.get("vol_ratio", 1.0) or 1.0) >= 1.15):
+                                    continue
+                            bo_hit["msb_confirmed"] = False
+                            bo_hit["liquidity_pool_swept"] = False
+                            if range_obj.get("name") == primary_name:
+                                bo_hit["score"] += 12
+                            setups.append(bo_hit)
         elif is_rh_strip or is_rl_strip or primary_zone == "NO_TRADE_EQ_ZONE":
             setups = []
         else:

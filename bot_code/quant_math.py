@@ -11,12 +11,13 @@ class QuantRiskManager:
             "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"],
             "TECH_STOCKS": ["QQQ", "NVDA", "TSLA"],
             "BROAD_MARKET": ["SPY"],
-            "SAFE_HAVEN": ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT", "NCCOXAG2USDUSDT"]
+            "SAFE_HAVEN": ["NCCOGOLD2USDUSDT", "NCCOXAG2USDUSDT"]
         }
 
     def _get_asset_class(self, symbol):
+        clean = str(symbol or "").replace("-", "").upper()
         for asset_class, symbols in self.correlation_matrix.items():
-            if symbol in symbols:
+            if clean in symbols:
                 return asset_class
         return "UNKNOWN"
 
@@ -91,18 +92,22 @@ class QuantRiskManager:
             return 1.0 # Chưa có lệnh nào, danh mục sạch -> Full vốn
 
         target_class = self._get_asset_class(symbol)
+        if target_class == "UNKNOWN":
+            return 1.0
+        clean_target = str(symbol or "").replace("-", "").upper()
         penalty = 1.0
 
         for pos in open_positions:
             pos_symbol = pos.get("symbol", "")
+            clean_pos = str(pos_symbol or "").replace("-", "").upper()
             pos_class = self._get_asset_class(pos_symbol)
             
-            # Nếu đang có mã cùng nhóm tài sản (Ví dụ đang có BTC, định mua thêm ETH)
-            if pos_class == target_class and pos_symbol != symbol:
-                penalty *= 0.6  # Cắt 40% lượng vốn được phép đánh để phân tán rủi ro
-                log.info(f"Markowitz: Giảm vốn {symbol} do đang giữ mã tương quan {pos_symbol}.")
+            # Giảm vừa phải 22%/mã tương quan (sàn 0.60x) để phân tán rủi ro mà không làm lệnh bị bé quá
+            if pos_class == target_class and clean_pos != clean_target:
+                penalty *= 0.78
+                log.info(f"Markowitz: Giảm nhẹ vốn {symbol} do đang giữ mã tương quan {pos_symbol}.")
 
-        return penalty
+        return round(max(0.60, penalty), 2)
 
     def calculate_kelly_fraction(self, p_win: float, reward_risk_ratio: float, fraction: float = 0.5) -> float:
         """

@@ -102,17 +102,17 @@ def _get_user_sym_lock(user_id: str, sym: str) -> threading.Lock:
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 68.0, "max_risk_pct": 1.25,
+        "min_confidence": 74.0, "max_risk_pct": 1.25,
         "max_positions": 7, "leverage": 10, "target_monthly": "8-12%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
-        "min_confidence": 70.0, "max_risk_pct": 1.25,
+        "min_confidence": 75.0, "max_risk_pct": 1.25,
         "max_positions": 7, "leverage": 10, "target_monthly": "6-10%",
     },
     "TIER3": {
         "label": "Ca Map", "min_capital": 2000, "max_capital": float("inf"),
-        "min_confidence": 75.0, "max_risk_pct": 1.0,
+        "min_confidence": 76.0, "max_risk_pct": 1.0,
         "max_positions": 7, "leverage": 10, "target_monthly": "5-8%",
     },
 }
@@ -637,14 +637,10 @@ def _calc_order_sizing(
     else:
         quality_mult = 1.00
 
-    # 3. Hệ số giảm nhiệt danh mục (Portfolio Heat) khi đã giữ nhiều vị thế trong tổng 7 slot
+    # 3. Tránh trừ kép với Markowitz: giữ nguyên 1.00 từ slot 0–5 (Markowitz tự lo tương quan Crypto),
+    # chỉ hãm nhẹ 0.85x khi đã mở từ 6 lệnh trở lên sát trần 7 vị thế
     open_cnt = max(0, int(open_positions_count or 0))
-    if open_cnt >= 5:
-        heat_mult = 0.75
-    elif open_cnt >= 3:
-        heat_mult = 0.88
-    else:
-        heat_mult = 1.00
+    heat_mult = 0.85 if open_cnt >= 6 else 1.00
 
     # 4. Hệ số vĩ mô (News / Monday Forming / Fed Policy)
     macro_mult = max(0.45, min(1.15, float(size_mult or 1.0)))
@@ -1722,7 +1718,7 @@ async def _trade_worker_async():
                 finally:
                     db.close()
 
-                eligible = [u for u in users if conf >= (u.min_confidence or 68)]
+                eligible = [u for u in users if conf >= max(74.0, float(u.min_confidence or 74.0))]
                 if not eligible:
                     log.info("Khong co user du dieu kien cho signal %.1f%%", conf)
                     continue
@@ -1898,11 +1894,14 @@ def _execute_for_user(user: User, signal: dict):
         except Exception as ex_pnl:
             log.debug("Lỗi tính PnL 24h: %s", ex_pnl)
 
-        # 1. Khóa lợi nhuận khi đạt mục tiêu ngày ($20 - $50 USD)
-        target_daily = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
-        if today_pnl >= target_daily:
-            log.info("🏆 [TARGET LOCK] User %s đã đạt mục tiêu ngày (+%.2f USD >= $%.2f). Tự động KHÓA LỢI NHUẬN để bảo toàn thành quả!",
-                     user.telegram_id, today_pnl, target_daily)
+        # 1. Khóa lợi nhuận linh động theo % vốn (mặc định 5.5%/ngày ~ $18.4 trên vốn $335, trần $30)
+        # Chỉ chặn mở lệnh MỚI (không chặn khi vừa đóng lệnh đảo chiều để quản trị vị thế đang mở)
+        pct_target = float(os.getenv("DAILY_PROFIT_TARGET_PCT", "5.5"))
+        max_usd_cap = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
+        target_daily = min(max_usd_cap, max(1.5, float(user.capital or 0) * (pct_target / 100.0)))
+        if today_pnl >= target_daily and not reversed_closed_sym:
+            log.info("🏆 [TARGET LOCK] User %s đã đạt mục tiêu ngày (+%.2f USD >= $%.2f | %.1f%% vốn). Tự động KHÓA LỢI NHUẬN giữ thành quả!",
+                     user.telegram_id, today_pnl, target_daily, pct_target)
             return
 
         # 3. ĐÒN BẨY LINH ĐỘNG (10x - 20x; RIÊNG VÀNG/BẠC x50 CHO 2 CHIỀU LONG/SHORT)
@@ -1959,9 +1958,16 @@ def _execute_for_user(user: User, signal: dict):
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
         sig_rr    = signal.get("rr_ratio", 1.5)
         if not tp_levels:
+            is_a_plus_tp = (
+                sig_setup_type in ("SFP_WICK_REJECTION", "DEVIATION_RETURN_TO_RANGE")
+                and float(signal.get("confidence", 0) or 0) >= 84.0
+                and sig_rr_val >= 2.3
+            )
+            tp1_pct_split = 0.40 if is_a_plus_tp else 0.50
+            tp2_pct_split = round(1.0 - tp1_pct_split, 2)
             tp_levels = [
-                {"level": 1, "price": tp1, "close_pct": 0.50},
-                {"level": 2, "price": tp2, "close_pct": 0.50},
+                {"level": 1, "price": tp1, "close_pct": tp1_pct_split},
+                {"level": 2, "price": tp2, "close_pct": tp2_pct_split},
             ]
         res = bx.place_order(sym, side, qty, sl, tp2, leverage=effective_leverage, p_win=sig_p_win, rr_ratio=sig_rr, tp_levels=tp_levels)
 
@@ -2021,6 +2027,8 @@ def _execute_for_user(user: User, signal: dict):
             sl_badge = "✅ Đã đặt sàn" if sl_ok else "⚠️ Chờ Self-Heal"
             tp_badge = "✅ Đã đặt sàn" if tp_ok else "⚠️ Chờ Self-Heal"
 
+            tp1_pct_disp = int(round(float(tp_levels[0].get("close_pct", 0.50)) * 100)) if tp_levels else 50
+            tp2_pct_disp = int(round(float(tp_levels[-1].get("close_pct", 0.50)) * 100)) if len(tp_levels) >= 2 else (100 - tp1_pct_disp)
             _tg_send(
                 REGISTER_TOKEN, user.telegram_id,
                 f"🚨 <b>LỆNH MỚI: {sym}</b>\n"
@@ -2028,8 +2036,8 @@ def _execute_for_user(user: User, signal: dict):
                 f"⚡ Đòn bẩy: <b>{lev_tag}</b>\n"
                 f"💰 Qty: {actual_qty:.4f} | Margin: ~${actual_margin:.2f}{news_notice}\n"
                 f"🛑 SL: <code>${actual_sl:.4f}</code> ({sl_badge}) | Risk: ~${actual_risk:.2f} ({actual_risk_pct:.2f}% vốn)\n"
-                f"🎯 TP1: <code>${tp1:.4f}</code> → chốt 50% + SL → Entry\n"
-                f"🏆 TP2: <code>${actual_tp:.4f}</code> ({tp_badge}) → đích 50% còn lại")
+                f"🎯 TP1: <code>${tp1:.4f}</code> → chốt {tp1_pct_disp}% + SL → Entry\n"
+                f"🏆 TP2: <code>${actual_tp:.4f}</code> ({tp_badge}) → đích {tp2_pct_disp}% còn lại")
         else:
             # [FIX v6.6] TRƯỚC: "BingX loi %s: %s" với %s đầu = user.telegram_id
             # -> trông giống mã lỗi BingX nhưng thực ra là ID người dùng, gây hiểu

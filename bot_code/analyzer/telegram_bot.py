@@ -343,10 +343,13 @@ class TelegramBot:
 
         lines.extend(ob_section)
 
+        tp_lvls = plan.get("tp_levels") or []
+        tp1_pct_lbl = int(round(float(tp_lvls[0].get("close_pct", 0.5)) * 100)) if len(tp_lvls) >= 1 else 50
+        tp2_pct_lbl = int(round(float(tp_lvls[-1].get("close_pct", 0.5)) * 100)) if len(tp_lvls) >= 2 else (100 - tp1_pct_lbl)
         plan_title = "📌 <b>KẾ HOẠCH LỆNH BREAKOUT TIẾP DIỄN</b>" if is_breakout else "📌 <b>KẾ HOẠCH LỆNH TRADERSZ (RANGE-TO-RANGE)</b>"
         sl_label = "SL Biên" if is_breakout else "SL Râu"
-        tp1_label = "TP1 (50% · Mở rộng 0.5x)" if is_breakout else "TP1 (50% @ EQ)"
-        tp2_label = "TP2 (50% · Mở rộng 1.0x)" if is_breakout else "TP2 (50% @ Biên)"
+        tp1_label = f"TP1 ({tp1_pct_lbl}% · Mở rộng 0.5x)" if is_breakout else f"TP1 ({tp1_pct_lbl}% @ EQ)"
+        tp2_label = f"TP2 ({tp2_pct_lbl}% · Mở rộng 1.0x)" if is_breakout else f"TP2 ({tp2_pct_lbl}% @ Biên)"
 
         lines.extend([
             "",

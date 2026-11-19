@@ -318,9 +318,17 @@ class SignalEngine:
             sl_pct = round(abs(price - sl) / price * 100, 2) if price > 0 else 1.5
             rr_ratio = round(abs(tp2 - price) / max(abs(price - sl), 1e-6), 2)
 
+        is_a_plus_range = (
+            setup.get("detected")
+            and setup.get("setup_type") in ("SFP_WICK_REJECTION", "DEVIATION_RETURN_TO_RANGE")
+            and conf >= 84.0
+            and rr_ratio >= 2.3
+        )
+        tp1_close_pct = 0.40 if is_a_plus_range else 0.50
+        tp2_close_pct = round(1.0 - tp1_close_pct, 2)
         tp_levels = [
-            {"level": 1, "price": round(tp1, 4), "close_pct": 0.50},
-            {"level": 2, "price": round(tp2, 4), "close_pct": 0.50},
+            {"level": 1, "price": round(tp1, 4), "close_pct": tp1_close_pct},
+            {"level": 2, "price": round(tp2, 4), "close_pct": tp2_close_pct},
         ]
 
         # 6. Xác định Regime & Đòn bẩy linh động (10x - 20x; riêng Vàng/Bạc cố định 50x cho 2 chiều LONG/SHORT)
