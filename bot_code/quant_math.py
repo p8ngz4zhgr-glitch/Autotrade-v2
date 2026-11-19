@@ -9,7 +9,7 @@ class QuantRiskManager:
         # Giúp giảm rủi ro danh mục: Tránh nhồi lệnh vào các mã đi chung xu hướng
         self.correlation_matrix = {
             "CRYPTO": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"],
-            "TECH_STOCKS": ["QQQ", "NVDA", "TSLA"],
+            "TECH_STOCKS": ["QQQ", "NVDA", "TSLA", "NCSKTSLA2USDUSDT"],
             "BROAD_MARKET": ["SPY"],
             "SAFE_HAVEN": ["NCCOGOLD2USDUSDT", "NCCOXAG2USDUSDT"]
         }

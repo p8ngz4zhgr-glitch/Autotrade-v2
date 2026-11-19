@@ -84,6 +84,10 @@ def _to_scanner_sym(sym: str) -> str:
         return "NCCOGOLD2USD-USDT"
     if "NCCOXAG2USD" in clean:
         return "NCCOXAG2USD-USDT"
+    if "NCSKTSLA2USD" in clean or clean == "TSLA":
+        return "NCSKTSLA2USD-USDT"
+    if clean.startswith("NCSK") and clean.endswith("USDT"):
+        return clean[:-4] + "-USDT"
     return clean
 
 
@@ -3369,7 +3373,7 @@ ADMIN_DASHBOARD_HTML = """
                                     <option value="HYPEUSDT">HYPEUSDT (Hyperliquid)</option>
                                     <option value="XAUUSD">XAUUSD (Gold)</option>
                                     <option value="NCCOXAG2USD-USDT">NCCOXAG2USDUSDT (Silver)</option>
-                                    <option value="TSLA">TSLA (Tesla)</option>
+                                    <option value="NCSKTSLA2USD-USDT">NCSKTSLA2USDUSDT (Tesla)</option>
                                     <option value="NVDA">NVDA (Nvidia)</option>
                                     <option value="SPY">SPY (S&P 500)</option>
                                     <option value="QQQ">QQQ (Nasdaq 100)</option>

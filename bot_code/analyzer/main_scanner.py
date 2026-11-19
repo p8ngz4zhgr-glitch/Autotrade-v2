@@ -91,7 +91,7 @@ def _build_traderssz_summary(data: dict) -> str:
 class SignalBot:
     CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"]
     METALS_SYMBOLS = ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
-    STOCK_SYMBOLS  = ["TSLA", "NVDA", "SPY", "QQQ"]
+    STOCK_SYMBOLS  = ["NCSKTSLA2USD-USDT", "NVDA", "SPY", "QQQ"]
 
     def __init__(self):
         self.log = logging.getLogger("SignalBot")
@@ -273,7 +273,7 @@ class SignalBot:
         try:
             self.log.info("═" * 45)
             self.log.info("📈 Stock — %s", self.dt.now().strftime("%H:%M:%S"))
-            self._scan(self.STOCK_SYMBOLS, "US STOCKS")
+            self._scan(self.STOCK_SYMBOLS, "US STOCKS (3m)")
         except Exception as e:
             self.log.error("❌ run_stocks: %s", e)
 
@@ -327,14 +327,14 @@ class SignalBot:
 
     def _build_schedule(self):
         schedule.clear()
-        # Quét Crypto & Vàng/Bạc mỗi 3 phút; Cổ phiếu Mỹ giữ 30 phút
+        # Quét Crypto, Vàng/Bạc & Cổ phiếu Mỹ (Stock) mỗi 3 phút
         crypto_interval = 3 if getattr(cfg, "M5_SCALP_MODE", True) else 15
         schedule.every(crypto_interval).minutes.do(self.run_crypto)
         schedule.every(3).minutes.do(self.run_metals)
-        schedule.every(30).minutes.do(self.run_stocks)
+        schedule.every(3).minutes.do(self.run_stocks)
         schedule.every().hour.at(":30").do(self._hourly_report)
         schedule.every(4).minutes.do(self._self_ping)
-        self.log.info("📅 Đã cài đặt lịch quét: Crypto/%dp | Vàng-Bạc/3p | Stock/30p", crypto_interval)
+        self.log.info("📅 Đã cài đặt lịch quét: Crypto/%dp | Vàng-Bạc/3p | Stock/3p", crypto_interval)
 
     def start(self):
         self.log.info("━" * 45)
@@ -347,7 +347,8 @@ class SignalBot:
         self.run_stocks()
 
         self._build_schedule()
-        self.log.info("📅 Schedule: Crypto/15p · Stock+Gold/30p · Ping/4p · Report/giờ")
+        crypto_interval = 3 if getattr(cfg, "M5_SCALP_MODE", True) else 15
+        self.log.info("📅 Schedule: Crypto/%dp · Gold+Stock/3p · Ping/4p · Report/giờ", crypto_interval)
 
         consecutive_errors = 0
         while True:

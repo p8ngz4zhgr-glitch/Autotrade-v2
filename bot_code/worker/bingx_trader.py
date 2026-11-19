@@ -43,6 +43,8 @@ class BingXExchange:
             return "NCCOGOLD2USD-USDT"
         if "NCCOXAG2USD" in sym:
             return "NCCOXAG2USD-USDT"
+        if "NCSKTSLA2USD" in sym or sym == "TSLA":
+            return "NCSKTSLA2USD-USDT"
         if sym.endswith("USDT") and "-" not in sym:
             return sym[:-4] + "-USDT"
         return sym

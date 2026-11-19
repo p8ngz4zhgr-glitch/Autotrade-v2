@@ -208,8 +208,9 @@ class TelegramBot:
             }
         AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇", "SILVER": "🥈"}
         ANAME  = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "BNBUSDT": "BNB Chain",
-                  "SOLUSDT": "Solana", "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla", "NVDA": "NVIDIA",
-                  "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF",
+                  "SOLUSDT": "Solana", "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla",
+                  "NCSKTSLA2USD-USDT": "Tesla (TSLA)", "NCSKTSLA2USDUSDT": "Tesla (TSLA)",
+                  "NVDA": "NVIDIA", "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF",
                   "NCCOGOLD2USD-USDT": "Vàng (XAU)",
                   "NCCOXAG2USD-USDT": "Bạc (XAG)", "NCCOXAG2USDUSDT": "Bạc (XAG)"}
         TF_IC  = {"LONG": "🟢", "SHORT": "🔴", "WAIT": "⚪"}

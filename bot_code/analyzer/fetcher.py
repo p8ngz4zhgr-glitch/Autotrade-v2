@@ -430,6 +430,7 @@ class StockFetcher:
     YH_RNG = {"5m": "2d", "15m": "5d", "1h": "30d", "4h": "30d", "1d": "1y", "1w": "2y"}
     PLIM   = {
         "TSLA": (10, 5000), "NVDA": (10, 5000),
+        "NCSKTSLA2USD-USDT": (10, 5000), "NCSKTSLA2USDUSDT": (10, 5000),
         "SPY": (100, 1500), "QQQ": (100, 1500),
         "NCCOGOLD2USD-USDT": (1500, 6000), "NCCOGOLD2USDUSDT": (1500, 6000),
         "NCCOXAG2USD-USDT": (10, 250),     "NCCOXAG2USDUSDT": (10, 250),
@@ -439,6 +440,8 @@ class StockFetcher:
         "NCCOGOLD2USD-USDT": 2350.0,
         "NCCOXAG2USD-USDT": 31.5,
         "NCCOXAG2USDUSDT": 31.5,
+        "NCSKTSLA2USD-USDT": 220.0,
+        "NCSKTSLA2USDUSDT": 220.0,
         "SPY": 540.0, "TSLA": 220.0, "NVDA": 120.0,
     }
 
