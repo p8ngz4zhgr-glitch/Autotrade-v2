@@ -106,17 +106,17 @@ def _get_user_sym_lock(user_id: str, sym: str) -> threading.Lock:
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 74.0, "max_risk_pct": 1.25,
+        "min_confidence": 78.0, "max_risk_pct": 1.25,
         "max_positions": 7, "leverage": 10, "target_monthly": "8-12%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
-        "min_confidence": 75.0, "max_risk_pct": 1.25,
+        "min_confidence": 79.0, "max_risk_pct": 1.25,
         "max_positions": 7, "leverage": 10, "target_monthly": "6-10%",
     },
     "TIER3": {
         "label": "Ca Map", "min_capital": 2000, "max_capital": float("inf"),
-        "min_confidence": 76.0, "max_risk_pct": 1.0,
+        "min_confidence": 80.0, "max_risk_pct": 1.0,
         "max_positions": 7, "leverage": 10, "target_monthly": "5-8%",
     },
 }
@@ -1054,14 +1054,24 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     elif direction == "SHORT" and current_price > held_swept_lvl * 1.0085:
                         is_failed_bo_close = True
 
-                min_conf = float(getattr(user, "min_confidence", 68) or 68)
+                min_conf = max(78.0, float(getattr(user, "min_confidence", 78) or 78))
                 rev_plan = analysis.get("plan", {}) or {}
                 has_valid_rev_plan = float(rev_plan.get("entry", 0) or 0) > 0 and float(rev_plan.get("sl", 0) or 0) > 0
+                new_setup_tf = str(new_setup_obj.get("tf", "") or "").lower()
+                new_msb_ok = bool(new_setup_obj.get("msb_confirmed", False))
                 is_failed_bo_rev = bool(
                     is_reversal
                     and (held_setup_type == "RANGE_BREAKOUT_CONTINUATION" or new_setup_obj.get("is_failed_breakout"))
                     and new_setup_type in ("DEVIATION_RETURN_TO_RANGE", "SFP_WICK_REJECTION", "LEVEL_RECLAIM_SR_FLIP")
-                    and conf >= min(64.0, min_conf)
+                    and conf >= 80.0
+                    and has_valid_rev_plan
+                )
+                is_strong_htf_rev = bool(
+                    is_reversal
+                    and (not is_breakeven)
+                    and new_setup_tf in ("4h", "1d")
+                    and new_msb_ok
+                    and conf >= max(86.0, min_conf)
                     and has_valid_rev_plan
                 )
 
@@ -1085,23 +1095,22 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         f"-> Thoát nhanh bảo vệ vốn theo kỷ luật TraderSZ."
                     )
                     log.info("⚡ [FAILED BREAKOUT EXIT] %s %s: %s", user.telegram_id, sym, reason)
+                elif is_strong_htf_rev:
+                    action = "CLOSE_ALL"
+                    should_reverse = True
+                    action_type = "ĐẢO CHIỀU CẤU TRÚC HTF (4H/1D + 15M MSB)"
+                    emoji = "🔄"
+                    reason = (
+                        f"Phát hiện đảo chiều cấu trúc {new_setup_tf.upper()} + 15m MSB: {direction} → {new_direction} (Conf {conf:.1f}%) "
+                        f"-> Đóng vị thế & đảo chiều theo cấu trúc lớn."
+                    )
+                    log.info("🔄 [HTF REVERSAL TRIGGERED] %s %s: %s", user.telegram_id, sym, reason)
                 elif is_reversal:
-                    if conf >= min_conf and has_valid_rev_plan:
-                        action = "CLOSE_ALL"
-                        should_reverse = True
-                        action_type = "ĐÓNG TOÀN BỘ & ĐẢO CHIỀU THEO TÍN HIỆU MỚI"
-                        emoji = "🔄"
-                        reason = (
-                            f"Phát hiện tín hiệu đảo chiều {direction} → {new_direction} (Conf {conf:.1f}% >= {min_conf:.0f}%) "
-                            f"-> Đóng toàn bộ vị thế cũ & vào lệnh theo tín hiệu mới."
-                        )
-                        log.info("🔄 [REVERSAL TRIGGERED] %s %s: %s", user.telegram_id, sym, reason)
-                    else:
-                        action = "HOLD"
-                        log.info(
-                            "Giữ vị thế %s (%s): Tín hiệu ngược %s (%.1f%%) chưa đạt min_conf %.1f%% hoặc thiếu plan SL/TP.",
-                            sym, direction, new_direction, conf, min_conf
-                        )
+                    action = "HOLD"
+                    log.info(
+                        "🛡️ Giữ vị thế %s (%s): Bỏ qua nhiễu đảo chiều %s (%s Conf %.1f%%), để vị thế chạy tới TP1/TP2 hoặc SL.",
+                        sym, direction, new_direction, new_setup_tf.upper() or "?", conf
+                    )
                 else:
                     # BỎ HOÀN TOÀN CHỐT LỜI ĐỘNG / CHỐT LỜI SIDEWAYS / CHỐT LỜI ĐẢO CHIỀU $1
                     action = "HOLD"
@@ -1185,7 +1194,12 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         _tg_send(REGISTER_TOKEN, user.telegram_id, msg_partial)
                         if ADMIN_CHAT_ID and str(user.telegram_id) != str(ADMIN_CHAT_ID):
                             _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user.telegram_id}</code>:\n" + msg_partial)
-                        _save_journal(user.telegram_id, sym, direction, pnl_pct, res.get("closed_qty", 0))
+                        closed_qty_val = float(res.get("closed_qty", 0) or 0)
+                        realized_partial_usd = None
+                        if entry > 0 and current_price > 0 and closed_qty_val > 0:
+                            gross_part = ((current_price - entry) if direction == "LONG" else (entry - current_price)) * closed_qty_val
+                            realized_partial_usd = gross_part - (closed_qty_val * entry * 0.0010)
+                        _save_journal(user.telegram_id, sym, direction, pnl_pct, closed_qty_val, pnl_usd=realized_partial_usd)
             
             # --- CƠ CHẾ NGẮT: ĐÓNG TOÀN BỘ VỊ THẾ / ĐẢO CHIỀU ---
             elif action == "CLOSE_ALL":
@@ -1198,6 +1212,9 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         try:
                             for sv in _sym_variants(sym):
                                 cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sv}:{direction}", 120, "1")
+                            if pnl_pct < -0.1:
+                                cache.setex(f"SL_REENTRY_COOLDOWN:{user.telegram_id}:{clean_sym}", 2700, "1")
+                                cache.setex(f"SL_DIR_COOLDOWN:{user.telegram_id}:{clean_sym}:{direction}", 5400, "1")
                             _clear_position_caches(cache, user.telegram_id, sym, direction)
                         except Exception:
                             pass
@@ -1211,7 +1228,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                     _tg_send(REGISTER_TOKEN, user.telegram_id, msg_rev_close)
                     if ADMIN_CHAT_ID and str(user.telegram_id) != str(ADMIN_CHAT_ID):
                         _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user.telegram_id}</code>:\n" + msg_rev_close)
-                    _save_journal(user.telegram_id, sym, direction, pnl_pct, qty)
+                    _save_journal(user.telegram_id, sym, direction, pnl_pct, qty, pnl_usd=net_pnl_usd if entry > 0 else None)
 
                     # --- VÀO LỆNH NGƯỢC LẠI THEO TÍN HIỆU ĐẢO CHIỀU ---
                     if should_reverse:
@@ -1638,6 +1655,14 @@ def sync_bingx_positions():
                             if ADMIN_CHAT_ID and str(user_id) != str(ADMIN_CHAT_ID):
                                 _tg_send(REPORT_TOKEN or REGISTER_TOKEN, ADMIN_CHAT_ID, f"👤 User <code>{user_id}</code>:\n" + close_msg)
 
+                            if cache and (is_sl_hit or pnl_pct < -0.1):
+                                try:
+                                    c_sym = _clean_sym(symbol)
+                                    cache.setex(f"SL_REENTRY_COOLDOWN:{user_id}:{c_sym}", 2700, "1")
+                                    cache.setex(f"SL_DIR_COOLDOWN:{user_id}:{c_sym}:{direction}", 5400, "1")
+                                except Exception:
+                                    pass
+
                         _save_journal(user_id, symbol, direction, pnl_pct, qty, pnl_usd=pnl_usd if not was_reversal else None)
 
             sync_bingx_positions._prev = current_map
@@ -1798,9 +1823,9 @@ async def _trade_worker_async():
                 finally:
                     db.close()
 
-                eligible = [u for u in users if conf >= max(74.0, float(u.min_confidence or 74.0))]
+                eligible = [u for u in users if conf >= max(78.0, float(u.min_confidence or 78.0))]
                 if not eligible:
-                    log.info("Khong co user du dieu kien cho signal %.1f%%", conf)
+                    log.info("Khong co user du dieu kien cho signal %.1f%% (yêu cầu >= 78%%)", conf)
                     continue
 
                 tasks = [asyncio.to_thread(_execute_for_user, u, signal) for u in eligible]
@@ -1826,17 +1851,23 @@ def _execute_for_user(user: User, signal: dict):
     with _get_user_sym_lock(user.telegram_id, sym):
       try:
         pending_key = f"PENDING:{user.telegram_id}:{sym}:{direction}"
+        clean_sym = _clean_sym(sym)
         cache = _get_active_redis()
         if cache:
             try:
                 if any(cache.get(f"PENDING:{user.telegram_id}:{sv}:{direction}") for sv in _sym_variants(sym)):
                     log.info("Cooldown %s %s (%s) - skip", user.telegram_id, sym, direction)
                     return
+                if cache.get(f"SL_DIR_COOLDOWN:{user.telegram_id}:{clean_sym}:{direction}"):
+                    log.info("🛡️ [POST-SL COOLDOWN] User %s: %s (%s) vừa chạm SL -> nghỉ 90p tránh dính SL lặp.", user.telegram_id, sym, direction)
+                    return
+                if cache.get(f"SL_REENTRY_COOLDOWN:{user.telegram_id}:{clean_sym}") and float(signal.get("confidence", 0) or 0) < 86.0:
+                    log.info("🛡️ [POST-SL COOLDOWN] User %s: %s vừa chạm SL -> nghỉ 45p chờ cấu trúc mới.", user.telegram_id, sym)
+                    return
             except Exception:
                 pass
 
         bx_live = get_bx(user)
-        clean_sym = _clean_sym(sym)
         try:
             live = bx_live.get_open_positions()
         except Exception as e:
@@ -2003,26 +2034,43 @@ def _execute_for_user(user: User, signal: dict):
         # [M5 SCALPING] QUẢN LÝ VỐN, CHỐNG CHÁY & MỤC TIÊU NGÀY ($20 - $50 USD)
         # ══════════════════════════════════════════════════════════
         today_pnl = 0.0
+        consec_losses = 0
         try:
             tj_db = SessionLocal()
             since_24h = datetime.utcnow() - timedelta(hours=24)
             rows_24h = tj_db.query(TradeJournal).filter(
                 TradeJournal.user_id == str(user.telegram_id),
                 TradeJournal.timestamp >= since_24h
-            ).all()
+            ).order_by(TradeJournal.timestamp.desc()).all()
             today_pnl = sum(r.pnl_usd or 0.0 for r in rows_24h)
+            for row_j in rows_24h:
+                if (row_j.pnl_usd or 0.0) < 0 or (row_j.pnl_pct or 0.0) < 0:
+                    consec_losses += 1
+                else:
+                    break
             tj_db.close()
         except Exception as ex_pnl:
             log.debug("Lỗi tính PnL 24h: %s", ex_pnl)
 
-        # 1. Khóa lợi nhuận linh động theo % vốn (mặc định 5.5%/ngày ~ $18.4 trên vốn $335, trần $30)
-        # Chỉ chặn mở lệnh MỚI (không chặn khi vừa đóng lệnh đảo chiều để quản trị vị thế đang mở)
+        # 1. Khóa lợi nhuận linh động theo % vốn & Ngắt mạch lỗ ngày (3.5% vốn / min $8)
         pct_target = float(os.getenv("DAILY_PROFIT_TARGET_PCT", "5.5"))
         max_usd_cap = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
         target_daily = min(max_usd_cap, max(1.5, float(user.capital or 0) * (pct_target / 100.0)))
         if today_pnl >= target_daily and not reversed_closed_sym:
             log.info("🏆 [TARGET LOCK] User %s đã đạt mục tiêu ngày (+%.2f USD >= $%.2f | %.1f%% vốn). Tự động KHÓA LỢI NHUẬN giữ thành quả!",
                      user.telegram_id, today_pnl, target_daily, pct_target)
+            return
+
+        max_loss_pct = float(os.getenv("DAILY_MAX_LOSS_PCT", "3.5"))
+        daily_loss_limit = max(8.0, float(user.capital or 0) * (max_loss_pct / 100.0))
+        if today_pnl <= -daily_loss_limit and not reversed_closed_sym:
+            log.warning("🛑 [DAILY LOSS BREAKER] User %s: Lỗ 24h ($%.2f) chạm ngưỡng -%.1f%% vốn (-$%.2f) -> Tạm dừng mở lệnh mới bảo vệ vốn!",
+                        user.telegram_id, today_pnl, max_loss_pct, daily_loss_limit)
+            return
+
+        if consec_losses >= 3 and float(signal.get("confidence", 0) or 0) < 85.0 and not reversed_closed_sym:
+            log.info("🛡️ [STREAK GUARD] User %s thua %d lệnh liên tiếp -> Chỉ nhận kèo A+ Conf >= 85%% (hiện tại %.1f%%).",
+                     user.telegram_id, consec_losses, float(signal.get("confidence", 0) or 0))
             return
 
         # 3. ĐÒN BẨY LINH ĐỘNG (10x - 20x; RIÊNG VÀNG/BẠC x50 CHO 2 CHIỀU LONG/SHORT)
@@ -2084,7 +2132,7 @@ def _execute_for_user(user: User, signal: dict):
                 and float(signal.get("confidence", 0) or 0) >= 84.0
                 and sig_rr_val >= 2.3
             )
-            tp1_pct_split = 0.40 if is_a_plus_tp else 0.50
+            tp1_pct_split = 0.25 if is_a_plus_tp else 0.30
             tp2_pct_split = round(1.0 - tp1_pct_split, 2)
             tp_levels = [
                 {"level": 1, "price": tp1, "close_pct": tp1_pct_split},

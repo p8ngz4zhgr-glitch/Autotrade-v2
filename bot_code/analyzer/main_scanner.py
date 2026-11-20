@@ -105,7 +105,9 @@ class SignalBot:
         self._closed_notified = set()
 
         self._pushed_signals: dict[str, float] = {}
-        self._push_cooldown = 90
+        self._push_cooldown = 300
+        self._pushed_setup_sigs: dict[str, float] = {}
+        self._setup_sig_cooldown = 2700
 
         redis_url = (os.environ.get("REDIS_URL") or "").strip()
         self.redis_client = None
@@ -124,6 +126,11 @@ class SignalBot:
         keys = self.CRYPTO_SYMBOLS + self.METALS_SYMBOLS + self.STOCK_SYMBOLS
         self.last_signals    = {k: v for k, v in self.last_signals.items() if k in keys}
         self._pushed_signals = {k: v for k, v in self._pushed_signals.items() if k in keys}
+        now_ts = time.time()
+        self._pushed_setup_sigs = {
+            k: v for k, v in self._pushed_setup_sigs.items()
+            if (now_ts - v) < self._setup_sig_cooldown
+        }
         gc.collect()
         self.log.info("🧹 RAM đã dọn dẹp")
 
@@ -163,6 +170,17 @@ class SignalBot:
             self.log.info("  ⏭️ Bỏ qua push %s — cooldown còn %ds", symbol, remaining)
             return
 
+        setup_obj = (data.get("traderssz", {}) or {}).get("setup", {}) or {}
+        setup_sig_key = (
+            f"{symbol}:{data.get('final')}:{setup_obj.get('tf','')}"
+            f":{setup_obj.get('swept_level', 0)}:{setup_obj.get('sweep_extreme', 0)}"
+        )
+        last_sig_ts = self._pushed_setup_sigs.get(setup_sig_key, 0.0)
+        if now - last_sig_ts < self._setup_sig_cooldown:
+            rem_sig = int(self._setup_sig_cooldown - (now - last_sig_ts))
+            self.log.info("  ⏭️ Bỏ qua push %s — setup cũ đã đẩy (chờ %dm)", symbol, max(1, rem_sig // 60))
+            return
+
         payload = {
             "signal_id": f"sig_{int(now)}_{symbol}",
             "symbol":    symbol,
@@ -184,6 +202,7 @@ class SignalBot:
             client.lpush("TRADE_SIGNALS", json.dumps(payload))
             client.ltrim("TRADE_SIGNALS", 0, 99)
             self._pushed_signals[symbol] = now
+            self._pushed_setup_sigs[setup_sig_key] = now
             store_name = "Redis" if client == self.redis_client else "LocalStore (0% RAM/Quota)"
             self.log.info(f"📤 Đã đẩy lệnh {data['final']} {symbol} vào Hàng đợi ({store_name}) [Pure TraderSZ PA].")
         except Exception as e:

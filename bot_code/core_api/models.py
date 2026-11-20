@@ -35,7 +35,7 @@ class User(Base):
     capital               = Column(Float,    default=0.0)
     tier                  = Column(String,   default="TIER1")
 
-    min_confidence        = Column(Float,    default=74.0)
+    min_confidence        = Column(Float,    default=78.0)
     max_risk_pct          = Column(Float,    default=1.25)
     max_positions         = Column(Integer,  default=7)
     leverage              = Column(Integer,  default=10)

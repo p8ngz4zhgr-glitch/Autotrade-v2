@@ -208,7 +208,7 @@ class SignalEngine:
             klines_by_tf=klines_by_tf,
             current_price=price,
             sl_buffer_pct=getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0040),
-            min_rr=getattr(cfg, "TRADERSSZ_MIN_RR", 1.5),
+            min_rr=getattr(cfg, "TRADERSSZ_MIN_RR", 2.0),
             btc_bias=btc_ctx,
         )
 
@@ -324,7 +324,7 @@ class SignalEngine:
             and conf >= 84.0
             and rr_ratio >= 2.3
         )
-        tp1_close_pct = 0.40 if is_a_plus_range else 0.50
+        tp1_close_pct = 0.25 if is_a_plus_range else 0.30
         tp2_close_pct = round(1.0 - tp1_close_pct, 2)
         tp_levels = [
             {"level": 1, "price": round(tp1, 4), "close_pct": tp1_close_pct},

@@ -34,6 +34,7 @@ class Config:
         self.M5_SCALP_MODE            = os.getenv("M5_SCALP_MODE", "true").lower() == "true"
         self.DAILY_PROFIT_TARGET_USD  = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
         self.DAILY_MAX_LOSS_USD       = float(os.getenv("DAILY_MAX_LOSS_USD", "15.0"))
+        self.DAILY_MAX_LOSS_PCT       = float(os.getenv("DAILY_MAX_LOSS_PCT", "3.5"))
         self.MAX_RISK_PER_TRADE_PCT   = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.25"))
         self.MAX_SAFE_LEVERAGE        = int(os.getenv("MAX_SAFE_LEVERAGE", "20"))
         self.MIN_SAFE_LEVERAGE        = int(os.getenv("MIN_SAFE_LEVERAGE", "10"))
@@ -49,7 +50,7 @@ class Config:
         self.TRADERSSZ_MODE               = os.getenv("TRADERSSZ_MODE", "true").lower() == "true"
         self.TRADERSSZ_SL_BUFFER_PCT      = float(os.getenv("TRADERSSZ_SL_BUFFER_PCT", "0.0040"))
         self.TRADERSSZ_EQ_NO_TRADE_BAND   = float(os.getenv("TRADERSSZ_EQ_NO_TRADE_BAND", "0.18"))
-        self.TRADERSSZ_MIN_RR             = float(os.getenv("TRADERSSZ_MIN_RR", "1.5"))
+        self.TRADERSSZ_MIN_RR             = float(os.getenv("TRADERSSZ_MIN_RR", "2.0"))
 
         self._validate()
 
