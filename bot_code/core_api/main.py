@@ -2071,9 +2071,12 @@ def _execute_for_user(user: User, signal: dict):
         max_loss_pct = float(os.getenv("DAILY_MAX_LOSS_PCT", "3.5"))
         daily_loss_limit = max(8.0, float(user.capital or 0) * (max_loss_pct / 100.0))
         if today_pnl <= -daily_loss_limit and not reversed_closed_sym:
-            log.warning("🛑 [DAILY LOSS BREAKER] User %s: Lỗ 24h ($%.2f) chạm ngưỡng -%.1f%% vốn (-$%.2f) -> Tạm dừng mở lệnh mới bảo vệ vốn!",
-                        user.telegram_id, today_pnl, max_loss_pct, daily_loss_limit)
-            return
+            if os.getenv("ENABLE_DAILY_LOSS_BREAKER", "false").lower() == "true":
+                log.warning("🛑 [DAILY LOSS BREAKER] User %s: Lỗ 24h ($%.2f) chạm ngưỡng -%.1f%% vốn (-$%.2f) -> Tạm dừng mở lệnh mới bảo vệ vốn!",
+                            user.telegram_id, today_pnl, max_loss_pct, daily_loss_limit)
+                return
+            log.info("⚠️ [DAILY LOSS NOTICE] User %s: PnL 24h ($%.2f) vượt ngưỡng -%.1f%% (-$%.2f) — Đã huỷ Daily Loss Breaker, vẫn tiếp tục vào lệnh.",
+                     user.telegram_id, today_pnl, max_loss_pct, daily_loss_limit)
 
         if consec_losses >= 3 and float(signal.get("confidence", 0) or 0) < 85.0 and not reversed_closed_sym:
             log.info("🛡️ [STREAK GUARD] User %s thua %d lệnh liên tiếp -> Chỉ nhận kèo A+ Conf >= 85%% (hiện tại %.1f%%).",
