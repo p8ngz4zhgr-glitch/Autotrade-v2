@@ -289,6 +289,124 @@ class TradersszFramework:
         }
 
     @staticmethod
+    def _find_macro_sr_range(
+        d1_klines: Optional[Dict[str, List[float]]],
+        current_price: float,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Nhận diện Macro Structural S/R Range từ các cụm đỉnh/đáy xoay chiều (Pivot S/R) trên khung Daily (60–120 nến):
+        Hỗ trợ trường hợp giá đi tới vùng Hỗ trợ/Kháng cự đa tháng (như TraderSZ phân tích hộp S/R khung lớn).
+        """
+        if not d1_klines or len(d1_klines.get("close", [])) < 30 or current_price <= 0:
+            return None
+        highs = d1_klines["high"][:-1][-90:]
+        lows = d1_klines["low"][:-1][-90:]
+        n = len(highs)
+        piv_h: List[float] = []
+        piv_l: List[float] = []
+        for i in range(2, n - 2):
+            if highs[i] >= highs[i - 1] and highs[i] >= highs[i + 1] and highs[i] >= highs[i - 2] and highs[i] >= highs[i + 2]:
+                piv_h.append(float(highs[i]))
+            if lows[i] <= lows[i - 1] and lows[i] <= lows[i + 1] and lows[i] <= lows[i - 2] and lows[i] <= lows[i + 2]:
+                piv_l.append(float(lows[i]))
+        above_res = sorted([h for h in piv_h if h >= current_price * 0.995])
+        below_sup = sorted([l for l in piv_l if l <= current_price * 1.005], reverse=True)
+        if not above_res or not below_sup:
+            return None
+        sr_high = above_res[0]
+        sr_low = below_sup[0]
+        if sr_high <= sr_low or sr_low <= 0:
+            return None
+        width_pct = (sr_high - sr_low) / sr_low * 100.0
+        if width_pct < 2.5 or width_pct > 28.0:
+            return None
+        return {
+            "name": "MACRO_SR_RANGE",
+            "label": "Macro S/R Range (1D)",
+            "range_high": round(sr_high, 4),
+            "range_low": round(sr_low, 4),
+            "eq_50": round((sr_high + sr_low) / 2.0, 4),
+            "width_pct": round(width_pct, 2),
+            "weight": 3,
+        }
+
+    @staticmethod
+    def _detect_unswept_clean_pools(
+        m15_klines: Optional[Dict[str, List[float]]],
+        h1_klines: Optional[Dict[str, List[float]]],
+        h4_klines: Optional[Dict[str, List[float]]],
+        current_price: float,
+        tolerance_pct: float = 0.0018,
+    ) -> Dict[str, Any]:
+        """
+        Quy tắc TraderSZ về 'Clean Lows / Clean Highs':
+        - Nếu dưới Entry (0.15% - 1.5%) còn cụm Đáy Bằng (Clean Lows / EQL) CHƯA BỊ QUÉT,
+          giá có xu hướng bị hút xuống quét sạch đáy bằng đó trước khi đảo chiều -> CHẶN LONG sớm!
+        - Tương tự nếu trên Entry (0.15% - 1.5%) còn cụm Đỉnh Bằng (Clean Highs / EQH) CHƯA BỊ QUÉT -> CHẶN SHORT sớm!
+        """
+        if current_price <= 0:
+            return {"unswept_eql": None, "unswept_eqh": None, "all_unswept_eql": [], "all_unswept_eqh": []}
+
+        unswept_eqls: List[float] = []
+        unswept_eqhs: List[float] = []
+
+        for kl in (m15_klines, h1_klines, h4_klines):
+            if not kl or len(kl.get("close", [])) < 12:
+                continue
+            highs = kl["high"][:-1][-48:]
+            lows = kl["low"][:-1][-48:]
+            n = len(highs)
+
+            piv_lows: List[Tuple[int, float]] = []
+            piv_highs: List[Tuple[int, float]] = []
+            for i in range(1, n - 2):
+                if lows[i] < lows[i - 1] and lows[i] < lows[i + 1]:
+                    piv_lows.append((i, float(lows[i])))
+                if highs[i] > highs[i - 1] and highs[i] > highs[i + 1]:
+                    piv_highs.append((i, float(highs[i])))
+
+            # Nhóm Clean Lows chưa bị quét bởi các nến sau đó
+            for idx_a in range(len(piv_lows)):
+                i1, p1 = piv_lows[idx_a]
+                if p1 <= 0:
+                    continue
+                for idx_b in range(idx_a + 1, len(piv_lows)):
+                    i2, p2 = piv_lows[idx_b]
+                    if abs(p2 - p1) / p1 <= tolerance_pct:
+                        avg_l = (p1 + p2) / 2.0
+                        # Chỉ tính là nam châm nguy hiểm nếu nằm dưới giá hiện tại 0.15%..1.50%
+                        if current_price * 0.985 <= avg_l <= current_price * 0.9985:
+                            # Kiểm tra xem có nến đóng nào sau đỉnh/đáy thứ 2 đã quét thủng xuống dưới cụm này chưa
+                            later_lows = lows[i2 + 1:]
+                            already_swept = any(ll < min(p1, p2) * 0.9992 for ll in later_lows)
+                            if not already_swept:
+                                unswept_eqls.append(round(avg_l, 4))
+
+            # Nhóm Clean Highs chưa bị quét bởi các nến sau đó
+            for idx_a in range(len(piv_highs)):
+                i1, p1 = piv_highs[idx_a]
+                if p1 <= 0:
+                    continue
+                for idx_b in range(idx_a + 1, len(piv_highs)):
+                    i2, p2 = piv_highs[idx_b]
+                    if abs(p2 - p1) / p1 <= tolerance_pct:
+                        avg_h = (p1 + p2) / 2.0
+                        if current_price * 1.0015 <= avg_h <= current_price * 1.015:
+                            later_highs = highs[i2 + 1:]
+                            already_swept = any(lh > max(p1, p2) * 1.0008 for lh in later_highs)
+                            if not already_swept:
+                                unswept_eqhs.append(round(avg_h, 4))
+
+        uniq_eql = sorted(set(unswept_eqls), reverse=True)
+        uniq_eqh = sorted(set(unswept_eqhs))
+        return {
+            "unswept_eql": uniq_eql[0] if uniq_eql else None,
+            "unswept_eqh": uniq_eqh[0] if uniq_eqh else None,
+            "all_unswept_eql": uniq_eql[:3],
+            "all_unswept_eqh": uniq_eqh[:3],
+        }
+
+    @staticmethod
     def _check_m15_msb(
         m15_klines: Optional[Dict[str, List[float]]],
         direction: str,
@@ -584,14 +702,25 @@ class TradersszFramework:
             if not is_dup:
                 all_ranges.append(swing_rng)
 
+        # Macro S/R Range (1D multi-pivot) theo phương pháp kẻ hộp S/R khung lớn trong video TraderSZ
+        macro_sr_rng = TradersszFramework._find_macro_sr_range(d1_klines, current_price)
+        if macro_sr_rng:
+            is_dup_sr = any(
+                abs(r["range_high"] - macro_sr_rng["range_high"]) / max(macro_sr_rng["range_high"], 1e-6) < 0.008
+                and abs(r["range_low"] - macro_sr_rng["range_low"]) / max(macro_sr_rng["range_low"], 1e-6) < 0.008
+                for r in all_ranges
+            )
+            if not is_dup_sr:
+                all_ranges.append(macro_sr_rng)
+
         # Chọn Dealing Range chính làm bối cảnh tổng quan:
         # - Khi giá đã tăng/giảm xa khỏi PDH/PDL trong ngày -> ưu tiên INTRADAY_RANGE (90% thị trường đi ngang tạo hộp mới).
-        # - Khi giá còn trong/quanh PDH/PDL -> ưu tiên DAILY_RANGE / MONDAY_RANGE / WEEKLY_RANGE chuẩn TraderSZ.
+        # - Khi giá còn trong/quanh PDH/PDL -> ưu tiên DAILY_RANGE / MONDAY_RANGE / WEEKLY_RANGE / MONTHLY_RANGE chuẩn TraderSZ.
         primary = None
         priority_order = (
-            ("INTRADAY_RANGE", "ASIA_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE", "DAILY_RANGE")
+            ("INTRADAY_RANGE", "ASIA_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "MACRO_SR_RANGE", "SWING_RANGE", "DAILY_RANGE")
             if far_from_daily
-            else ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "INTRADAY_RANGE", "SWING_RANGE")
+            else ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "INTRADAY_RANGE", "SWING_RANGE", "MACRO_SR_RANGE")
         )
         for cand_name in priority_order:
             for r in all_ranges:
@@ -657,6 +786,7 @@ class TradersszFramework:
         monday_size_mult = 0.75 if is_monday_forming else 1.0
 
         liq_pools = TradersszFramework._detect_liquidity_pools(h1_klines, h4_klines, rh, rl, eq_50)
+        unswept_clean_pools = TradersszFramework._detect_unswept_clean_pools(m15_klines, h1_klines, h4_klines, current_price)
 
         return {
             "daily_open": round(daily_open, 4),
@@ -696,6 +826,7 @@ class TradersszFramework:
             "far_from_daily": far_from_daily,
             "intraday_range_active": bool(intraday_rng),
             "liquidity_pools": liq_pools,
+            "unswept_clean_pools": unswept_clean_pools,
             "all_ranges": all_ranges,
         }
 
@@ -1135,7 +1266,7 @@ class TradersszFramework:
 
         if rh <= rl or range_height <= 0 or current_price <= 0:
             return None
-        if r_name not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"):
+        if r_name not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "SWING_RANGE", "MACRO_SR_RANGE"):
             return None
 
         tf_weight = {"1d": 4, "4h": 4, "1h": 3, "15m": 2}.get(tf_name, 1)
@@ -1493,15 +1624,19 @@ class TradersszFramework:
         min_rr: float = 2.0,
         btc_bias: Optional[Dict[str, Any]] = None,
         utcnow: Optional[datetime] = None,
+        macro_ctx: Optional[Dict[str, Any]] = None,
+        rs_ctx: Optional[Dict[str, Any]] = None,
+        symbol: str = "",
+        asset_type: str = "CRYPTO",
     ) -> Dict[str, Any]:
         """
         Tổng hợp toàn diện hệ thống giao dịch thuần Price Action TraderSZ:
         1. Session Context (Asia / London / NY) + Weekend Liquidity Filter
-        2. HTF Opens (YO, MO, WO, DO) & Dealing Ranges (PDH/PDL, Monday Range, PWH/PWL, Asia, Intraday)
-        3. 50% Equilibrium & No-Trade Zone Check
+        2. HTF Opens (YO, MO, WO, DO) & Dealing Ranges (PDH/PDL, Monday Range, PWH/PWL, Monthly, Macro S/R, Asia, Intraday)
+        3. 50% Equilibrium & No-Trade Zone Check + Unswept Clean Lows/Highs Magnet Guard
         4. Multi-TF Deviation / SFP & 'Return to Range' Detection (1D, 4H, 1H, 15M) + London Sweep Asia
-        5. BTC Market-Leader Directional Alignment (cho Altcoin Crypto không đánh ngược sóng BTC)
-        6. Precision Wick SL + TP1 (50% EQ) + TP2 (Opposite Range Boundary)
+        5. BTC Market-Leader & Intermarket Confluence (DXY / US10Y Rejection + ALT/BTC Relative Strength)
+        6. 3-Step A+ Trigger (Sweep -> Reclaim -> Retest+MSB) & Knife-Catch Small Sizing (0.75x)
         """
         if utcnow is None:
             utcnow = datetime.now(timezone.utc)
@@ -1542,6 +1677,7 @@ class TradersszFramework:
         primary_rh = float(htf_data.get("range_high", current_price) or current_price)
         primary_rl = float(htf_data.get("range_low", current_price) or current_price)
         liq_pools = htf_data.get("liquidity_pools", {}) or {}
+        unswept_pools = htf_data.get("unswept_clean_pools", {}) or {}
         monday_rule_state = htf_data.get("monday_rule_state", "STANDARD")
 
         is_outside_above = current_price > primary_rh * 1.0020
@@ -1550,6 +1686,7 @@ class TradersszFramework:
         is_rl_strip = (primary_rl * 0.9980 <= current_price <= primary_rl * 1.0005)
 
         setups: List[Dict[str, Any]] = []
+        clean_pool_blocked: Optional[str] = None
 
         if is_outside_above or is_outside_below:
             breakout_tfs = [("4h", h4_klines), ("1h", h1_klines), ("15m", m15_klines), ("1d", d1_klines)]
@@ -1560,7 +1697,7 @@ class TradersszFramework:
             # Cuối tuần (T7/CN) thanh khoản mỏng: chặn Breakout giả, chỉ giao dịch Range SFP/Deviation chất lượng cao
             if not htf_opposes_bo and not is_weekend:
                 for range_obj in htf_data.get("all_ranges", []):
-                    if range_obj.get("name") not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"):
+                    if range_obj.get("name") not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "SWING_RANGE", "MACRO_SR_RANGE"):
                         continue
                     for tf_name, tf_klines in breakout_tfs:
                         bo_hit = TradersszFramework._scan_tf_breakout(
@@ -1601,10 +1738,12 @@ class TradersszFramework:
                 asia_l = float(htf_data.get("asia_low", 0) or 0)
                 primary_pos_pct = float(htf_data.get("range_pos_pct", 50.0) or 50.0)
                 far_from_daily = bool(htf_data.get("far_from_daily", False))
-                is_macro_primary = primary_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE")
+                is_macro_primary = primary_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE")
                 btc_push = str((btc_bias or {}).get("intraday_push", "FLAT")).upper()
                 htf_dir_bias = str(htf_bias.get("bias", "RANGE_NEUTRAL")).upper()
                 htf_opposes_dir = (htf_dir_bias == "BULLISH" and allowed_dir == "SHORT") or (htf_dir_bias == "BEARISH" and allowed_dir == "LONG")
+                unswept_eqls = [float(x) for x in (unswept_pools.get("all_unswept_eql") or ([unswept_pools["unswept_eql"]] if unswept_pools.get("unswept_eql") else []))]
+                unswept_eqhs = [float(x) for x in (unswept_pools.get("all_unswept_eqh") or ([unswept_pools["unswept_eqh"]] if unswept_pools.get("unswept_eqh") else []))]
 
                 # LTF Momentum Veto: Chặn vào SHORT/LONG ngược đầu cây nến 1H lực mạnh hoặc 15m đang ủi sát SL
                 ltf_veto = False
@@ -1670,6 +1809,31 @@ class TradersszFramework:
                                 continue
                             # 5) Chặn Altcoin đánh ngược sóng đẩy ngắn hạn của BTC nếu chưa có 15m MSB xác nhận đảo chiều
                             if ((btc_push == "UP" and allowed_dir == "SHORT") or (btc_push == "DOWN" and allowed_dir == "LONG")) and not msb_ok:
+                                continue
+                            # 6) TraderSZ Clean Lows / Clean Highs Guard:
+                            # Cấm bắt LONG ngay phía trên cụm Clean Lows (EQL) chưa bị quét khi EQL nằm giữa Entry và SL;
+                            # Cấm bắt SHORT ngay phía dưới cụm Clean Highs (EQH) chưa bị quét khi EQH nằm giữa Entry và SL.
+                            hit_sl = float(hit.get("sl", 0) or 0)
+                            hit_sweep_ext = float(hit.get("sweep_extreme", 0) or 0)
+                            trap_eql = next(
+                                (u for u in unswept_eqls if hit_sl <= u < current_price * 0.9985 and hit_sweep_ext > u * 0.9992),
+                                None,
+                            )
+                            trap_eqh = next(
+                                (u for u in unswept_eqhs if current_price * 1.0015 < u <= hit_sl and hit_sweep_ext < u * 1.0008),
+                                None,
+                            )
+                            if allowed_dir == "LONG" and trap_eql is not None:
+                                clean_pool_blocked = (
+                                    f"🧲 [CLEAN LOWS TRAP] Phát hiện cụm Clean Lows (${trap_eql:.4f}) CHƯA BỊ QUÉT nằm sát dưới Entry — "
+                                    f"TraderSZ đứng ngoài chờ quét sạch đáy bằng này trước khi LONG!"
+                                )
+                                continue
+                            elif allowed_dir == "SHORT" and trap_eqh is not None:
+                                clean_pool_blocked = (
+                                    f"🧲 [CLEAN HIGHS TRAP] Phát hiện cụm Clean Highs (${trap_eqh:.4f}) CHƯA BỊ QUÉT nằm sát trên Entry — "
+                                    f"TraderSZ đứng ngoài chờ quét sạch đỉnh bằng này trước khi SHORT!"
+                                )
                                 continue
 
                             # Nếu SL của sub-range nằm ngay dưới PDH/trên PDL trong khoảng nam châm 1.3%, nới SL ra ngoài PDH/PDL nếu vẫn giữ được R:R
@@ -1752,6 +1916,29 @@ class TradersszFramework:
                     elif is_weekend and not m15_msb["confirmed"] and not reclaim_hit.get("is_retest"):
                         reclaim_hit = None
                     elif ((btc_push == "UP" and allowed_dir == "SHORT") or (btc_push == "DOWN" and allowed_dir == "LONG")) and not m15_msb["confirmed"]:
+                        reclaim_hit = None
+                if reclaim_hit:
+                    r_sl = float(reclaim_hit.get("sl", 0) or 0)
+                    r_ext = float(reclaim_hit.get("sweep_extreme", 0) or 0)
+                    r_trap_eql = next(
+                        (u for u in unswept_eqls if r_sl <= u < current_price * 0.9985 and r_ext > u * 0.9992),
+                        None,
+                    )
+                    r_trap_eqh = next(
+                        (u for u in unswept_eqhs if current_price * 1.0015 < u <= r_sl and r_ext < u * 1.0008),
+                        None,
+                    )
+                    if allowed_dir == "LONG" and r_trap_eql is not None:
+                        clean_pool_blocked = (
+                            f"🧲 [CLEAN LOWS TRAP] Phát hiện cụm Clean Lows (${r_trap_eql:.4f}) CHƯA BỊ QUÉT nằm sát dưới Entry — "
+                            f"TraderSZ đứng ngoài chờ quét sạch đáy bằng này trước khi LONG!"
+                        )
+                        reclaim_hit = None
+                    elif allowed_dir == "SHORT" and r_trap_eqh is not None:
+                        clean_pool_blocked = (
+                            f"🧲 [CLEAN HIGHS TRAP] Phát hiện cụm Clean Highs (${r_trap_eqh:.4f}) CHƯA BỊ QUÉT nằm sát trên Entry — "
+                            f"TraderSZ đứng ngoài chờ quét sạch đỉnh bằng này trước khi SHORT!"
+                        )
                         reclaim_hit = None
                 if reclaim_hit:
                     if m15_msb["confirmed"]:
@@ -1849,9 +2036,9 @@ class TradersszFramework:
             elif best["tf"] == "1h":
                 conf += 4.0
 
-            if best["range_name"] in ("MONDAY_RANGE", "DAILY_RANGE", "WEEKLY_RANGE"):
+            if best["range_name"] in ("MONDAY_RANGE", "DAILY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE"):
                 conf += 4.0
-            elif best["range_name"] in ("SWING_RANGE", "INTRADAY_RANGE"):
+            elif best["range_name"] in ("SWING_RANGE", "INTRADAY_RANGE", "MACRO_SR_RANGE"):
                 conf += 2.0
 
             if best["range_name"] == "INTRADAY_RANGE" and best["tf"] == "15m" and (best.get("is_retest") or best.get("msb_confirmed")):
@@ -1867,6 +2054,16 @@ class TradersszFramework:
                 conf += 6.0
             else:
                 conf -= 4.0
+
+            # 3-Step A+ Trigger (Sweep -> Reclaim -> Retest/FailedBO + 15m MSB)
+            is_3step_a_plus = bool(
+                best.get("msb_confirmed")
+                and best.get("setup_type") != "RANGE_BREAKOUT_CONTINUATION"
+                and (best.get("is_retest") or best.get("is_failed_breakout") or float(best.get("vol_ratio", 1.0) or 1.0) >= 1.20)
+            )
+            best["trigger_tier"] = "A_PLUS_3STEP_TRIGGER" if is_3step_a_plus else "STANDARD_CONFIRMED"
+            if is_3step_a_plus:
+                conf += 3.0
 
             if best.get("liquidity_pool_swept"):
                 conf += 3.0
@@ -1886,6 +2083,35 @@ class TradersszFramework:
             htf_opposes_best = (htf_bias_val == "BULLISH" and direction == "SHORT") or (htf_bias_val == "BEARISH" and direction == "LONG")
             if htf_opposes_best:
                 conf -= 3.0
+
+            # Hợp lưu Liên thị trường TraderSZ (DXY + US10Y Rejection & ALT/BTC Relative Strength)
+            intermarket_info: Dict[str, Any] = {
+                "conf_delta": 0.0, "size_mult": 1.0,
+                "warnings": [], "aligned": False,
+                "intermarket_bias": "NEUTRAL", "summary": "Trung tính",
+            }
+            if macro_ctx is not None or rs_ctx is not None:
+                try:
+                    from analyzer.macro_analyzer import evaluate_intermarket_confluence
+                    intermarket_info = evaluate_intermarket_confluence(
+                        symbol=symbol,
+                        asset_type=asset_type,
+                        direction=direction,
+                        macro_ctx=macro_ctx,
+                        btc_ctx=btc_bias,
+                        rs_ctx=rs_ctx,
+                    )
+                    conf += float(intermarket_info.get("conf_delta", intermarket_info.get("conf_adj", 0.0)) or 0.0)
+                except Exception:
+                    pass
+
+            # TraderSZ Knife-Catch Rule ("When I knife catch, it's small size — get in & get out"):
+            opposes_im = bool(intermarket_info.get("warnings") or intermarket_info.get("opposes_macro"))
+            is_knife_catch = bool(htf_opposes_best or opposes_im)
+            best["is_knife_catch"] = is_knife_catch
+            best["scalp_in_and_out"] = is_knife_catch
+            knife_catch_size_mult = 0.75 if is_knife_catch else 1.0
+            best["intermarket_size_mult"] = round(min(knife_catch_size_mult, float(intermarket_info.get("size_mult", 1.0) or 1.0)), 2)
 
             wo = htf_data.get("weekly_open", current_price)
             open_aligned = (
@@ -1908,16 +2134,23 @@ class TradersszFramework:
             max_conf_cap = 96.0 if best.get("msb_confirmed") else 80.0
             conf = round(min(max_conf_cap, max(65.0, conf)), 1)
             reason_txt = best["reason"]
+            if is_3step_a_plus:
+                reason_txt = f"🎯 [3-STEP A+ TRIGGER] {reason_txt}"
             if best.get("is_failed_breakout"):
                 reason_txt = f"⚡ [FAILED BREAKOUT REVERSAL] {reason_txt}"
             if best.get("entry_mode") == "LIMIT_RETEST":
                 reason_txt = f"⏳ [LIMIT RETEST @ ${best.get('limit_entry', current_price):.4f}] {reason_txt}"
+            if is_knife_catch:
+                reason_txt = f"{reason_txt} [Knife-Catch ngược sóng HTF/Macro — Size x{best['intermarket_size_mult']} đánh nhanh rút gọn]"
             if monday_rule_state == "MONDAY_FORMING":
                 reason_txt = f"{reason_txt} [Thứ Hai đang tạo biên — giảm 25% size]"
             if is_weekend:
                 reason_txt = f"{reason_txt} [Lọc thanh khoản cuối tuần]"
             if btc_aligned:
                 reason_txt = f"{reason_txt} [Đồng pha BTC {btc_dir_bias}]"
+            im_lbl = intermarket_info.get("summary") or intermarket_info.get("label") or ""
+            if im_lbl and im_lbl != "Trung tính":
+                reason_txt = f"{reason_txt} [Liên thị trường: {im_lbl}]"
 
             return {
                 "signal": direction,
@@ -1932,6 +2165,7 @@ class TradersszFramework:
                 "is_htf_aligned": open_aligned,
                 "btc_aligned": btc_aligned,
                 "btc_bias": btc_bias,
+                "intermarket": intermarket_info,
                 "session": session_ctx,
                 "htf_opens_and_ranges": htf_data,
                 "htf_bias": htf_bias,
@@ -1943,7 +2177,12 @@ class TradersszFramework:
         rh = htf_data.get("range_high", current_price)
         rl = htf_data.get("range_low", current_price)
         eq = htf_data.get("eq_50", current_price)
-        if is_outside_above:
+        wait_setup_type = "NO_SFP_WAIT"
+        if clean_pool_blocked:
+            wait_reason = clean_pool_blocked
+            wait_conf = 52.0
+            wait_setup_type = "CLEAN_POOL_MAGNET_WAIT"
+        elif is_outside_above:
             wait_reason = (
                 f"⏳ Giá đang phía trên RH (${rh:.4f}): "
                 f"Chờ 2 nến đóng giữ vững trên RH để BUY Breakout tiếp diễn, hoặc đóng nến quay lại dưới RH để SHORT SFP."
@@ -1978,7 +2217,7 @@ class TradersszFramework:
         return {
             "signal": "WAIT",
             "confidence": wait_conf,
-            "setup": {"detected": False, "setup_type": "NO_SFP_WAIT"},
+            "setup": {"detected": False, "setup_type": wait_setup_type},
             "all_setups": [],
             "safe_sl": 0.0,
             "sl_pct": 0.0,
@@ -1988,6 +2227,12 @@ class TradersszFramework:
             "is_htf_aligned": False,
             "btc_aligned": False,
             "btc_bias": btc_bias,
+            "intermarket": {
+                "score_adj": 0, "conf_adj": 0.0, "size_mult": 1.0,
+                "opposes_macro": False, "rs_vs_btc": float((rs_ctx or {}).get("rs_vs_btc", 0.0) or 0.0),
+                "intermarket_bias": str((macro_ctx or {}).get("intermarket_bias", "NEUTRAL")),
+                "label": str((macro_ctx or {}).get("summary", "Trung tính")),
+            },
             "session": session_ctx,
             "htf_opens_and_ranges": htf_data,
             "htf_bias": htf_bias,

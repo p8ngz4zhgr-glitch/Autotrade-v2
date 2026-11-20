@@ -34,16 +34,34 @@ class SignalEngine:
     _btc_context_cache: Optional[Dict[str, Any]] = None
     _btc_cache_ts: float = 0.0
     _btc_cache_ttl: float = 120.0
+    _majors_ret_cache: Dict[str, Dict[str, Any]] = {}
 
     def __init__(self):
         self.crypto = CryptoFetcher()
         self.stock = StockFetcher()
 
     @classmethod
-    def _update_btc_cache(cls, btc_ctx: Dict[str, Any]):
+    def _calc_12h_return(cls, h1_klines: Optional[dict]) -> float:
+        if not h1_klines or len(h1_klines.get("close", [])) < 14:
+            return 0.0
+        closes = h1_klines["close"]
+        base = float(closes[-14] or 0.0)
+        curr = float(closes[-1] or 0.0)
+        if base <= 0:
+            return 0.0
+        return round(((curr - base) / base) * 100.0, 2)
+
+    @classmethod
+    def _update_btc_cache(cls, btc_ctx: Dict[str, Any], btc_ret_12h: Optional[float] = None):
         with cls._btc_cache_lock:
             cls._btc_context_cache = btc_ctx
             cls._btc_cache_ts = time.time()
+            if btc_ret_12h is not None:
+                cls._majors_ret_cache["BTCUSDT"] = {
+                    "ret_12h": float(btc_ret_12h),
+                    "bias": str(btc_ctx.get("bias", "NEUTRAL")),
+                    "ts": cls._btc_cache_ts,
+                }
 
     def _get_btc_context(self) -> Optional[Dict[str, Any]]:
         """Lấy thiên hướng dẫn dắt thị trường của BTC (cached 120s để đồng bộ toàn bộ Altcoin Crypto)."""
@@ -63,7 +81,8 @@ class SignalEngine:
             if btc_price <= 0:
                 return None
             btc_ctx = TradersszFramework.evaluate_btc_bias(btc_klines, float(btc_price))
-            self._update_btc_cache(btc_ctx)
+            btc_ret_12h = self._calc_12h_return(btc_klines.get("1h"))
+            self._update_btc_cache(btc_ctx, btc_ret_12h=btc_ret_12h)
             return dict(btc_ctx)
         except Exception as e:
             log.warning("Không thể lấy BTC Leader Bias (bỏ qua lọc đồng pha): %s", e)
@@ -197,19 +216,58 @@ class SignalEngine:
 
         price = round(float(live_price), 4)
 
-        # 2. Xác định BTC Leader Bias (chỉ áp dụng cho Altcoin Crypto, không áp dụng cho Chứng khoán/Vàng)
-        is_btc = "BTC" in symbol.upper()
+        # 2. Xác định BTC Leader Bias + Intermarket Context (DXY / US10Y / ALT-BTC RS)
+        sym_clean_u = symbol.upper().replace("-", "").replace("_", "")
+        is_btc = "BTC" in sym_clean_u
         btc_ctx: Optional[Dict[str, Any]] = None
         if atype == "CRYPTO" and not is_btc:
             btc_ctx = self._get_btc_context()
 
-        # 3. Chạy Pure TraderSZ Engine (Opens + Ranges + 50% EQ + Deviation/SFP + BTC Alignment)
+        macro_ctx: Optional[Dict[str, Any]] = None
+        try:
+            from analyzer.macro_analyzer import get_macro_market_context
+            macro_ctx = get_macro_market_context()
+        except Exception as ex_macro:
+            log.debug("Macro context fallback: %s", ex_macro)
+
+        rs_ctx: Optional[Dict[str, Any]] = None
+        sym_ret_12h = self._calc_12h_return(klines_by_tf.get("1h"))
+        if atype == "CRYPTO":
+            if sym_clean_u in ("ETHUSDT", "SOLUSDT", "BNBUSDT"):
+                with self._btc_cache_lock:
+                    self._majors_ret_cache[sym_clean_u] = {"ret_12h": sym_ret_12h, "ts": time.time()}
+            if not is_btc:
+                with self._btc_cache_lock:
+                    btc_m = self._majors_ret_cache.get("BTCUSDT", {})
+                    btc_ret_12h = float(btc_m.get("ret_12h", 0.0) or 0.0)
+                    eth_m = self._majors_ret_cache.get("ETHUSDT", {})
+                    sol_m = self._majors_ret_cache.get("SOLUSDT", {})
+                rs_vs_btc = round(sym_ret_12h - btc_ret_12h, 2)
+                majors_same_sign = bool(
+                    btc_ret_12h != 0.0
+                    and (
+                        (eth_m and (eth_m.get("ret_12h", 0.0) * btc_ret_12h > 0))
+                        or (sol_m and (sol_m.get("ret_12h", 0.0) * btc_ret_12h > 0))
+                    )
+                )
+                rs_ctx = {
+                    "sym_ret_12h": sym_ret_12h,
+                    "btc_ret_12h": btc_ret_12h,
+                    "rs_vs_btc": rs_vs_btc,
+                    "majors_aligned": majors_same_sign,
+                }
+
+        # 3. Chạy Pure TraderSZ Engine (Opens + Ranges + 50% EQ + Deviation/SFP + Clean Pools + Intermarket Confluence)
         traderssz_res = TradersszFramework.evaluate_traderssz_complete(
             klines_by_tf=klines_by_tf,
             current_price=price,
             sl_buffer_pct=getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0040),
             min_rr=getattr(cfg, "TRADERSSZ_MIN_RR", 2.0),
             btc_bias=btc_ctx,
+            macro_ctx=macro_ctx,
+            rs_ctx=rs_ctx,
+            symbol=symbol,
+            asset_type=atype,
         )
 
         if atype == "CRYPTO" and is_btc:
@@ -218,7 +276,7 @@ class SignalEngine:
                 btc_price=price,
                 btc_result=traderssz_res,
             )
-            self._update_btc_cache(btc_ctx)
+            self._update_btc_cache(btc_ctx, btc_ret_12h=sym_ret_12h)
             traderssz_res["btc_bias"] = btc_ctx
 
         final = traderssz_res["signal"]
@@ -318,13 +376,14 @@ class SignalEngine:
             sl_pct = round(abs(price - sl) / price * 100, 2) if price > 0 else 1.5
             rr_ratio = round(abs(tp2 - price) / max(abs(price - sl), 1e-6), 2)
 
+        is_knife_tp = bool(setup.get("is_knife_catch") or setup.get("scalp_in_and_out"))
         is_a_plus_range = (
             setup.get("detected")
             and setup.get("setup_type") in ("SFP_WICK_REJECTION", "DEVIATION_RETURN_TO_RANGE")
             and conf >= 84.0
             and rr_ratio >= 2.3
         )
-        tp1_close_pct = 0.25 if is_a_plus_range else 0.30
+        tp1_close_pct = 0.50 if is_knife_tp else (0.25 if is_a_plus_range else 0.30)
         tp2_close_pct = round(1.0 - tp1_close_pct, 2)
         tp_levels = [
             {"level": 1, "price": round(tp1, 4), "close_pct": tp1_close_pct},
@@ -398,7 +457,8 @@ class SignalEngine:
         tf_summary = self._build_tf_summary(klines_by_tf, traderssz_res)
         monday_mult = float(htf_data.get("monday_size_mult", 1.0) or 1.0)
         news_mult = float(news_risk.get("size_mult", 1.0) or 1.0)
-        size_mult = round(max(0.65, min(1.0, news_mult * monday_mult)), 2)
+        inter_size_mult = float(setup.get("intermarket_size_mult", 1.0) or 1.0)
+        size_mult = round(max(0.55, min(1.0, news_mult * monday_mult * inter_size_mult)), 2)
 
         btc_tag = f" | BTC:{btc_ctx.get('bias', 'NEUTRAL')}" if (atype == "CRYPTO" and btc_ctx) else ""
         log.info(
@@ -433,6 +493,8 @@ class SignalEngine:
             "atr": round(atr_val, 4),
             "traderssz": traderssz_res,
             "btc_context": btc_ctx,
+            "macro_context": macro_ctx,
+            "intermarket": traderssz_res.get("intermarket"),
             "liquidity_sweep": liquidity_sweep,
             "orderbook": ob_data,
             "oi_signal": oi_signal,

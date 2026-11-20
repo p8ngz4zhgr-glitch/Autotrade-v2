@@ -240,12 +240,16 @@ class TelegramBot:
         zone_str = ZONE_IC.get(raw_zone, raw_zone or "?")
 
         confluences = []
+        if setup.get("trigger_tier") == "A_PLUS_3STEP_TRIGGER":
+            confluences.append("3-Step A+ Trigger 🎯")
         if setup.get("msb_confirmed"):
             confluences.append(f"15M MSB ✅ (${setup.get('msb_level', 0)})")
         if setup.get("liquidity_pool_swept"):
             confluences.append("Quét cụm EQH/EQL ✅")
         if setup.get("is_failed_breakout"):
             confluences.append("Failed Breakout ⚡")
+        if setup.get("is_knife_catch"):
+            confluences.append(f"Knife-Catch Size x{setup.get('intermarket_size_mult', 0.75)} ⚠️")
         conf_line = [f"  └ Hợp lưu Pro   : <b>{' · '.join(confluences)}</b>"] if confluences else []
 
         setup_block = []
@@ -300,15 +304,36 @@ class TelegramBot:
         )
 
         btc_ctx = data.get("btc_context") or tsz.get("btc_bias") or {}
+        macro_ctx = data.get("macro_context") or {}
+        inter_ctx = data.get("intermarket") or tsz.get("intermarket") or {}
         btc_leader_lines = []
         if atype == "CRYPTO" and "BTC" not in str(data.get("symbol", "")).upper() and btc_ctx:
             btc_leader_lines.append(
                 f"  ├ BTC Leader  : <b>{btc_ctx.get('bias', 'NEUTRAL')}</b> ({btc_ctx.get('btc_signal', 'WAIT')}) · {self._to_safe_html(btc_ctx.get('reason', ''))}"
             )
+        if macro_ctx or inter_ctx:
+            dxy_p = macro_ctx.get("dxy_price", 0)
+            dxy_pa = macro_ctx.get("dxy_pa_signal", "NEUTRAL")
+            tnx_y = macro_ctx.get("us10y_yield", 0)
+            tnx_pa = macro_ctx.get("us10y_pa_signal", "NEUTRAL")
+            ibias = inter_ctx.get("intermarket_bias", macro_ctx.get("intermarket_bias", "NEUTRAL"))
+            rs_btc = inter_ctx.get("rs_vs_btc", 0.0)
+            rs_tag = f" · ALT/BTC: <b>{rs_btc:+.2f}%</b>" if (atype == "CRYPTO" and "BTC" not in str(data.get("symbol", "")).upper() and rs_btc) else ""
+            if dxy_p or tnx_y:
+                btc_leader_lines.append(
+                    f"  ├ Intermarket : <b>{ibias}</b> (DXY {dxy_p} [{dxy_pa}] · US10Y {tnx_y}% [{tnx_pa}]{rs_tag})"
+                )
 
         pools = htf.get("liquidity_pools", {}) or {}
         eqh_str = ", ".join(f"${x}" for x in (pools.get("eqh") or [])[:2]) or "Không"
         eql_str = ", ".join(f"${x}" for x in (pools.get("eql") or [])[:2]) or "Không"
+        unswept = htf.get("unswept_clean_pools", {}) or {}
+        clean_warn = []
+        if unswept.get("unswept_eql"):
+            clean_warn.append(f"EQL chưa quét ${unswept['unswept_eql']}")
+        if unswept.get("unswept_eqh"):
+            clean_warn.append(f"EQH chưa quét ${unswept['unswept_eqh']}")
+        clean_warn_tag = f" | 🧲 {' · '.join(clean_warn)}" if clean_warn else ""
         m_rule = htf.get("monday_rule_state", "STANDARD")
         m_tag = " (Đang tạo biên Thứ Hai · -25% size)" if m_rule == "MONDAY_FORMING" else (" (Cửa sổ săn Monday 🔥)" if m_rule == "MONDAY_HUNT_WINDOW" else "")
 
@@ -327,7 +352,7 @@ class TelegramBot:
             f"  ├ 50% EQ      : <code>${htf.get('eq_50',0)}</code> (Vị trí: {htf.get('range_pos_pct',50)}%)",
             f"  ├ Range Low   : <code>${htf.get('range_low',0)}</code> (25%: <code>${htf.get('q25',0)}</code>)",
             f"  ├ Phân vùng   : <b>{zone_str}</b>",
-            f"  ├ Thanh khoản : EQH [{eqh_str}] | EQL [{eql_str}]",
+            f"  ├ Thanh khoản : EQH [{eqh_str}] | EQL [{eql_str}]{clean_warn_tag}",
             f"  ├ PDH / PDL   : <code>${htf.get('pdh',0)}</code> / <code>${htf.get('pdl',0)}</code>",
             f"  ├ Monday Range: <code>${htf.get('monday_low',0)}</code> – <code>${htf.get('monday_high',0)}</code>",
             f"  ├ Weekly Range: <code>${htf.get('pwl',0)}</code> – <code>${htf.get('pwh',0)}</code>",

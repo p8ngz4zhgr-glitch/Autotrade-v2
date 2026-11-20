@@ -2002,13 +2002,20 @@ def _execute_for_user(user: User, signal: dict):
             log.warning("SL qua gan entry (%.4f%%) - bo qua", sl_pct * 100)
             return
 
-        # [NEW v6.11] Tính hệ số co khối lượng theo tin tức vĩ mô / Fed Rate / Monday Range Rule
+        # [NEW v6.11] Tính hệ số co khối lượng theo tin tức vĩ mô / Fed Rate / Monday Range Rule / Knife-Catch
         size_mult_combined = 1.0
-        htf_meta = (signal.get("traderssz", {}) or {}).get("htf_opens_and_ranges", {}) or {}
+        tsz_root = signal.get("traderssz", {}) or {}
+        tsz_setup = tsz_root.get("setup", {}) or {}
+        htf_meta = tsz_root.get("htf_opens_and_ranges", {}) or {}
         monday_mult = float(htf_meta.get("monday_size_mult", 1.0) or 1.0)
         if monday_mult < 1.0:
             size_mult_combined *= monday_mult
             log.info("📅 [MONDAY RANGE RULE] %s: Đang tạo biên Thứ Hai -> điều chỉnh size x%.2f", sym, monday_mult)
+
+        inter_mult = float(tsz_setup.get("intermarket_size_mult", 1.0) or 1.0)
+        if inter_mult < 1.0:
+            size_mult_combined *= inter_mult
+            log.info("⚖️ [KNIFE-CATCH / INTERMARKET] %s: Ngược sóng HTF/Macro -> giảm size bảo thủ x%.2f", sym, inter_mult)
 
         news_risk = signal.get("news_risk", {}) or {}
         if news_risk.get("active"):
@@ -2127,12 +2134,13 @@ def _execute_for_user(user: User, signal: dict):
         sig_p_win = signal.get("bayes_ev", {}).get("p_win", signal.get("confidence", 50)) / 100
         sig_rr    = signal.get("rr_ratio", 1.5)
         if not tp_levels:
+            is_knife_tp = bool(sig_setup_obj.get("is_knife_catch") or sig_setup_obj.get("scalp_in_and_out"))
             is_a_plus_tp = (
                 sig_setup_type in ("SFP_WICK_REJECTION", "DEVIATION_RETURN_TO_RANGE")
                 and float(signal.get("confidence", 0) or 0) >= 84.0
                 and sig_rr_val >= 2.3
             )
-            tp1_pct_split = 0.25 if is_a_plus_tp else 0.30
+            tp1_pct_split = 0.50 if is_knife_tp else (0.25 if is_a_plus_tp else 0.30)
             tp2_pct_split = round(1.0 - tp1_pct_split, 2)
             tp_levels = [
                 {"level": 1, "price": tp1, "close_pct": tp1_pct_split},
