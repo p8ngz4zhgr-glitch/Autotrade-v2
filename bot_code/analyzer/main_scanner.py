@@ -89,7 +89,10 @@ def _build_traderssz_summary(data: dict) -> str:
 
 
 class SignalBot:
-    CRYPTO_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"]
+    CRYPTO_SYMBOLS = [
+        "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT",
+        "LINKUSDT", "DOGEUSDT", "ZECUSDT", "SUIUSDT",
+    ]
     METALS_SYMBOLS = ["NCCOGOLD2USD-USDT", "NCCOXAG2USD-USDT"]
     STOCK_SYMBOLS  = ["NCSKTSLA2USD-USDT", "NVDA", "SPY", "QQQ"]
 
@@ -274,7 +277,7 @@ class SignalBot:
         self.log.info("═" * 45)
         self.log.info("🔄 Scan #%d — %s", self._scan_count, self.dt.now().strftime("%H:%M:%S"))
         try:
-            self._scan(self.CRYPTO_SYMBOLS, "CRYPTO BTC·ETH·BNB·SOL·HYPE")
+            self._scan(self.CRYPTO_SYMBOLS, "CRYPTO BTC·ETH·BNB·SOL·HYPE·LINK·DOGE·ZEC·SUI")
         except Exception as e:
             self.log.error("❌ run_crypto: %s", e)
         if self._scan_count % 8 == 0:
@@ -311,8 +314,10 @@ class SignalBot:
                 zn = htf.get("market_zone", "?")
                 eq = htf.get("eq_50", 0)
                 bar = "█" * int(d["confidence"] / 10) + "░" * (10 - int(d["confidence"] / 10))
+                px_val = float(d.get("price", 0) or 0)
+                px_str = str(round(px_val, 4 if px_val < 10 else 2))
                 rows.append("  " + SIG.get(d["final"], "❓") + " <b>" + sym.replace("USDT", "") + "</b> <code>$" +
-                             str(round(d["price"], 2)) + "</code> <b>" + d["final"] + "</b> " +
+                             px_str + "</code> <b>" + d["final"] + "</b> " +
                              str(d["confidence"]) + "% [" + bar + "] " + ZONE_IC.get(zn, "⚪") + f"{zn} (EQ:${eq})")
             rows.append("\n📈 <b>VÀNG · BẠC · CỔ PHIẾU</b>")
             for sym in self.METALS_SYMBOLS + self.STOCK_SYMBOLS:

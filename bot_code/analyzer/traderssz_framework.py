@@ -294,40 +294,78 @@ class TradersszFramework:
         current_price: float,
     ) -> Optional[Dict[str, Any]]:
         """
-        Nhận diện Macro Structural S/R Range từ các cụm đỉnh/đáy xoay chiều (Pivot S/R) trên khung Daily (60–120 nến):
-        Hỗ trợ trường hợp giá đi tới vùng Hỗ trợ/Kháng cự đa tháng (như TraderSZ phân tích hộp S/R khung lớn).
+        Nhận diện Macro Structural S/R Range từ các cụm đỉnh/đáy xoay chiều (Pivot S/R) trên khung Daily (tới 365 nến):
+        - Gom cụm các mốc Pivot chạm nhiều lần (multi-touch S/R trong vòng 0.85%) để chọn vùng kháng cự (RH) & hỗ trợ (RL) cứng nhất.
+        - Nới biên độ hộp khung lớn tới 45% để bắt trọn các vùng S/R đa tuần / đa tháng chuẩn TraderSZ.
         """
         if not d1_klines or len(d1_klines.get("close", [])) < 30 or current_price <= 0:
             return None
-        highs = d1_klines["high"][:-1][-90:]
-        lows = d1_klines["low"][:-1][-90:]
+        highs = d1_klines["high"][:-1][-365:]
+        lows = d1_klines["low"][:-1][-365:]
         n = len(highs)
         piv_h: List[float] = []
         piv_l: List[float] = []
         for i in range(2, n - 2):
-            if highs[i] >= highs[i - 1] and highs[i] >= highs[i + 1] and highs[i] >= highs[i - 2] and highs[i] >= highs[i + 2]:
+            if (
+                highs[i] >= highs[i - 1] and highs[i] >= highs[i + 1]
+                and highs[i] >= highs[i - 2] and highs[i] >= highs[i + 2]
+                and (highs[i] > highs[i - 1] or highs[i] > highs[i + 1])
+            ):
                 piv_h.append(float(highs[i]))
-            if lows[i] <= lows[i - 1] and lows[i] <= lows[i + 1] and lows[i] <= lows[i - 2] and lows[i] <= lows[i + 2]:
+            if (
+                lows[i] <= lows[i - 1] and lows[i] <= lows[i + 1]
+                and lows[i] <= lows[i - 2] and lows[i] <= lows[i + 2]
+                and (lows[i] < lows[i - 1] or lows[i] < lows[i + 1])
+            ):
                 piv_l.append(float(lows[i]))
-        above_res = sorted([h for h in piv_h if h >= current_price * 0.995])
-        below_sup = sorted([l for l in piv_l if l <= current_price * 1.005], reverse=True)
+
+        def _cluster_sr(levels: List[float], tol_pct: float = 0.0085) -> List[Tuple[float, int]]:
+            clusters: List[Tuple[float, int]] = []
+            used = [False] * len(levels)
+            for idx_a, lv in enumerate(levels):
+                if used[idx_a] or lv <= 0:
+                    continue
+                grp = [lv]
+                used[idx_a] = True
+                for idx_b in range(idx_a + 1, len(levels)):
+                    if not used[idx_b] and abs(levels[idx_b] - lv) / lv <= tol_pct:
+                        grp.append(levels[idx_b])
+                        used[idx_b] = True
+                clusters.append((sum(grp) / len(grp), len(grp)))
+            return clusters
+
+        res_clusters = _cluster_sr(piv_h)
+        sup_clusters = _cluster_sr(piv_l)
+
+        above_res = sorted(
+            [c for c in res_clusters if c[0] >= current_price * 0.992],
+            key=lambda c: (0 if c[1] >= 2 and c[0] <= current_price * 1.18 else 1, c[0]),
+        )
+        below_sup = sorted(
+            [c for c in sup_clusters if c[0] <= current_price * 1.008],
+            key=lambda c: (0 if c[1] >= 2 and c[0] >= current_price * 0.82 else 1, -c[0]),
+        )
         if not above_res or not below_sup:
             return None
-        sr_high = above_res[0]
-        sr_low = below_sup[0]
+
+        sr_high, res_touches = above_res[0]
+        sr_low, sup_touches = below_sup[0]
         if sr_high <= sr_low or sr_low <= 0:
             return None
         width_pct = (sr_high - sr_low) / sr_low * 100.0
-        if width_pct < 2.5 or width_pct > 28.0:
+        if width_pct < 2.5 or width_pct > 45.0:
             return None
+        total_touches = res_touches + sup_touches
+        lbl = f"Macro S/R Range (1D · {total_touches} chạm)" if total_touches >= 3 else "Macro S/R Range (1D)"
         return {
             "name": "MACRO_SR_RANGE",
-            "label": "Macro S/R Range (1D)",
+            "label": lbl,
             "range_high": round(sr_high, 4),
             "range_low": round(sr_low, 4),
             "eq_50": round((sr_high + sr_low) / 2.0, 4),
             "width_pct": round(width_pct, 2),
-            "weight": 3,
+            "weight": 4 if total_touches >= 3 else 3,
+            "touches": total_touches,
         }
 
     @staticmethod
@@ -714,27 +752,52 @@ class TradersszFramework:
                 all_ranges.append(macro_sr_rng)
 
         # Chọn Dealing Range chính làm bối cảnh tổng quan:
-        # - Khi giá đã tăng/giảm xa khỏi PDH/PDL trong ngày -> ưu tiên INTRADAY_RANGE (90% thị trường đi ngang tạo hộp mới).
-        # - Khi giá còn trong/quanh PDH/PDL -> ưu tiên DAILY_RANGE / MONDAY_RANGE / WEEKLY_RANGE / MONTHLY_RANGE chuẩn TraderSZ.
+        # - Khi giá đã tăng/giảm xa khỏi PDH/PDL trong ngày -> ưu tiên INTRADAY_RANGE / MACRO_SR_RANGE / WEEKLY / MONTHLY.
+        # - Khi DAILY_RANGE đang lơ lửng ở giữa (38% - 62%) nhưng giá lại đang test sát biên RH/RL của vùng S/R khung lớn
+        #   (WEEKLY / MONTHLY / MACRO_SR_RANGE / MONDAY_RANGE) -> nâng vùng S/R khung lớn đang test lên làm Primary Range!
+        # - Khi giá còn quanh biên PDH/PDL -> ưu tiên DAILY_RANGE / MONDAY_RANGE / WEEKLY_RANGE chuẩn TraderSZ.
         primary = None
+        daily_rng_obj = next((r for r in all_ranges if r["name"] == "DAILY_RANGE"), None)
+        daily_in_mid = False
+        if daily_rng_obj and not far_from_daily:
+            d_span = max(daily_rng_obj["range_high"] - daily_rng_obj["range_low"], 1e-6)
+            d_pos = (current_price - daily_rng_obj["range_low"]) / d_span * 100.0
+            daily_in_mid = (36.0 <= d_pos <= 64.0)
+
+        if daily_in_mid:
+            for macro_name in ("MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "MACRO_SR_RANGE"):
+                for r in all_ranges:
+                    if r["name"] == macro_name:
+                        m_span = max(r["range_high"] - r["range_low"], 1e-6)
+                        m_pos = (current_price - r["range_low"]) / m_span * 100.0
+                        if (
+                            (r["range_low"] * 0.975 <= current_price <= r["range_high"] * 1.025)
+                            and (m_pos <= 24.0 or m_pos >= 76.0)
+                        ):
+                            primary = r
+                            break
+                if primary:
+                    break
+
         priority_order = (
             ("INTRADAY_RANGE", "ASIA_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "MACRO_SR_RANGE", "SWING_RANGE", "DAILY_RANGE")
             if far_from_daily
-            else ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "INTRADAY_RANGE", "SWING_RANGE", "MACRO_SR_RANGE")
+            else ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "MACRO_SR_RANGE", "INTRADAY_RANGE", "SWING_RANGE")
         )
-        for cand_name in priority_order:
-            for r in all_ranges:
-                if r["name"] == cand_name:
-                    r_span = max(r["range_high"] - r["range_low"], 1e-6)
-                    in_tight_band = (
-                        (r["range_low"] - r_span * 0.35 <= current_price <= r["range_high"] + r_span * 0.35)
-                        and (r["range_low"] * 0.975 <= current_price <= r["range_high"] * 1.025)
-                    )
-                    if in_tight_band:
-                        primary = r
-                        break
-            if primary:
-                break
+        if primary is None:
+            for cand_name in priority_order:
+                for r in all_ranges:
+                    if r["name"] == cand_name:
+                        r_span = max(r["range_high"] - r["range_low"], 1e-6)
+                        in_tight_band = (
+                            (r["range_low"] - r_span * 0.35 <= current_price <= r["range_high"] + r_span * 0.35)
+                            and (r["range_low"] * 0.975 <= current_price <= r["range_high"] * 1.025)
+                        )
+                        if in_tight_band:
+                            primary = r
+                            break
+                if primary:
+                    break
         if primary is None:
             for cand_name in priority_order:
                 for r in all_ranges:
@@ -812,6 +875,10 @@ class TradersszFramework:
             "asia_low": round(asia_low, 4),
             "asia_eq": round((asia_high + asia_low) / 2.0, 4) if asia_ready else 0.0,
             "asia_ready": asia_ready,
+            "macro_sr_high": macro_sr_rng["range_high"] if macro_sr_rng else 0.0,
+            "macro_sr_low": macro_sr_rng["range_low"] if macro_sr_rng else 0.0,
+            "macro_sr_eq": macro_sr_rng["eq_50"] if macro_sr_rng else 0.0,
+            "macro_sr_ready": bool(macro_sr_rng),
             "range_name": primary["name"],
             "range_label": primary["label"],
             "range_high": rh,
@@ -962,7 +1029,7 @@ class TradersszFramework:
 
                     setup_type = "DEVIATION_RETURN_TO_RANGE" if is_return_to_range else "SFP_WICK_REJECTION"
                     vol_ratio = vols[idx] / avg_vol if avg_vol > 0 else 1.0
-                    is_failed_breakout = bool(is_return_to_range and r_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"))
+                    is_failed_breakout = bool(is_return_to_range and r_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "MACRO_SR_RANGE", "SWING_RANGE"))
 
                     candidates.append({
                         "detected": True,
@@ -1063,7 +1130,7 @@ class TradersszFramework:
 
                     setup_type = "DEVIATION_RETURN_TO_RANGE" if is_return_to_range else "SFP_WICK_REJECTION"
                     vol_ratio = vols[idx] / avg_vol if avg_vol > 0 else 1.0
-                    is_failed_breakout = bool(is_return_to_range and r_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "SWING_RANGE"))
+                    is_failed_breakout = bool(is_return_to_range and r_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "MACRO_SR_RANGE", "SWING_RANGE"))
 
                     candidates.append({
                         "detected": True,
@@ -1134,6 +1201,12 @@ class TradersszFramework:
             ("PDL", "PDL Flip", float(htf_data.get("pdl", 0) or 0)),
             ("MONDAY_HIGH", "Monday High Flip", float(htf_data.get("monday_high", 0) or 0)),
             ("MONDAY_LOW", "Monday Low Flip", float(htf_data.get("monday_low", 0) or 0)),
+            ("PWH", "Weekly High (PWH) Flip", float(htf_data.get("pwh", 0) or 0)),
+            ("PWL", "Weekly Low (PWL) Flip", float(htf_data.get("pwl", 0) or 0)),
+            ("PMH", "Monthly High (PMH) Flip", float(htf_data.get("pmh", 0) or 0)),
+            ("PML", "Monthly Low (PML) Flip", float(htf_data.get("pml", 0) or 0)),
+            ("MACRO_SR_H", "1D Macro Resistance Flip", float(htf_data.get("macro_sr_high", 0) or 0)),
+            ("MACRO_SR_L", "1D Macro Support Flip", float(htf_data.get("macro_sr_low", 0) or 0)),
         ]
         c2_c = float(closes[-2])
         c2_o = float(opens[-2])
@@ -1738,7 +1811,8 @@ class TradersszFramework:
                 asia_l = float(htf_data.get("asia_low", 0) or 0)
                 primary_pos_pct = float(htf_data.get("range_pos_pct", 50.0) or 50.0)
                 far_from_daily = bool(htf_data.get("far_from_daily", False))
-                is_macro_primary = primary_name in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE")
+                MACRO_RANGE_NAMES = ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE", "MONTHLY_RANGE", "MACRO_SR_RANGE")
+                is_macro_primary = primary_name in MACRO_RANGE_NAMES
                 btc_push = str((btc_bias or {}).get("intraday_push", "FLAT")).upper()
                 htf_dir_bias = str(htf_bias.get("bias", "RANGE_NEUTRAL")).upper()
                 htf_opposes_dir = (htf_dir_bias == "BULLISH" and allowed_dir == "SHORT") or (htf_dir_bias == "BEARISH" and allowed_dir == "LONG")
@@ -1767,8 +1841,9 @@ class TradersszFramework:
                 if not ltf_veto:
                   for range_obj in htf_data.get("all_ranges", []):
                     r_sub_name = range_obj.get("name", "")
-                    is_sub_range = r_sub_name not in ("DAILY_RANGE", "MONDAY_RANGE", "WEEKLY_RANGE")
-                    # Nested Range Guard: Khi giá vẫn còn trong DAILY_RANGE, cấm Short/Long sub-range ở vùng lửng 21-79% trước khi giá test PDH/PDL!
+                    is_sub_range = r_sub_name not in MACRO_RANGE_NAMES
+                    # Nested Range Guard: Khi giá vẫn còn trong Range Chính, cấm Short/Long sub-range nhỏ ở vùng lửng 21-79%
+                    # (Riêng MONTHLY_RANGE và MACRO_SR_RANGE được giữ ngang hàng Macro HTF Range để không bỏ lỡ S/R lớn)
                     if is_macro_primary and not far_from_daily and is_sub_range:
                         if allowed_dir == "SHORT" and primary_pos_pct < 80.0:
                             sub_near_macro = abs(float(range_obj.get("range_high", 0)) - primary_rh) / max(primary_rh, 1e-9) <= 0.006

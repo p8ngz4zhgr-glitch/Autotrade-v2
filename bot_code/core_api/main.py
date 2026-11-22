@@ -1842,6 +1842,90 @@ async def _trade_worker_async():
                     pass
 
 
+def _is_position_breakeven(cache, user_id: str, sym: str, direction: str, pos: dict | None = None) -> bool:
+    """Kiểm tra vị thế đã dời SL về Hòa vốn / Trailing bảo vệ vốn (Free-Roll) chưa."""
+    if pos and bool(pos.get("is_breakeven")):
+        return True
+    if not cache or not sym:
+        return False
+    try:
+        for sv in _sym_variants(sym):
+            if cache.get(f"BREAKEVEN_{user_id}_{sv}_{direction}"):
+                return True
+            if cache.get(f"TRAILING_SL_{user_id}_{sv}_{direction}_2") or cache.get(f"TRAILING_SL_{user_id}_{sv}_{direction}_3"):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _evaluate_crypto_dir_slot(
+    same_dir_crypto_positions: list,
+    cache,
+    user_id: str,
+    direction: str,
+    signal: dict,
+    max_crypto_dir: int = 3,
+    overflow_cap: int = 2,
+    user_max_positions: int = 7,
+    total_open_positions: int = 0,
+) -> dict:
+    """
+    Giải pháp 1 + 2 cho nhóm Crypto cùng chiều:
+    1. Free-Roll Slot Unlock: Lệnh đã dời SL về Hòa vốn (BE) tự nhả slot, không tính vào ngưỡng rủi ro.
+    2. A+ Overflow Reduced-Size: Khi đủ `max_crypto_dir` lệnh chưa hòa vốn, cho phép mở thêm tối đa
+       `overflow_cap` (+2) lệnh NẾU kèo mới đạt chuẩn A+ (Confidence >= 85% hoặc A_PLUS_3STEP_TRIGGER)
+       với khối lượng giảm còn 50% (0.50x).
+    """
+    total_same_dir = len(same_dir_crypto_positions)
+    be_count = sum(
+        1 for p in same_dir_crypto_positions
+        if _is_position_breakeven(cache, user_id, p.get("symbol", ""), direction, pos=p)
+    )
+    risky_count = max(0, total_same_dir - be_count)
+
+    sig_conf = float(signal.get("confidence", 0) or 0)
+    sig_setup = ((signal.get("traderssz", {}) or {}).get("setup", {}) or {})
+    is_a_plus = bool(sig_conf >= 85.0 or sig_setup.get("trigger_tier") == "A_PLUS_3STEP_TRIGGER")
+
+    hard_risky_cap = max_crypto_dir + max(0, overflow_cap)
+    if risky_count < max_crypto_dir:
+        return {
+            "allowed": True,
+            "size_mult": 1.0,
+            "mode": "FREE_ROLL_UNLOCK" if be_count > 0 else "NORMAL",
+            "total_same_dir": total_same_dir,
+            "be_count": be_count,
+            "risky_count": risky_count,
+            "is_a_plus": is_a_plus,
+        }
+
+    if (
+        is_a_plus
+        and risky_count < hard_risky_cap
+        and total_open_positions < user_max_positions
+    ):
+        return {
+            "allowed": True,
+            "size_mult": 0.50,
+            "mode": "A_PLUS_OVERFLOW",
+            "total_same_dir": total_same_dir,
+            "be_count": be_count,
+            "risky_count": risky_count,
+            "is_a_plus": is_a_plus,
+        }
+
+    return {
+        "allowed": False,
+        "size_mult": 0.0,
+        "mode": "BLOCKED",
+        "total_same_dir": total_same_dir,
+        "be_count": be_count,
+        "risky_count": risky_count,
+        "is_a_plus": is_a_plus,
+    }
+
+
 def _execute_for_user(user: User, signal: dict):
     sym       = signal.get("symbol", "")
     direction = signal.get("final", "WAIT")
@@ -1945,20 +2029,49 @@ def _execute_for_user(user: User, signal: dict):
             log.info("Max positions %d da dat (user %s)", user.max_positions or 7, user.telegram_id)
             return
 
+        crypto_overflow_mult = 1.0
         if _is_crypto_sym(sym, signal.get("asset_type", "")):
             max_crypto_dir = int(os.getenv("MAX_SAME_DIR_CRYPTO", "3"))
+            overflow_cap = int(os.getenv("MAX_SAME_DIR_CRYPTO_OVERFLOW", "2"))
             with _POS_LOCK:
-                same_dir_crypto = sum(
-                    1 for p in LIVE_POSITIONS
+                same_dir_crypto_positions = [
+                    dict(p) for p in LIVE_POSITIONS
                     if str(p.get("user_id")) == user.telegram_id
                     and p.get("direction") == direction
                     and _is_crypto_sym(p.get("symbol", ""))
                     and (not reversed_closed_sym or p.get("symbol", "").replace("-", "").upper() != clean_sym)
+                ]
+            slot_eval = _evaluate_crypto_dir_slot(
+                same_dir_crypto_positions=same_dir_crypto_positions,
+                cache=cache,
+                user_id=str(user.telegram_id),
+                direction=direction,
+                signal=signal,
+                max_crypto_dir=max_crypto_dir,
+                overflow_cap=overflow_cap,
+                user_max_positions=(user.max_positions or 7),
+                total_open_positions=total_pos,
+            )
+            if not slot_eval["allowed"]:
+                log.info(
+                    "🛡️ [CRYPTO CAP] User %s: %d/%d lệnh Crypto %s đang chịu rủi ro (%d đã Hòa vốn, tổng %d) | A+=%s -> bỏ qua %s tránh dính SL chùm.",
+                    user.telegram_id, slot_eval["risky_count"], max_crypto_dir, direction,
+                    slot_eval["be_count"], slot_eval["total_same_dir"], slot_eval["is_a_plus"], sym,
                 )
-            if same_dir_crypto >= max_crypto_dir:
-                log.info("🛡️ [CRYPTO CAP] User %s đã có %d/%d lệnh Crypto cùng chiều %s -> bỏ qua %s tránh dính SL chùm.",
-                         user.telegram_id, same_dir_crypto, max_crypto_dir, direction, sym)
                 return
+            crypto_overflow_mult = float(slot_eval["size_mult"] or 1.0)
+            if slot_eval["mode"] == "FREE_ROLL_UNLOCK":
+                log.info(
+                    "🔓 [CRYPTO FREE-ROLL] User %s: Có %d lệnh %s đã dời SL Hòa vốn -> Nhả slot cho %s (%d/%d lệnh rủi ro).",
+                    user.telegram_id, slot_eval["be_count"], direction, sym,
+                    slot_eval["risky_count"], max_crypto_dir,
+                )
+            elif slot_eval["mode"] == "A_PLUS_OVERFLOW":
+                log.info(
+                    "⚡ [CRYPTO A+ OVERFLOW] User %s: Đã giữ %d/%d lệnh %s rủi ro nhưng %s đạt chuẩn A+ (Conf %.1f%%) -> Mở rộng slot giảm size x%.2f.",
+                    user.telegram_id, slot_eval["risky_count"], max_crypto_dir, direction,
+                    sym, float(signal.get("confidence", 0) or 0), crypto_overflow_mult,
+                )
 
         entry = float(signal["plan"]["entry"])
         sl    = float(signal["plan"]["sl"])
@@ -2016,6 +2129,10 @@ def _execute_for_user(user: User, signal: dict):
         if inter_mult < 1.0:
             size_mult_combined *= inter_mult
             log.info("⚖️ [KNIFE-CATCH / INTERMARKET] %s: Ngược sóng HTF/Macro -> giảm size bảo thủ x%.2f", sym, inter_mult)
+
+        if crypto_overflow_mult < 1.0:
+            size_mult_combined *= crypto_overflow_mult
+            log.info("⚡ [CRYPTO OVERFLOW SIZING] %s: Áp dụng size x%.2f cho slot Crypto A+ mở rộng.", sym, crypto_overflow_mult)
 
         news_risk = signal.get("news_risk", {}) or {}
         if news_risk.get("active"):
@@ -3430,6 +3547,10 @@ ADMIN_DASHBOARD_HTML = """
                                     <option value="BNBUSDT">BNBUSDT (Binance Coin)</option>
                                     <option value="SOLUSDT">SOLUSDT (Solana)</option>
                                     <option value="HYPEUSDT">HYPEUSDT (Hyperliquid)</option>
+                                    <option value="LINKUSDT">LINKUSDT (Chainlink)</option>
+                                    <option value="DOGEUSDT">DOGEUSDT (Dogecoin)</option>
+                                    <option value="ZECUSDT">ZECUSDT (Zcash)</option>
+                                    <option value="SUIUSDT">SUIUSDT (Sui)</option>
                                     <option value="XAUUSD">XAUUSD (Gold)</option>
                                     <option value="NCCOXAG2USD-USDT">NCCOXAG2USDUSDT (Silver)</option>
                                     <option value="NCSKTSLA2USD-USDT">NCSKTSLA2USDUSDT (Tesla)</option>

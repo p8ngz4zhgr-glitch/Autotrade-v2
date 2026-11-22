@@ -94,7 +94,7 @@ class SignalEngine:
             return self.stock, "GOLD"
         if "NCCOXAG" in s_clean or "SILVER" in s_clean or "XAG" in s_clean:
             return self.stock, "SILVER"
-        if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"):
+        if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "DOGEUSDT", "ZECUSDT", "SUIUSDT"):
             return self.crypto, "CRYPTO"
         if (s_clean in ("TSLA", "NVDA", "SPY", "QQQ")
                 or any(k in s_clean for k in ("TSLA", "NVDA", "SPY", "QQQ"))
@@ -107,7 +107,7 @@ class SignalEngine:
         if ("NCCOGOLD" in s_clean or "GOLD" in s_clean or "XAU" in s_clean
                 or "NCCOXAG" in s_clean or "SILVER" in s_clean or "XAG" in s_clean):
             return self.stock.is_gold_open()
-        if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT"):
+        if s_clean in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "DOGEUSDT", "ZECUSDT", "SUIUSDT"):
             return True, "Crypto 24/7"
         if (s_clean in ("TSLA", "NVDA", "SPY", "QQQ")
                 or any(k in s_clean for k in ("TSLA", "NVDA", "SPY", "QQQ"))

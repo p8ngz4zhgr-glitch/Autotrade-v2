@@ -208,7 +208,9 @@ class TelegramBot:
             }
         AICON  = {"CRYPTO": "🪙", "STOCK": "📈", "GOLD": "🥇", "SILVER": "🥈"}
         ANAME  = {"BTCUSDT": "Bitcoin", "ETHUSDT": "Ethereum", "BNBUSDT": "BNB Chain",
-                  "SOLUSDT": "Solana", "HYPEUSDT": "HyperLiquid", "TSLA": "Tesla",
+                  "SOLUSDT": "Solana", "HYPEUSDT": "HyperLiquid", "LINKUSDT": "Chainlink",
+                  "DOGEUSDT": "Dogecoin", "ZECUSDT": "Zcash", "SUIUSDT": "Sui",
+                  "TSLA": "Tesla",
                   "NCSKTSLA2USD-USDT": "Tesla (TSLA)", "NCSKTSLA2USDUSDT": "Tesla (TSLA)",
                   "NVDA": "NVIDIA", "SPY": "S&P 500 ETF", "QQQ": "Nasdaq 100 ETF",
                   "NCCOGOLD2USD-USDT": "Vàng (XAU)",
@@ -356,6 +358,8 @@ class TelegramBot:
             f"  ├ PDH / PDL   : <code>${htf.get('pdh',0)}</code> / <code>${htf.get('pdl',0)}</code>",
             f"  ├ Monday Range: <code>${htf.get('monday_low',0)}</code> – <code>${htf.get('monday_high',0)}</code>",
             f"  ├ Weekly Range: <code>${htf.get('pwl',0)}</code> – <code>${htf.get('pwh',0)}</code>",
+            *([f"  ├ Monthly Rng : <code>${htf.get('pml',0)}</code> – <code>${htf.get('pmh',0)}</code>"] if float(htf.get("pmh", 0) or 0) > float(htf.get("pml", 0) or 0) > 0 else []),
+            *([f"  ├ Macro S/R 1D: <code>${htf.get('macro_sr_low',0)}</code> – <code>${htf.get('macro_sr_high',0)}</code>"] if htf.get("macro_sr_ready") else []),
             asia_line,
             "",
             "⚓ <b>MACRO OPENS (Y · M · W · D)</b>",
