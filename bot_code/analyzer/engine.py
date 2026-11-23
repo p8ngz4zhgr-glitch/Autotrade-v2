@@ -258,10 +258,13 @@ class SignalEngine:
                 }
 
         # 3. Chạy Pure TraderSZ Engine (Opens + Ranges + 50% EQ + Deviation/SFP + Clean Pools + Intermarket Confluence)
+        base_sl_buf = float(getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0065) or 0.0065)
+        fed_sl_mult = float((macro_ctx or {}).get("fed_sl_buffer", 1.0) or 1.0)
+        eff_sl_buf = min(0.0100, round(base_sl_buf * max(1.0, fed_sl_mult), 5))
         traderssz_res = TradersszFramework.evaluate_traderssz_complete(
             klines_by_tf=klines_by_tf,
             current_price=price,
-            sl_buffer_pct=getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0040),
+            sl_buffer_pct=eff_sl_buf,
             min_rr=getattr(cfg, "TRADERSSZ_MIN_RR", 2.0),
             btc_bias=btc_ctx,
             macro_ctx=macro_ctx,
@@ -361,16 +364,19 @@ class SignalEngine:
             sl_pct = float(setup["sl_pct"])
             rr_ratio = float(setup["rr_tp2"])
         else:
-            # Kế hoạch tham khảo khi WAIT (dựa trên biên Range hiện tại)
+            # Kế hoạch tham khảo khi WAIT (dựa trên biên Range + đệm ATR chống quét râu)
             rh = float(htf_data.get("range_high", price * 1.02))
             rl = float(htf_data.get("range_low", price * 0.98))
             eq = float(htf_data.get("eq_50", price))
+            atr_pct_ref = (atr_val / price) if (price > 0 and atr_val > 0) else 0.012
+            wait_buf = max(eff_sl_buf, min(0.0150, atr_pct_ref * 0.65))
+            min_wait_sl_pct = max(0.0135 if atype == "CRYPTO" else 0.0075, min(0.0240, atr_pct_ref * 1.15))
             if htf_data.get("market_zone") == "PREMIUM":
-                sl = round(rh * 1.003, 4)
+                sl = round(max(rh * (1.0 + wait_buf), price * (1.0 + min_wait_sl_pct)), 4)
                 tp1 = round(eq, 4)
                 tp2 = round(rl, 4)
             else:
-                sl = round(rl * 0.997, 4)
+                sl = round(min(rl * (1.0 - wait_buf), price * (1.0 - min_wait_sl_pct)), 4)
                 tp1 = round(eq, 4)
                 tp2 = round(rh, 4)
             sl_pct = round(abs(price - sl) / price * 100, 2) if price > 0 else 1.5

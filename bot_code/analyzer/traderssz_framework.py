@@ -898,13 +898,47 @@ class TradersszFramework:
         }
 
     @staticmethod
+    def _compute_min_sl_floor(
+        klines: Optional[Dict[str, List[float]]],
+        asset_type: str = "CRYPTO",
+        h1_atr_pct: float = 0.0,
+        is_breakout: bool = False,
+    ) -> float:
+        """Tính sàn SL tối thiểu theo ATR thực tế (ưu tiên neo tối thiểu theo ATR 1H để tránh bị râu 15m quét)."""
+        bar_atr_pct = 0.0
+        if klines and len(klines.get("close", [])) >= 3:
+            highs = klines["high"]
+            lows = klines["low"]
+            closes = klines["close"]
+            recent_bars = [
+                (highs[j] - lows[j]) / max(closes[j], 1e-9)
+                for j in range(max(0, len(closes) - 11), len(closes) - 1)
+                if closes[j] > 0
+            ]
+            if recent_bars:
+                bar_atr_pct = sum(recent_bars) / len(recent_bars)
+        ref_atr = max(bar_atr_pct, float(h1_atr_pct or 0.0))
+        if ref_atr <= 0:
+            ref_atr = 0.0110 if str(asset_type or "CRYPTO").upper() == "CRYPTO" else 0.0065
+        is_crypto = str(asset_type or "CRYPTO").upper() == "CRYPTO"
+        if is_breakout:
+            if is_crypto:
+                return max(0.0115, min(0.0210, ref_atr * 1.00))
+            return max(0.0070, min(0.0145, ref_atr * 0.90))
+        if is_crypto:
+            return max(0.0135, min(0.0250, ref_atr * 1.15))
+        return max(0.0075, min(0.0160, ref_atr * 1.00))
+
+    @staticmethod
     def _scan_tf_deviation(
         tf_name: str,
         klines: Optional[Dict[str, List[float]]],
         range_obj: Dict[str, Any],
         current_price: float,
-        sl_buffer_pct: float = 0.0040,
+        sl_buffer_pct: float = 0.0065,
         min_rr: float = 2.0,
+        asset_type: str = "CRYPTO",
+        h1_atr_pct: float = 0.0,
     ) -> Optional[Dict[str, Any]]:
         """
         Kiểm tra Deviation / SFP (Swing Failure Pattern) & Quy luật 'Return to Range'
@@ -943,14 +977,13 @@ class TradersszFramework:
         # CHỈ dùng các nến ĐÃ ĐÓNG CỬA (idx = -2 là nến vừa đóng gần nhất, idx = -3 là nến trước đó nếu -2 giữ vững trong Range)
         # Tuyệt đối KHÔNG dùng nến [-1] đang chạy dở để tránh tín hiệu nhảy/đảo chiều giữa nến.
         avg_vol = sum(vols[-21:-1]) / max(1, len(vols[-21:-1])) if len(vols) >= 6 else 1.0
-        # Tính ATR% gần nhất trên chính khung thời gian này để không đặt SL mỏng hơn nhiễu nến bình thường
-        recent_bars = [
-            (highs[j] - lows[j]) / max(closes[j], 1e-9)
-            for j in range(max(0, len(closes) - 11), len(closes) - 1)
-            if closes[j] > 0
-        ]
-        bar_atr_pct = (sum(recent_bars) / len(recent_bars)) if recent_bars else 0.0085
-        min_sl_floor = max(0.0085, min(0.0140, bar_atr_pct * 0.55))
+        # Tính sàn SL tối thiểu dựa trên max(ATR khung hiện tại, ATR 1H) để không đặt SL mỏng hơn râu quét thanh khoản
+        min_sl_floor = TradersszFramework._compute_min_sl_floor(
+            klines=klines,
+            asset_type=asset_type,
+            h1_atr_pct=h1_atr_pct,
+            is_breakout=False,
+        )
 
         candidates: List[Dict[str, Any]] = []
 
@@ -1019,7 +1052,7 @@ class TradersszFramework:
                         continue
 
                     sl_pct = risk / eval_entry
-                    if sl_pct > 0.045:  # Râu quá rộng (>4.5%), bỏ qua để kiếm kèo khung nhỏ hơn
+                    if sl_pct > 0.052:  # Râu quá rộng (>5.2%), bỏ qua để kiếm kèo hợp lý hơn
                         continue
 
                     rr_tp1 = reward_tp1 / risk
@@ -1120,7 +1153,7 @@ class TradersszFramework:
                         continue
 
                     sl_pct = risk / eval_entry
-                    if sl_pct > 0.045:
+                    if sl_pct > 0.052:
                         continue
 
                     rr_tp1 = reward_tp1 / risk
@@ -1172,8 +1205,10 @@ class TradersszFramework:
         htf_data: Dict[str, Any],
         allowed_dir: str,
         current_price: float,
-        sl_buffer_pct: float = 0.0040,
+        sl_buffer_pct: float = 0.0065,
         min_rr: float = 2.0,
+        asset_type: str = "CRYPTO",
+        h1_atr_pct: float = 0.0,
     ) -> Optional[Dict[str, Any]]:
         """
         Bắt mô hình RECLAIM & S/R FLIP chuẩn TraderSZ tại Daily Open (DO) / Weekly Open (WO)
@@ -1214,6 +1249,12 @@ class TradersszFramework:
         if c2_body_ratio < 0.35:
             return None
         span_r = max(rh - rl, 1e-9)
+        reclaim_min_sl = TradersszFramework._compute_min_sl_floor(
+            klines=h1_klines,
+            asset_type=asset_type,
+            h1_atr_pct=h1_atr_pct,
+            is_breakout=False,
+        )
 
         best_reclaim = None
         for lvl_key, lvl_label, lvl_p in levels:
@@ -1227,11 +1268,11 @@ class TradersszFramework:
                 if was_below and reclaimed:
                     sweep_low = float(min(lows[-6:-1]))
                     sl_p = round(min(sweep_low, lvl_p * 0.994) * (1.0 - sl_buffer_pct), 4)
-                    if (current_price - sl_p) / current_price < 0.0095:
-                        sl_p = round(current_price * 0.9905, 4)
+                    if (current_price - sl_p) / current_price < reclaim_min_sl:
+                        sl_p = round(current_price * (1.0 - reclaim_min_sl), 4)
                     risk = current_price - sl_p
                     tp1, tp2 = round(eq, 4), round(rh, 4)
-                    if risk > 0 and (risk / current_price) <= 0.04 and tp1 > current_price and tp2 > tp1:
+                    if risk > 0 and (risk / current_price) <= 0.048 and tp1 > current_price and tp2 > tp1:
                         rr2 = (tp2 - current_price) / risk
                         rr1 = (tp1 - current_price) / risk
                         if rr2 >= min_rr and rr1 >= 0.85:
@@ -1269,11 +1310,11 @@ class TradersszFramework:
                 if was_above and lost_level:
                     sweep_high = float(max(highs[-6:-1]))
                     sl_p = round(max(sweep_high, lvl_p * 1.006) * (1.0 + sl_buffer_pct), 4)
-                    if (sl_p - current_price) / current_price < 0.0095:
-                        sl_p = round(current_price * 1.0095, 4)
+                    if (sl_p - current_price) / current_price < reclaim_min_sl:
+                        sl_p = round(current_price * (1.0 + reclaim_min_sl), 4)
                     risk = sl_p - current_price
                     tp1, tp2 = round(eq, 4), round(rl, 4)
-                    if risk > 0 and (risk / current_price) <= 0.04 and tp1 < current_price and tp2 < tp1:
+                    if risk > 0 and (risk / current_price) <= 0.048 and tp1 < current_price and tp2 < tp1:
                         rr2 = (current_price - tp2) / risk
                         rr1 = (current_price - tp1) / risk
                         if rr2 >= min_rr and rr1 >= 0.85:
@@ -1313,8 +1354,10 @@ class TradersszFramework:
         klines: Optional[Dict[str, List[float]]],
         range_obj: Dict[str, Any],
         current_price: float,
-        sl_buffer_pct: float = 0.0028,
+        sl_buffer_pct: float = 0.0055,
         min_rr: float = 1.5,
+        asset_type: str = "CRYPTO",
+        h1_atr_pct: float = 0.0,
     ) -> Optional[Dict[str, Any]]:
         """
         Bắt tín hiệu PHÁ VỠ RANGE TIẾP DIỄN XU HƯỚNG (Range Breakout Continuation):
@@ -1344,6 +1387,12 @@ class TradersszFramework:
 
         tf_weight = {"1d": 4, "4h": 4, "1h": 3, "15m": 2}.get(tf_name, 1)
         avg_vol = sum(vols[-20:-1]) / max(1, len(vols[-20:-1])) if len(vols) >= 6 else 1.0
+        bo_min_sl = TradersszFramework._compute_min_sl_floor(
+            klines=klines,
+            asset_type=asset_type,
+            h1_atr_pct=h1_atr_pct,
+            is_breakout=True,
+        )
         candidates: List[Dict[str, Any]] = []
 
         # ── A. BULLISH BREAKOUT CONTINUATION (PHÁ ĐỈNH RH >= 0.20% -> BUY TIẾP DIỄN) ──
@@ -1379,12 +1428,12 @@ class TradersszFramework:
                 if (current_price - support_anchor) / current_price > 0.025:
                     support_anchor = recent_low if recent_low < current_price else rh
                 sl_price = round(support_anchor * (1.0 - sl_buffer_pct), 4)
-                if (current_price - sl_price) / current_price < 0.0055:
-                    sl_price = round(current_price * 0.9945, 4)
+                if (current_price - sl_price) / current_price < bo_min_sl:
+                    sl_price = round(current_price * (1.0 - bo_min_sl), 4)
 
                 risk = current_price - sl_price
                 sl_pct = risk / current_price
-                if risk > 0 and 0.0050 <= sl_pct <= 0.028:
+                if risk > 0 and 0.0065 <= sl_pct <= 0.038:
                     tp1 = round(max(current_price + risk * 1.25, rh + range_height * 0.50), 4)
                     tp2 = round(max(current_price + risk * max(min_rr, 2.2), rh + range_height * 1.00), 4)
                     rr_tp1 = (tp1 - current_price) / risk
@@ -1448,12 +1497,12 @@ class TradersszFramework:
                 if (resist_anchor - current_price) / current_price > 0.025:
                     resist_anchor = recent_high if recent_high > current_price else rl
                 sl_price = round(resist_anchor * (1.0 + sl_buffer_pct), 4)
-                if (sl_price - current_price) / current_price < 0.0055:
-                    sl_price = round(current_price * 1.0055, 4)
+                if (sl_price - current_price) / current_price < bo_min_sl:
+                    sl_price = round(current_price * (1.0 + bo_min_sl), 4)
 
                 risk = sl_price - current_price
                 sl_pct = risk / current_price
-                if risk > 0 and 0.0050 <= sl_pct <= 0.028:
+                if risk > 0 and 0.0065 <= sl_pct <= 0.038:
                     tp1 = round(min(current_price - risk * 1.25, rl - range_height * 0.50), 4)
                     tp2 = round(min(current_price - risk * max(min_rr, 2.2), rl - range_height * 1.00), 4)
                     if tp2 > 0 and tp2 < tp1 < current_price:
@@ -1693,7 +1742,7 @@ class TradersszFramework:
     def evaluate_traderssz_complete(
         klines_by_tf: Dict[str, Optional[Dict[str, List[float]]]],
         current_price: float,
-        sl_buffer_pct: float = 0.0040,
+        sl_buffer_pct: float = 0.0065,
         min_rr: float = 2.0,
         btc_bias: Optional[Dict[str, Any]] = None,
         utcnow: Optional[datetime] = None,
@@ -1719,6 +1768,17 @@ class TradersszFramework:
         h4_klines  = klines_by_tf.get("4h")
         h1_klines  = klines_by_tf.get("1h")
         m15_klines = klines_by_tf.get("15m")
+
+        h1_atr_pct = 0.0
+        if h1_klines and len(h1_klines.get("close", [])) >= 3:
+            _h1_h, _h1_l, _h1_c = h1_klines["high"], h1_klines["low"], h1_klines["close"]
+            _h1_bars = [
+                (_h1_h[j] - _h1_l[j]) / max(_h1_c[j], 1e-9)
+                for j in range(max(0, len(_h1_c) - 11), len(_h1_c) - 1)
+                if _h1_c[j] > 0
+            ]
+            if _h1_bars:
+                h1_atr_pct = sum(_h1_bars) / len(_h1_bars)
 
         session_ctx = TradersszFramework.detect_session_context(utcnow=utcnow)
         htf_data = TradersszFramework.calculate_htf_opens_and_ranges(
@@ -1778,8 +1838,10 @@ class TradersszFramework:
                             klines=tf_klines,
                             range_obj=range_obj,
                             current_price=current_price,
-                            sl_buffer_pct=sl_buffer_pct,
+                            sl_buffer_pct=max(0.0050, sl_buffer_pct * 0.85),
                             min_rr=min_rr,
+                            asset_type=asset_type,
+                            h1_atr_pct=h1_atr_pct,
                         )
                         if bo_hit and bo_hit["direction"] == expected_dir:
                             bo_vol = float(bo_hit.get("vol_ratio", 1.0) or 1.0)
@@ -1862,6 +1924,8 @@ class TradersszFramework:
                             current_price=current_price,
                             sl_buffer_pct=sl_buffer_pct,
                             min_rr=min_rr,
+                            asset_type=asset_type,
+                            h1_atr_pct=h1_atr_pct,
                         )
                         if hit and hit["direction"] == allowed_dir:
                             msb_ok = bool(m15_msb["confirmed"]) and tf_name in ("1d", "4h", "1h", "15m")
@@ -1911,13 +1975,13 @@ class TradersszFramework:
                                 )
                                 continue
 
-                            # Nếu SL của sub-range nằm ngay dưới PDH/trên PDL trong khoảng nam châm 1.3%, nới SL ra ngoài PDH/PDL nếu vẫn giữ được R:R
+                            # Nếu SL của sub-range nằm ngay dưới PDH/trên PDL trong khoảng nam châm 1.8%, nới SL ra ngoài PDH/PDL nếu vẫn giữ được R:R
                             if is_macro_primary and not far_from_daily and is_sub_range and hit.get("entry_mode", "MARKET") == "MARKET":
                                 cur_sl = float(hit["sl"])
-                                if allowed_dir == "SHORT" and cur_sl <= primary_rh * 1.001 and (primary_rh - current_price) / current_price <= 0.013:
+                                if allowed_dir == "SHORT" and cur_sl <= primary_rh * 1.002 and (primary_rh - current_price) / current_price <= 0.018:
                                     safe_macro_sl = round(primary_rh * (1.0 + sl_buffer_pct), 4)
                                     new_risk = safe_macro_sl - current_price
-                                    if new_risk / current_price > 0.042:
+                                    if new_risk / current_price > 0.048:
                                         continue
                                     new_rr2 = (current_price - float(hit["tp2"])) / max(new_risk, 1e-9)
                                     if new_rr2 < min_rr:
@@ -1926,10 +1990,10 @@ class TradersszFramework:
                                     hit["sl_pct"] = round(new_risk / current_price * 100.0, 2)
                                     hit["rr_tp1"] = round((current_price - float(hit["tp1"])) / max(new_risk, 1e-9), 2)
                                     hit["rr_tp2"] = round(new_rr2, 2)
-                                elif allowed_dir == "LONG" and cur_sl >= primary_rl * 0.999 and (current_price - primary_rl) / current_price <= 0.013:
+                                elif allowed_dir == "LONG" and cur_sl >= primary_rl * 0.998 and (current_price - primary_rl) / current_price <= 0.018:
                                     safe_macro_sl = round(primary_rl * (1.0 - sl_buffer_pct), 4)
                                     new_risk = current_price - safe_macro_sl
-                                    if new_risk / current_price > 0.042:
+                                    if new_risk / current_price > 0.048:
                                         continue
                                     new_rr2 = (float(hit["tp2"]) - current_price) / max(new_risk, 1e-9)
                                     if new_rr2 < min_rr:
@@ -1982,6 +2046,8 @@ class TradersszFramework:
                     current_price=current_price,
                     sl_buffer_pct=sl_buffer_pct,
                     min_rr=min_rr,
+                    asset_type=asset_type,
+                    h1_atr_pct=h1_atr_pct,
                 )
                 if reclaim_hit:
                     if not (m15_msb["confirmed"] or reclaim_hit.get("is_retest")):

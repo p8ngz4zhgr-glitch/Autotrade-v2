@@ -1612,18 +1612,36 @@ class BingXExchange:
                         "msg": f"Đã dời SL về {target_sl} khi chạm {milestone_lbl}."
                     }
 
-        # 2. BẢO VỆ CẮT LỖ KHẨN CẤP (CHỈ KHI VƯỢT QUA SL KẾ HOẠCH HOẶC ROE <= -82%, KHÔNG CẮT SỚM BÊN TRONG SL RÂU!)
+        # 2. BẢO VỆ CẮT LỖ KHẨN CẤP (CHỈ KHI VƯỢT QUA SL KẾ HOẠCH HỢP LỆ HOẶC ROE <= -82%, KHÔNG CẮT SỚM BÊN TRONG SL RÂU!)
         planned_sl = float(plan.get("sl", 0) or 0)
+        sl_verified = bool(plan.get("sl_verified", True))
+        if planned_sl <= 0 and current_sl > 0:
+            planned_sl = current_sl
+            sl_verified = True
+        sl_at_be_or_trailing = (
+            (direction == "LONG" and current_sl > entry_price)
+            or (direction == "SHORT" and 0 < current_sl < entry_price)
+        )
+        sl_side_valid = (
+            sl_at_be_or_trailing
+            or (direction == "LONG" and 0 < planned_sl < entry_price)
+            or (direction == "SHORT" and planned_sl > entry_price)
+        )
         breached_planned_sl = (
-            planned_sl > 0
+            sl_verified
+            and planned_sl > 0
+            and sl_side_valid
             and (
-                (direction == "LONG" and current_price <= planned_sl * 0.9985)
-                or (direction == "SHORT" and current_price >= planned_sl * 1.0015)
+                (direction == "LONG" and current_price <= planned_sl * 0.9970)
+                or (direction == "SHORT" and current_price >= planned_sl * 1.0030)
             )
         )
         if breached_planned_sl or roe <= -82.0:
             log.info(f"🛑 [FAILSAFE SL] {symbol} {direction}: Giá ${current_price:.4f} (SL kế hoạch ${planned_sl:.4f}, ROE {roe:.2f}%) -> CẮT LỖ BẢO VỆ TÀI KHOẢN!")
-            self.close_position(symbol, current_qty, direction)
+            close_res = self.close_position(symbol, current_qty, direction)
+            if not close_res.get("ok"):
+                log.warning(f"⚠️ [FAILSAFE SL] {symbol} {direction}: Đóng vị thế thất bại ({close_res.get('msg')}) -> thử lại chu kỳ sau.")
+                return {"action": "HOLD", "msg": "Đóng Failsafe SL thất bại, chờ thử lại."}
             self.cancel_all_orders(symbol)
             if redis_client:
                 try:

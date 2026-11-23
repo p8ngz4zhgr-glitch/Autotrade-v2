@@ -874,9 +874,11 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         plan = dict(analysis.get("plan", {}) or {})
         tp_levels_raw = plan.get("tp_levels")
         ep_data = _get_entry_plan_from_cache(cache, user.telegram_id, sym, direction)
+        has_valid_planned_sl = False
         if ep_data:
             if float(ep_data.get("sl") or 0) > 0:
                 plan["sl"] = float(ep_data["sl"])
+                has_valid_planned_sl = True
             if float(ep_data.get("tp1") or 0) > 0:
                 plan["tp1"] = float(ep_data["tp1"])
             if float(ep_data.get("tp2") or 0) > 0:
@@ -888,6 +890,38 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
             if ep_data.get("tp_levels"):
                 tp_levels_raw = ep_data["tp_levels"]
                 plan["tp_levels"] = tp_levels_raw
+        else:
+            # Khi cache ENTRY_PLAN trống (sau restart / hết TTL): KHÔNG dùng SL tham khảo từ scan WAIT/ngược chiều!
+            # Ưu tiên lấy SL thực tế đang treo trên sàn BingX để tránh cắt nhầm vị thế (ví dụ SHORT cắt tại SL của vùng DISCOUNT).
+            bingx_sl = 0.0
+            try:
+                if triggers is None:
+                    triggers = bx.get_trigger_orders()
+                if isinstance(triggers, dict):
+                    clean_sym_k = sym.replace("-", "").upper()
+                    trig_obj = triggers.get(sym) or triggers.get(clean_sym_k) or {}
+                    bingx_sl = float(trig_obj.get("sl", 0) or 0)
+            except Exception:
+                bingx_sl = 0.0
+
+            analysis_sl = float(plan.get("sl", 0) or 0)
+            analysis_dir = str(analysis.get("final", "WAIT") or "WAIT").upper()
+            analysis_sl_matches_dir = (
+                analysis_dir == direction
+                and entry > 0
+                and (
+                    (direction == "LONG" and 0 < analysis_sl < entry)
+                    or (direction == "SHORT" and analysis_sl > entry)
+                )
+            )
+            if bingx_sl > 0:
+                plan["sl"] = bingx_sl
+                has_valid_planned_sl = True
+            elif analysis_sl_matches_dir:
+                has_valid_planned_sl = True
+            else:
+                plan["sl"] = 0.0
+        plan["sl_verified"] = has_valid_planned_sl
 
         if not tp_levels_raw:
             tp_levels_raw = [
@@ -899,7 +933,7 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
         pos_analysis = dict(analysis)
         pos_analysis["plan"] = plan
 
-        # Chạy quản trị vị thế: Dời SL về Hòa vốn (Breakeven) khi đạt 50% TP1 hoặc qua TP1
+        # Chạy quản trị vị thế: Dời SL về Hòa vốn (Breakeven) khi đạt TP1 hoặc mốc Quarter
         dynamic_status = bx.manage_position_dynamic(
             sym, pos_analysis, leverage=leverage, redis_client=cache, target_direction=direction
         )
@@ -958,6 +992,15 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                         cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sv}:{direction}", 120, "1")
                     except Exception:
                         pass
+            with _POS_LOCK:
+                LIVE_POSITIONS[:] = [
+                    p for p in LIVE_POSITIONS
+                    if not (
+                        str(p.get("user_id")) == str(user.telegram_id)
+                        and _clean_sym(p.get("symbol", "")) == clean_sym
+                        and p.get("direction") == direction
+                    )
+                ]
             return {"action": "CLOSED", "old_direction": direction}
 
         # 2. TÍNH TOÁN VỊ THẾ HIỆN TẠI
@@ -1013,11 +1056,19 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
 
         DYNAMIC_SL_LIMIT = -82.0
         planned_sl = float(plan.get("sl", 0) or 0)
+        sl_side_valid = (
+            is_breakeven
+            or (entry <= 0)
+            or (direction == "LONG" and 0 < planned_sl < entry)
+            or (direction == "SHORT" and planned_sl > entry)
+        )
         breached_planned_sl = (
-            planned_sl > 0
+            bool(plan.get("sl_verified", True))
+            and planned_sl > 0
+            and sl_side_valid
             and (
-                (direction == "LONG" and current_price <= planned_sl * 0.9985)
-                or (direction == "SHORT" and current_price >= planned_sl * 1.0015)
+                (direction == "LONG" and current_price <= planned_sl * 0.9970)
+                or (direction == "SHORT" and current_price >= planned_sl * 1.0030)
             )
         )
 

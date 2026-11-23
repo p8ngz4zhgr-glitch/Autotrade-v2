@@ -48,7 +48,7 @@ class Config:
 
         # ── Cấu hình Hệ thống Giao dịch Thuần Price Action TraderSZ ──
         self.TRADERSSZ_MODE               = os.getenv("TRADERSSZ_MODE", "true").lower() == "true"
-        self.TRADERSSZ_SL_BUFFER_PCT      = float(os.getenv("TRADERSSZ_SL_BUFFER_PCT", "0.0040"))
+        self.TRADERSSZ_SL_BUFFER_PCT      = float(os.getenv("TRADERSSZ_SL_BUFFER_PCT", "0.0065"))
         self.TRADERSSZ_EQ_NO_TRADE_BAND   = float(os.getenv("TRADERSSZ_EQ_NO_TRADE_BAND", "0.18"))
         self.TRADERSSZ_MIN_RR             = float(os.getenv("TRADERSSZ_MIN_RR", "2.0"))
 
