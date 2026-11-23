@@ -2247,9 +2247,12 @@ def _execute_for_user(user: User, signal: dict):
                      user.telegram_id, today_pnl, max_loss_pct, daily_loss_limit)
 
         if consec_losses >= 3 and float(signal.get("confidence", 0) or 0) < 85.0 and not reversed_closed_sym:
-            log.info("🛡️ [STREAK GUARD] User %s thua %d lệnh liên tiếp -> Chỉ nhận kèo A+ Conf >= 85%% (hiện tại %.1f%%).",
+            if os.getenv("ENABLE_STREAK_GUARD", "false").lower() == "true":
+                log.info("🛡️ [STREAK GUARD] User %s thua %d lệnh liên tiếp -> Chỉ nhận kèo A+ Conf >= 85%% (hiện tại %.1f%%).",
+                         user.telegram_id, consec_losses, float(signal.get("confidence", 0) or 0))
+                return
+            log.info("⚠️ [STREAK NOTICE] User %s thua %d lệnh liên tiếp (Conf %.1f%%) — Đã huỷ Streak Guard, vẫn tiếp tục vào lệnh.",
                      user.telegram_id, consec_losses, float(signal.get("confidence", 0) or 0))
-            return
 
         # 3. ĐÒN BẨY LINH ĐỘNG (10x - 20x; RIÊNG VÀNG/BẠC x50 CHO 2 CHIỀU LONG/SHORT)
         effective_leverage, lev_reason, lev_meta = calculate_dynamic_leverage(
