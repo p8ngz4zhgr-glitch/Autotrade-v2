@@ -27,9 +27,9 @@ class ScalpM5RiskManager:
         self,
         daily_target_usd: float = 30.0,       # Mục tiêu lợi nhuận $20 - $50/ngày (mặc định $30)
         daily_max_loss_usd: float = 15.0,     # Chặn lỗ tối đa trong ngày (15$ hoặc 3% vốn)
-        risk_per_trade_pct: float = 1.25,     # Rủi ro tối đa mỗi lệnh: 1.25% vốn
+        risk_per_trade_pct: float = 1.80,     # Rủi ro nền mỗi lệnh: 1.80% vốn
         max_leverage: int = 20,               # Đòn bẩy tối đa cho Crypto/Stock (10x - 20x; Vàng/Bạc x50)
-        max_margin_ratio: float = 0.15,       # Ký quỹ mỗi lệnh không vượt quá 15% tổng tài khoản (an toàn cho 7 lệnh)
+        max_margin_ratio: float = 0.20,       # Ký quỹ mỗi lệnh không vượt quá 20% tổng tài khoản (an toàn cho 5 lệnh)
         consecutive_loss_limit: int = 3,      # Tạm dừng nếu thua liên tiếp 3 lệnh
         cooldown_seconds: int = 3600          # Thời gian nghỉ sau khi chạm giới hạn (60 phút)
     ):
@@ -287,13 +287,13 @@ class RiskEngine:
     """
     Tương thích ngược với hệ thống cũ và tích hợp ScalpM5RiskManager
     """
-    def __init__(self, global_max_risk_pct: float = 1.5, max_positions_per_user: int = 7):
+    def __init__(self, global_max_risk_pct: float = 1.80, max_positions_per_user: int = 5):
         self.global_max_risk_pct = global_max_risk_pct
         self.max_positions_per_user = max_positions_per_user
         self.scalp_manager = ScalpM5RiskManager(
             daily_target_usd=30.0,
             daily_max_loss_usd=15.0,
-            risk_per_trade_pct=1.0,
+            risk_per_trade_pct=1.80,
             max_leverage=20
         )
 

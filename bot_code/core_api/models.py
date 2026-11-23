@@ -37,7 +37,7 @@ class User(Base):
 
     min_confidence        = Column(Float,    default=78.0)
     max_risk_pct          = Column(Float,    default=1.25)
-    max_positions         = Column(Integer,  default=7)
+    max_positions         = Column(Integer,  default=5)
     leverage              = Column(Integer,  default=10)
     auto_trade            = Column(Boolean,  default=False)
 

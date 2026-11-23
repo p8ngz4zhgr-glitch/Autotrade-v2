@@ -106,18 +106,18 @@ def _get_user_sym_lock(user_id: str, sym: str) -> threading.Lock:
 TIER_CONFIG = {
     "TIER1": {
         "label": "Ca Con", "min_capital": 0, "max_capital": 500,
-        "min_confidence": 78.0, "max_risk_pct": 1.25,
-        "max_positions": 7, "leverage": 10, "target_monthly": "8-12%",
+        "min_confidence": 78.0, "max_risk_pct": 1.80,
+        "max_positions": 5, "leverage": 10, "target_monthly": "10-16%",
     },
     "TIER2": {
         "label": "Tieu Chuan", "min_capital": 500, "max_capital": 2000,
-        "min_confidence": 79.0, "max_risk_pct": 1.25,
-        "max_positions": 7, "leverage": 10, "target_monthly": "6-10%",
+        "min_confidence": 79.0, "max_risk_pct": 1.60,
+        "max_positions": 5, "leverage": 10, "target_monthly": "8-14%",
     },
     "TIER3": {
         "label": "Ca Map", "min_capital": 2000, "max_capital": float("inf"),
-        "min_confidence": 80.0, "max_risk_pct": 1.0,
-        "max_positions": 7, "leverage": 10, "target_monthly": "5-8%",
+        "min_confidence": 80.0, "max_risk_pct": 1.25,
+        "max_positions": 5, "leverage": 10, "target_monthly": "6-10%",
     },
 }
 MIN_CAPITAL_TO_TRADE = 10.0
@@ -606,8 +606,10 @@ def calculate_dynamic_leverage(signal: dict, user_base_leverage: int = 10, sl_pc
 
 log = logging.getLogger("ReversalEvaluator")
 
-MAX_SINGLE_MARGIN_RATIO = float(os.getenv("MAX_SINGLE_MARGIN_RATIO", "0.14"))
-MAX_SINGLE_RISK_CAP_PCT = float(os.getenv("MAX_SINGLE_RISK_CAP_PCT", "1.80"))
+MAX_SINGLE_MARGIN_RATIO = float(os.getenv("MAX_SINGLE_MARGIN_RATIO", "0.20"))
+MAX_SINGLE_RISK_CAP_PCT = float(os.getenv("MAX_SINGLE_RISK_CAP_PCT", "3.00"))
+MIN_SINGLE_MARGIN_RATIO = float(os.getenv("MIN_SINGLE_MARGIN_RATIO", "0.06"))
+MAX_FLOOR_RISK_CAP_PCT = float(os.getenv("MAX_FLOOR_RISK_CAP_PCT", "3.20"))
 MIN_EXCHANGE_NOTIONAL_USD = float(os.getenv("MIN_EXCHANGE_NOTIONAL_USD", "5.5"))
 
 
@@ -625,15 +627,11 @@ def _calc_order_sizing(
     open_positions_count: int = 0,
 ) -> tuple[float, float, float]:
     """
-    Tính khối lượng linh động theo chuẩn Risk-Based Sizing của TraderSZ:
-    - KHÔNG ép cứng margin $20-$30/lệnh (tránh cháy nặng trên Vàng/Bạc x50 hoặc vốn nhỏ $20-$30).
-    - Khối lượng được tính trực tiếp từ Rủi ro tối đa cho phép khi dính SL:
-        Risk_USD = Capital * Effective_Risk_Pct
-        Notional_USD = Risk_USD / sl_pct
-        Margin_USD = Notional_USD / Leverage
-    - Linh động co giãn Risk % theo chất lượng Setup TraderSZ (A+ / A / Breakout B),
-      số vị thế đang mở (Portfolio Heat trên tổng 7 lệnh), và hệ số vĩ mô/tin tức/Monday.
-    - Chặn trần ký quỹ <= 14% vốn mỗi lệnh để đủ sức chứa an toàn tối đa 7 vị thế đồng thời.
+    Tính khối lượng cô đặc theo chuẩn Risk-Based Sizing cho giới hạn 5 vị thế:
+    - Risk nền nằm trong [0.75%, 3.00%] (theo cấu hình user, mặc định ~1.80%).
+    - Chặn trần ký quỹ <= 20% vốn mỗi lệnh (5 lệnh * 20% = 100% vốn an toàn).
+    - Có sàn ký quỹ tối thiểu (~6% vốn) để tránh lệnh bị co về $1-$3 khi SL rộng,
+      nhưng luôn khóa chặt rủi ro cắt lỗ thực tế <= 3.20% vốn (tự hãm an toàn trên Vàng/Bạc x50).
     Trả về: (qty, req_margin_usd, risk_amt_usd)
     """
     cap = max(0.0, float(capital or 0))
@@ -641,50 +639,64 @@ def _calc_order_sizing(
     if cap <= 0 or entry <= 0 or sl_pct <= 0:
         return 0.0, 0.0, 0.0
 
-    # 1. Risk % nền được giữ an toàn trong [0.5%, 1.5%] bất kể tier cũ đặt 2.0%
-    base_risk_pct = max(0.50, min(1.50, float(max_risk_pct or 1.25)))
+    # 1. Mở trần Risk % nền trong [0.75%, 3.00%] để phản ánh đúng cấu hình và vốn thực tế
+    base_risk_pct = max(0.75, min(3.00, float(max_risk_pct or 1.80)))
 
     # 2. Hệ số chất lượng Setup TraderSZ (A+ Sweep/Deviation vs A vs Breakout B)
     conf_val = float(confidence or 75.0)
     rr_val = float(rr_ratio or 1.5)
     stype = str(setup_type or "").upper()
     if stype == "RANGE_BREAKOUT_CONTINUATION" or conf_val < 76.0 or (stype == "LEVEL_RECLAIM_SR_FLIP" and conf_val < 82.0):
-        quality_mult = 0.75
+        quality_mult = 0.80
     elif conf_val >= 86.0 and rr_val >= 2.5 and (is_htf_aligned or rr_val >= 3.0) and stype in (
         "SFP_WICK_REJECTION", "DEVIATION_RETURN_TO_RANGE", ""
     ):
-        quality_mult = 1.20
+        quality_mult = 1.25
     else:
         quality_mult = 1.00
 
-    # 3. Tránh trừ kép với Markowitz: giữ nguyên 1.00 từ slot 0–5 (Markowitz tự lo tương quan Crypto),
-    # chỉ hãm nhẹ 0.85x khi đã mở từ 6 lệnh trở lên sát trần 7 vị thế
+    # 3. Portfolio Heat theo giới hạn 5 vị thế (chỉ hãm nhẹ từ slot thứ 4 trở lên)
     open_cnt = max(0, int(open_positions_count or 0))
-    heat_mult = 0.85 if open_cnt >= 6 else 1.00
+    heat_mult = 0.85 if open_cnt >= 4 else 1.00
 
-    # 4. Hệ số vĩ mô (News / Monday Forming / Fed Policy)
-    macro_mult = max(0.45, min(1.15, float(size_mult or 1.0)))
+    # 4. Hệ số vĩ mô / Overflow (cho phép 0.50x cho slot overflow A+, bình thường >= 0.70x)
+    macro_mult = max(0.50, min(1.20, float(size_mult or 1.0)))
 
-    eff_risk_pct = max(0.40, min(MAX_SINGLE_RISK_CAP_PCT, base_risk_pct * quality_mult * heat_mult * macro_mult))
+    eff_risk_pct = max(0.60, min(MAX_SINGLE_RISK_CAP_PCT, base_risk_pct * quality_mult * heat_mult * macro_mult))
     risk_amt = cap * (eff_risk_pct / 100.0)
 
-    # 5. Tính Notional & Margin nghịch đảo theo độ rộng SL (SL rộng -> Margin tự nhỏ lại)
+    # 5. Tính Notional & Margin theo độ rộng SL
     notional_usd = risk_amt / sl_pct
     req_margin = notional_usd / lev
 
-    # Trần ký quỹ tối đa 14% vốn mỗi lệnh (7 lệnh * 14% = 98% tổng vốn an toàn)
+    # 6. Sàn Margin tối thiểu (~6% vốn, hoặc 3% cho slot overflow 0.50x) để không co lệnh về $1-$3,
+    #    luôn giới hạn rủi ro thực tế khi chạm SL <= MAX_FLOOR_RISK_CAP_PCT (3.20% vốn)
     max_margin_cap = cap * MAX_SINGLE_MARGIN_RATIO
+    overflow_scale = 0.50 if float(size_mult or 1.0) <= 0.55 else 1.0
+    floor_margin = cap * MIN_SINGLE_MARGIN_RATIO * overflow_scale
+    if floor_margin > 0 and req_margin < floor_margin:
+        max_safe_notional = (cap * (MAX_FLOOR_RISK_CAP_PCT / 100.0)) / sl_pct
+        cap_notional = (max_margin_cap * lev) if max_margin_cap > 0 else (floor_margin * lev)
+        target_notional = min(floor_margin * lev, max_safe_notional, cap_notional)
+        if target_notional > notional_usd:
+            notional_usd = target_notional
+            req_margin = notional_usd / lev
+            risk_amt = notional_usd * sl_pct
+
+    # Trần ký quỹ tối đa 20% vốn mỗi lệnh (5 lệnh * 20% = 100% tổng vốn an toàn)
     if max_margin_cap > 0 and req_margin > max_margin_cap:
         req_margin = max_margin_cap
         notional_usd = req_margin * lev
+        risk_amt = notional_usd * sl_pct
 
-    # Bảo đảm đủ min notional tối thiểu của sàn (~$5.5 notional = ~$0.11-$0.55 margin) cho tài khoản $20-$30
+    # Bảo đảm đủ min notional tối thiểu của sàn (~$5.5 notional)
     if notional_usd < MIN_EXCHANGE_NOTIONAL_USD:
         min_notional_risk = MIN_EXCHANGE_NOTIONAL_USD * sl_pct
         min_notional_margin = MIN_EXCHANGE_NOTIONAL_USD / lev
-        if min_notional_risk <= cap * 0.035 and min_notional_margin <= cap * 0.35:
+        if min_notional_risk <= cap * 0.045 and min_notional_margin <= cap * 0.35:
             notional_usd = MIN_EXCHANGE_NOTIONAL_USD
             req_margin = min_notional_margin
+            risk_amt = min_notional_risk
         else:
             return 0.0, 0.0, 0.0
 
@@ -1264,8 +1276,12 @@ def evaluate_reversal_for_position(user: User, pos: dict, current_price: float, 
                             for sv in _sym_variants(sym):
                                 cache.setex(f"REVERSAL_CLOSED:{user.telegram_id}:{sv}:{direction}", 120, "1")
                             if pnl_pct < -0.1:
-                                cache.setex(f"SL_REENTRY_COOLDOWN:{user.telegram_id}:{clean_sym}", 2700, "1")
-                                cache.setex(f"SL_DIR_COOLDOWN:{user.telegram_id}:{clean_sym}:{direction}", 5400, "1")
+                                _reentry_cd = int(os.getenv("SL_REENTRY_COOLDOWN_SEC", "300"))
+                                _dir_cd = int(os.getenv("SL_DIR_COOLDOWN_SEC", "600"))
+                                if _reentry_cd > 0:
+                                    cache.setex(f"SL_REENTRY_COOLDOWN:{user.telegram_id}:{clean_sym}", _reentry_cd, "1")
+                                if _dir_cd > 0:
+                                    cache.setex(f"SL_DIR_COOLDOWN:{user.telegram_id}:{clean_sym}:{direction}", _dir_cd, "1")
                             _clear_position_caches(cache, user.telegram_id, sym, direction)
                         except Exception:
                             pass
@@ -1709,8 +1725,12 @@ def sync_bingx_positions():
                             if cache and (is_sl_hit or pnl_pct < -0.1):
                                 try:
                                     c_sym = _clean_sym(symbol)
-                                    cache.setex(f"SL_REENTRY_COOLDOWN:{user_id}:{c_sym}", 2700, "1")
-                                    cache.setex(f"SL_DIR_COOLDOWN:{user_id}:{c_sym}:{direction}", 5400, "1")
+                                    _reentry_cd = int(os.getenv("SL_REENTRY_COOLDOWN_SEC", "300"))
+                                    _dir_cd = int(os.getenv("SL_DIR_COOLDOWN_SEC", "600"))
+                                    if _reentry_cd > 0:
+                                        cache.setex(f"SL_REENTRY_COOLDOWN:{user_id}:{c_sym}", _reentry_cd, "1")
+                                    if _dir_cd > 0:
+                                        cache.setex(f"SL_DIR_COOLDOWN:{user_id}:{c_sym}:{direction}", _dir_cd, "1")
                                 except Exception:
                                     pass
 
@@ -1918,7 +1938,7 @@ def _evaluate_crypto_dir_slot(
     signal: dict,
     max_crypto_dir: int = 3,
     overflow_cap: int = 2,
-    user_max_positions: int = 7,
+    user_max_positions: int = 5,
     total_open_positions: int = 0,
 ) -> dict:
     """
@@ -1993,11 +2013,13 @@ def _execute_for_user(user: User, signal: dict):
                 if any(cache.get(f"PENDING:{user.telegram_id}:{sv}:{direction}") for sv in _sym_variants(sym)):
                     log.info("Cooldown %s %s (%s) - skip", user.telegram_id, sym, direction)
                     return
+                _dir_cd_m = max(1, int(os.getenv("SL_DIR_COOLDOWN_SEC", "600")) // 60)
+                _reentry_cd_m = max(1, int(os.getenv("SL_REENTRY_COOLDOWN_SEC", "300")) // 60)
                 if cache.get(f"SL_DIR_COOLDOWN:{user.telegram_id}:{clean_sym}:{direction}"):
-                    log.info("🛡️ [POST-SL COOLDOWN] User %s: %s (%s) vừa chạm SL -> nghỉ 90p tránh dính SL lặp.", user.telegram_id, sym, direction)
+                    log.info("🛡️ [POST-SL COOLDOWN] User %s: %s (%s) vừa chạm SL -> nghỉ %dp tránh dính SL lặp.", user.telegram_id, sym, direction, _dir_cd_m)
                     return
                 if cache.get(f"SL_REENTRY_COOLDOWN:{user.telegram_id}:{clean_sym}") and float(signal.get("confidence", 0) or 0) < 86.0:
-                    log.info("🛡️ [POST-SL COOLDOWN] User %s: %s vừa chạm SL -> nghỉ 45p chờ cấu trúc mới.", user.telegram_id, sym)
+                    log.info("🛡️ [POST-SL COOLDOWN] User %s: %s vừa chạm SL -> nghỉ %dp chờ cấu trúc mới.", user.telegram_id, sym, _reentry_cd_m)
                     return
             except Exception:
                 pass
@@ -2076,8 +2098,9 @@ def _execute_for_user(user: User, signal: dict):
                 if str(p.get("user_id")) == user.telegram_id
                 and (not reversed_closed_sym or p.get("symbol", "").replace("-", "").upper() != clean_sym)
             )
-        if total_pos >= (user.max_positions or 7):
-            log.info("Max positions %d da dat (user %s)", user.max_positions or 7, user.telegram_id)
+        _max_pos_limit = int(user.max_positions or 5)
+        if total_pos >= _max_pos_limit:
+            log.info("Max positions %d da dat (user %s)", _max_pos_limit, user.telegram_id)
             return
 
         crypto_overflow_mult = 1.0
@@ -2100,7 +2123,7 @@ def _execute_for_user(user: User, signal: dict):
                 signal=signal,
                 max_crypto_dir=max_crypto_dir,
                 overflow_cap=overflow_cap,
-                user_max_positions=(user.max_positions or 7),
+                user_max_positions=_max_pos_limit,
                 total_open_positions=total_pos,
             )
             if not slot_eval["allowed"]:
@@ -2167,29 +2190,27 @@ def _execute_for_user(user: User, signal: dict):
             return
 
         # [NEW v6.11] Tính hệ số co khối lượng theo tin tức vĩ mô / Fed Rate / Monday Range Rule / Knife-Catch
-        size_mult_combined = 1.0
+        # Không nhân chồng nhiều lớp phạt cùng lúc — lấy mức giảm mạnh nhất (sàn 0.70x) rồi áp dụng overflow riêng.
+        context_penalties = []
+        context_boost = 1.0
         tsz_root = signal.get("traderssz", {}) or {}
         tsz_setup = tsz_root.get("setup", {}) or {}
         htf_meta = tsz_root.get("htf_opens_and_ranges", {}) or {}
         monday_mult = float(htf_meta.get("monday_size_mult", 1.0) or 1.0)
         if monday_mult < 1.0:
-            size_mult_combined *= monday_mult
+            context_penalties.append(monday_mult)
             log.info("📅 [MONDAY RANGE RULE] %s: Đang tạo biên Thứ Hai -> điều chỉnh size x%.2f", sym, monday_mult)
 
         inter_mult = float(tsz_setup.get("intermarket_size_mult", 1.0) or 1.0)
         if inter_mult < 1.0:
-            size_mult_combined *= inter_mult
+            context_penalties.append(inter_mult)
             log.info("⚖️ [KNIFE-CATCH / INTERMARKET] %s: Ngược sóng HTF/Macro -> giảm size bảo thủ x%.2f", sym, inter_mult)
-
-        if crypto_overflow_mult < 1.0:
-            size_mult_combined *= crypto_overflow_mult
-            log.info("⚡ [CRYPTO OVERFLOW SIZING] %s: Áp dụng size x%.2f cho slot Crypto A+ mở rộng.", sym, crypto_overflow_mult)
 
         news_risk = signal.get("news_risk", {}) or {}
         if news_risk.get("active"):
             size_m = max(0.75, float(news_risk.get("size_mult", 1.0)))
             if size_m < 0.99:
-                size_mult_combined *= size_m
+                context_penalties.append(size_m)
                 log.warning("📰 %s: Đang trong vùng ảnh hưởng tin '%s' -> điều chỉnh khối lượng x%.2f.",
                             sym, news_risk.get("event"), size_m)
 
@@ -2198,12 +2219,19 @@ def _execute_for_user(user: User, signal: dict):
             from analyzer.macro_analyzer import get_macro_market_context
             m_ctx = get_macro_market_context()
             fed_size = float(m_ctx.get("fed_size_mult", 1.0))
-            if fed_size != 1.0:
-                size_mult_combined *= fed_size
+            if fed_size < 0.99:
+                context_penalties.append(fed_size)
                 log.info("💵 [FED RATE SIZING] %s: Hệ số vĩ mô x%.2f (Fed: %s | Cut Prob: %.1f%%)",
                          sym, fed_size, m_ctx.get("fed_stance"), m_ctx.get("fed_rate_cut_prob", 50))
+            elif fed_size > 1.01:
+                context_boost = min(1.15, fed_size)
         except Exception as ex_m_size:
             log.debug("Lỗi tính Fed size: %s", ex_m_size)
+
+        context_mult = max(0.70, min(context_penalties)) if context_penalties else context_boost
+        if crypto_overflow_mult < 1.0:
+            log.info("⚡ [CRYPTO OVERFLOW SIZING] %s: Áp dụng size x%.2f cho slot Crypto A+ mở rộng.", sym, crypto_overflow_mult)
+        size_mult_combined = context_mult * crypto_overflow_mult
 
         # ══════════════════════════════════════════════════════════
         # [M5 SCALPING] QUẢN LÝ VỐN, CHỐNG CHÁY & MỤC TIÊU NGÀY ($20 - $50 USD)
@@ -2283,8 +2311,8 @@ def _execute_for_user(user: User, signal: dict):
         )
         risk_pct_cap = (risk_amt / user.capital * 100.0) if user.capital > 0 else 0.0
         log.info(
-            "💰 [ORDER SIZING] User %s | %s %s: Margin=$%.2f | Risk=$%.2f (%.2f%% vốn) | Qty=%.4f | Lev=%dx | Setup=%s | Open=%d/7",
-            user.telegram_id, direction, sym, req_margin, risk_amt, risk_pct_cap, qty, effective_leverage, sig_setup_type or "PA", total_pos
+            "💰 [ORDER SIZING] User %s | %s %s: Margin=$%.2f | Risk=$%.2f (%.2f%% vốn) | Qty=%.4f | Lev=%dx | Setup=%s | Open=%d/%d",
+            user.telegram_id, direction, sym, req_margin, risk_amt, risk_pct_cap, qty, effective_leverage, sig_setup_type or "PA", total_pos, _max_pos_limit
         )
 
         if qty <= 0:
@@ -2592,28 +2620,28 @@ def _run_one_time_traderssz_reset():
         )
 
 
-def _ensure_max_positions_limit(min_positions: int = 7):
-    """Nâng giới hạn tổng vị thế tối đa của toàn bộ user hiện có lên tối thiểu min_positions (7 lệnh)."""
+def _ensure_max_positions_limit(target_positions: int = 5):
+    """Đồng bộ giới hạn tổng vị thế tối đa của toàn bộ user về tối đa target_positions (5 lệnh)."""
     db = SessionLocal()
     try:
         users_to_update = db.query(User).filter(
-            (User.max_positions == None) | (User.max_positions < min_positions)
+            (User.max_positions == None) | (User.max_positions <= 0) | (User.max_positions > target_positions)
         ).all()
         if users_to_update:
             for u in users_to_update:
-                u.max_positions = min_positions
+                u.max_positions = target_positions
             db.commit()
-            log.info("📈 Đã nâng tổng vị thế tối đa lên %d lệnh cho %d user.", min_positions, len(users_to_update))
+            log.info("📉 Đã cập nhật tổng vị thế tối đa về %d lệnh cho %d user.", target_positions, len(users_to_update))
     except Exception as e:
         db.rollback()
-        log.warning("⚠️ Lỗi nâng max_positions khi khởi động: %s", e)
+        log.warning("⚠️ Lỗi cập nhật max_positions khi khởi động: %s", e)
     finally:
         db.close()
 
 
 @app.on_event("startup")
 async def startup_event():
-    _ensure_max_positions_limit(7)
+    _ensure_max_positions_limit(5)
     _run_one_time_traderssz_reset()
     threading.Thread(target=run_signal_bot,         daemon=True, name="signal-bot").start()
     threading.Thread(target=run_trade_worker,       daemon=True, name="trade-worker").start()

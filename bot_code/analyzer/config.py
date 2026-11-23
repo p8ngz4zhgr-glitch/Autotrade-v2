@@ -30,16 +30,16 @@ class Config:
         self.RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "") or os.getenv("APP_URL", "")
         self.ADMIN_SECRET        = os.getenv("ADMIN_SECRET", "admin123")
 
-        # ── Cấu hình Quản trị rủi ro & Phân bổ vốn linh động (7 vị thế tối đa) ──
+        # ── Cấu hình Quản trị rủi ro & Phân bổ vốn cô đặc (5 vị thế tối đa) ──
         self.M5_SCALP_MODE            = os.getenv("M5_SCALP_MODE", "true").lower() == "true"
         self.DAILY_PROFIT_TARGET_USD  = float(os.getenv("DAILY_PROFIT_TARGET_USD", "30.0"))
         self.DAILY_MAX_LOSS_USD       = float(os.getenv("DAILY_MAX_LOSS_USD", "15.0"))
         self.DAILY_MAX_LOSS_PCT       = float(os.getenv("DAILY_MAX_LOSS_PCT", "3.5"))
-        self.MAX_RISK_PER_TRADE_PCT   = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.25"))
+        self.MAX_RISK_PER_TRADE_PCT   = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.80"))
         self.MAX_SAFE_LEVERAGE        = int(os.getenv("MAX_SAFE_LEVERAGE", "20"))
         self.MIN_SAFE_LEVERAGE        = int(os.getenv("MIN_SAFE_LEVERAGE", "10"))
         self.PRECIOUS_METALS_LEVERAGE = int(os.getenv("PRECIOUS_METALS_LEVERAGE", "50"))
-        self.MAX_SINGLE_MARGIN_RATIO  = float(os.getenv("MAX_SINGLE_MARGIN_RATIO", "0.14"))
+        self.MAX_SINGLE_MARGIN_RATIO  = float(os.getenv("MAX_SINGLE_MARGIN_RATIO", "0.20"))
         self.ORDER_MARGIN_MIN_USD     = float(os.getenv("ORDER_MARGIN_MIN_USD", "0.0"))
         self.ORDER_MARGIN_MAX_USD     = float(os.getenv("ORDER_MARGIN_MAX_USD", "0.0"))
         self.DYNAMIC_LEVERAGE_ENABLED = os.getenv("DYNAMIC_LEVERAGE_ENABLED", "true").lower() == "true"

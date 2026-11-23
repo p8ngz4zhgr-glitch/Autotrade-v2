@@ -108,9 +108,9 @@ class SignalBot:
         self._closed_notified = set()
 
         self._pushed_signals: dict[str, float] = {}
-        self._push_cooldown = 300
+        self._push_cooldown = int(os.environ.get("PUSH_COOLDOWN_SEC", "180"))
         self._pushed_setup_sigs: dict[str, float] = {}
-        self._setup_sig_cooldown = 2700
+        self._setup_sig_cooldown = int(os.environ.get("SETUP_SIG_COOLDOWN_SEC", "300"))
 
         redis_url = (os.environ.get("REDIS_URL") or "").strip()
         self.redis_client = None
