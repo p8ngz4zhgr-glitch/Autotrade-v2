@@ -258,9 +258,9 @@ class SignalEngine:
                 }
 
         # 3. Chạy Pure TraderSZ Engine (Opens + Ranges + 50% EQ + Deviation/SFP + Clean Pools + Intermarket Confluence)
-        base_sl_buf = float(getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0065) or 0.0065)
+        base_sl_buf = float(getattr(cfg, "TRADERSSZ_SL_BUFFER_PCT", 0.0055) or 0.0055)
         fed_sl_mult = float((macro_ctx or {}).get("fed_sl_buffer", 1.0) or 1.0)
-        eff_sl_buf = min(0.0100, round(base_sl_buf * max(1.0, fed_sl_mult), 5))
+        eff_sl_buf = min(0.0090, round(base_sl_buf * max(1.0, fed_sl_mult), 5))
         traderssz_res = TradersszFramework.evaluate_traderssz_complete(
             klines_by_tf=klines_by_tf,
             current_price=price,
@@ -369,8 +369,10 @@ class SignalEngine:
             rl = float(htf_data.get("range_low", price * 0.98))
             eq = float(htf_data.get("eq_50", price))
             atr_pct_ref = (atr_val / price) if (price > 0 and atr_val > 0) else 0.012
-            wait_buf = max(eff_sl_buf, min(0.0150, atr_pct_ref * 0.65))
-            min_wait_sl_pct = max(0.0135 if atype == "CRYPTO" else 0.0075, min(0.0240, atr_pct_ref * 1.15))
+            rng_w_pct = ((rh - rl) / rl) if rh > rl > 0 else 0.06
+            wait_buf = max(eff_sl_buf, min(0.0100, atr_pct_ref * 0.50))
+            raw_min_sl = max(0.0105 if atype == "CRYPTO" else 0.0065, min(0.0170, atr_pct_ref * 0.85))
+            min_wait_sl_pct = min(raw_min_sl, max(0.0100 if atype == "CRYPTO" else 0.0065, rng_w_pct * 0.34))
             if htf_data.get("market_zone") == "PREMIUM":
                 sl = round(max(rh * (1.0 + wait_buf), price * (1.0 + min_wait_sl_pct)), 4)
                 tp1 = round(eq, 4)

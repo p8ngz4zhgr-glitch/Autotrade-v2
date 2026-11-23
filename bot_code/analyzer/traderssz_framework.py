@@ -903,8 +903,9 @@ class TradersszFramework:
         asset_type: str = "CRYPTO",
         h1_atr_pct: float = 0.0,
         is_breakout: bool = False,
+        range_width_pct: float = 0.0,
     ) -> float:
-        """Tính sàn SL tối thiểu theo ATR thực tế (ưu tiên neo tối thiểu theo ATR 1H để tránh bị râu 15m quét)."""
+        """Tính sàn SL tối thiểu theo ATR thực tế, tự cân đối theo độ rộng Range để không bóp nghẹt R:R trên Range hẹp."""
         bar_atr_pct = 0.0
         if klines and len(klines.get("close", [])) >= 3:
             highs = klines["high"]
@@ -917,17 +918,18 @@ class TradersszFramework:
             ]
             if recent_bars:
                 bar_atr_pct = sum(recent_bars) / len(recent_bars)
-        ref_atr = max(bar_atr_pct, float(h1_atr_pct or 0.0))
-        if ref_atr <= 0:
-            ref_atr = 0.0110 if str(asset_type or "CRYPTO").upper() == "CRYPTO" else 0.0065
+        ref_atr = max(bar_atr_pct, float(h1_atr_pct or 0.0) * 0.85)
         is_crypto = str(asset_type or "CRYPTO").upper() == "CRYPTO"
+        if ref_atr <= 0:
+            ref_atr = 0.0105 if is_crypto else 0.0065
+        abs_min = 0.0100 if is_crypto else 0.0065
         if is_breakout:
-            if is_crypto:
-                return max(0.0115, min(0.0210, ref_atr * 1.00))
-            return max(0.0070, min(0.0145, ref_atr * 0.90))
-        if is_crypto:
-            return max(0.0135, min(0.0250, ref_atr * 1.15))
-        return max(0.0075, min(0.0160, ref_atr * 1.00))
+            raw_floor = max(0.0095, min(0.0160, ref_atr * 0.80)) if is_crypto else max(0.0065, min(0.0130, ref_atr * 0.80))
+        else:
+            raw_floor = max(0.0105, min(0.0170, ref_atr * 0.85)) if is_crypto else max(0.0065, min(0.0135, ref_atr * 0.85))
+        if range_width_pct and range_width_pct > 0:
+            raw_floor = min(raw_floor, max(abs_min, range_width_pct * 0.34))
+        return raw_floor
 
     @staticmethod
     def _scan_tf_deviation(
@@ -935,7 +937,7 @@ class TradersszFramework:
         klines: Optional[Dict[str, List[float]]],
         range_obj: Dict[str, Any],
         current_price: float,
-        sl_buffer_pct: float = 0.0065,
+        sl_buffer_pct: float = 0.0055,
         min_rr: float = 2.0,
         asset_type: str = "CRYPTO",
         h1_atr_pct: float = 0.0,
@@ -977,12 +979,14 @@ class TradersszFramework:
         # CHỈ dùng các nến ĐÃ ĐÓNG CỬA (idx = -2 là nến vừa đóng gần nhất, idx = -3 là nến trước đó nếu -2 giữ vững trong Range)
         # Tuyệt đối KHÔNG dùng nến [-1] đang chạy dở để tránh tín hiệu nhảy/đảo chiều giữa nến.
         avg_vol = sum(vols[-21:-1]) / max(1, len(vols[-21:-1])) if len(vols) >= 6 else 1.0
-        # Tính sàn SL tối thiểu dựa trên max(ATR khung hiện tại, ATR 1H) để không đặt SL mỏng hơn râu quét thanh khoản
+        # Tính sàn SL tối thiểu dựa trên ATR và cân đối với độ rộng Range để bảo toàn R:R
+        rng_width_ratio = (rh - rl) / rl if rl > 0 else 0.0
         min_sl_floor = TradersszFramework._compute_min_sl_floor(
             klines=klines,
             asset_type=asset_type,
             h1_atr_pct=h1_atr_pct,
             is_breakout=False,
+            range_width_pct=rng_width_ratio,
         )
 
         candidates: List[Dict[str, Any]] = []
@@ -1035,8 +1039,10 @@ class TradersszFramework:
                     eval_entry = round(rh * 0.9985, 4) if use_limit_retest else round(current_price, 4)
                     entry_mode = "LIMIT_RETEST" if use_limit_retest else "MARKET"
 
+                    sl_floored = False
                     if (sl_price - eval_entry) / eval_entry < min_sl_floor:
                         sl_price = round(eval_entry * (1.0 + min_sl_floor), 4)
+                        sl_floored = True
                     if eval_entry >= sl_price:
                         continue
 
@@ -1057,7 +1063,9 @@ class TradersszFramework:
 
                     rr_tp1 = reward_tp1 / risk
                     rr_tp2 = reward_tp2 / risk
-                    if rr_tp2 < min_rr or rr_tp1 < 0.85:
+                    eff_min_rr = max(1.65, min_rr - 0.30) if (sl_floored and rng_width_ratio < 0.065) else min_rr
+                    eff_min_tp1_rr = 0.72 if (sl_floored and rng_width_ratio < 0.065) else 0.85
+                    if rr_tp2 < eff_min_rr or rr_tp1 < eff_min_tp1_rr:
                         continue
 
                     setup_type = "DEVIATION_RETURN_TO_RANGE" if is_return_to_range else "SFP_WICK_REJECTION"
@@ -1136,8 +1144,10 @@ class TradersszFramework:
                     eval_entry = round(rl * 1.0015, 4) if use_limit_retest else round(current_price, 4)
                     entry_mode = "LIMIT_RETEST" if use_limit_retest else "MARKET"
 
+                    sl_floored = False
                     if (eval_entry - sl_price) / eval_entry < min_sl_floor:
                         sl_price = round(eval_entry * (1.0 - min_sl_floor), 4)
+                        sl_floored = True
                     if eval_entry <= sl_price:
                         continue
 
@@ -1158,7 +1168,9 @@ class TradersszFramework:
 
                     rr_tp1 = reward_tp1 / risk
                     rr_tp2 = reward_tp2 / risk
-                    if rr_tp2 < min_rr or rr_tp1 < 0.85:
+                    eff_min_rr = max(1.65, min_rr - 0.30) if (sl_floored and rng_width_ratio < 0.065) else min_rr
+                    eff_min_tp1_rr = 0.72 if (sl_floored and rng_width_ratio < 0.065) else 0.85
+                    if rr_tp2 < eff_min_rr or rr_tp1 < eff_min_tp1_rr:
                         continue
 
                     setup_type = "DEVIATION_RETURN_TO_RANGE" if is_return_to_range else "SFP_WICK_REJECTION"
@@ -1813,10 +1825,10 @@ class TradersszFramework:
         unswept_pools = htf_data.get("unswept_clean_pools", {}) or {}
         monday_rule_state = htf_data.get("monday_rule_state", "STANDARD")
 
-        is_outside_above = current_price > primary_rh * 1.0020
-        is_outside_below = current_price < primary_rl * 0.9980
-        is_rh_strip = (primary_rh * 0.9995 <= current_price <= primary_rh * 1.0020)
-        is_rl_strip = (primary_rl * 0.9980 <= current_price <= primary_rl * 1.0005)
+        is_outside_above = current_price > primary_rh * 1.0012
+        is_outside_below = current_price < primary_rl * 0.9988
+        is_rh_strip = (primary_rh * 0.9997 <= current_price <= primary_rh * 1.0012)
+        is_rl_strip = (primary_rl * 0.9988 <= current_price <= primary_rl * 1.0003)
 
         setups: List[Dict[str, Any]] = []
         clean_pool_blocked: Optional[str] = None
